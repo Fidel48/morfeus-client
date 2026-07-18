@@ -184,9 +184,9 @@ pub async fn get_audio_devices() -> Result<Vec<String>, String> {
     Ok(devices)
 }
 
-// ─── TTS via Windows SAPI (PowerShell) ──────────────────────────────────────
+// ─── Cross-Platform TTS ──────────────────────────────────────────────────────
 
-/// Speak text aloud using Windows SAPI via PowerShell
+#[cfg(target_os = "windows")]
 #[tauri::command]
 pub async fn speak_text(text: String, rate: Option<f64>) -> Result<(), String> {
     let rate_val = rate.unwrap_or(1.0);
@@ -206,7 +206,21 @@ pub async fn speak_text(text: String, rate: Option<f64>) -> Result<(), String> {
     Ok(())
 }
 
-/// List all installed Windows SAPI voices
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn speak_text(text: String, rate: Option<f64>) -> Result<(), String> {
+    let rate_val = rate.unwrap_or(1.0);
+    let wpm = (175.0 * rate_val) as i32;
+    
+    tokio::process::Command::new("say")
+        .args(["-r", &wpm.to_string(), &text])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 pub async fn get_voices() -> Result<Vec<String>, String> {
     let script = r#"Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo.Name }"#;
@@ -227,7 +241,26 @@ pub async fn get_voices() -> Result<Vec<String>, String> {
     Ok(voices)
 }
 
-/// Stop any ongoing TTS speech
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn get_voices() -> Result<Vec<String>, String> {
+    let output = tokio::process::Command::new("say")
+        .arg("-v")
+        .arg("?")
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let voices: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| line.split_whitespace().next().map(|s| s.to_string()))
+        .collect();
+        
+    Ok(voices)
+}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 pub async fn stop_speaking() -> Result<(), String> {
     tokio::process::Command::new("powershell")
@@ -237,6 +270,16 @@ pub async fn stop_speaking() -> Result<(), String> {
             "-Command",
             r#"Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.SpeakAsyncCancelAll()"#,
         ])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn stop_speaking() -> Result<(), String> {
+    tokio::process::Command::new("killall")
+        .arg("say")
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
