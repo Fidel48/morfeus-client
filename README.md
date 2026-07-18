@@ -39,6 +39,12 @@ Most local AI interfaces (like LM Studio's built-in chat or basic web UIs) are r
 * **AI Protocol:** OpenAI-compatible REST streaming. Connects flawlessly to local inference servers.
 * **CI/CD Automation:** Fully automated GitHub Actions pipeline builds the `.exe` and `.msi` installers and publishes Over-The-Air (OTA) updates using Tauri Auto-Updater.
 
+## 💖 Support the Project
+If you love Morfeus Client and want to support its ongoing development, consider making a donation! Your support helps cover the time and effort it takes to maintain and improve this open-source tool.
+
+<a href="YOUR_PATREON_LINK_HERE" target="_blank"><img src="https://img.shields.io/badge/Patreon-F96854?style=for-the-badge&logo=patreon&logoColor=white" alt="Support on Patreon"></a>
+<a href="YOUR_BUY_ME_A_COFFEE_LINK_HERE" target="_blank"><img src="https://img.shields.io/badge/Buy_Me_A_Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee"></a>
+
 ## 5. Getting Started
 
 ### Recommended IDE Setup
