@@ -1,0 +1,26 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Dark Background -->
+  <rect width="1024" height="1024" rx="224" fill="#09090b" />
+  
+  <!-- Subtle Neon Glow -->
+  <circle cx="512" cy="512" r="350" fill="#ef4444" opacity="0.15" />
+  <circle cx="512" cy="512" r="220" fill="#ef4444" opacity="0.25" />
+
+  <!-- 45-Degree Rotated Pill -->
+  <g transform="translate(512, 512) rotate(45) translate(-512, -512)">
+    <!-- Base (Darker Red / Shadow) -->
+    <rect x="362" y="212" width="300" height="600" rx="150" fill="#7f1d1d" />
+    
+    <!-- Top Half (Bright Red) -->
+    <path d="M 362 512 L 362 362 C 362 279.16 429.16 212 512 212 C 594.84 212 662 279.16 662 362 L 662 512 Z" fill="#ef4444" />
+    
+    <!-- Bottom Half (Deep Red) -->
+    <path d="M 362 512 L 362 662 C 362 744.84 429.16 812 512 812 C 594.84 812 662 744.84 662 662 L 662 512 Z" fill="#b91c1c" />
+    
+    <!-- Middle seam line -->
+    <line x1="362" y1="512" x2="662" y2="512" stroke="#450a0a" stroke-width="8" />
+
+    <!-- Glassy Reflection -->
+    <rect x="410" y="250" width="35" height="250" rx="17.5" fill="#ffffff" opacity="0.3" />
+  </g>
+</svg>
