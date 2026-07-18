@@ -41,6 +41,17 @@ Most local AI interfaces (like LM Studio's built-in chat or basic web UIs) are r
 
 ## 5. Getting Started
 
+### 🍎 Installing on macOS
+Because Morfeus Client is not signed with a paid Apple Developer certificate, macOS Gatekeeper may display a warning that the app is "damaged" and cannot be opened. This is a standard Apple security measure for free open-source apps. To bypass this:
+
+1. Drag **Morfeus Client.app** from the `.dmg` into your Mac's **Applications** folder.
+2. Open the **Terminal** app on your Mac (`Command + Space` and type "Terminal").
+3. Copy and paste this exact command and press Enter:
+   ```bash
+   xattr -cr "/Applications/Morfeus Client.app"
+   ```
+4. Now, double-click Morfeus Client in your Applications folder and it will open perfectly!
+
 ### Recommended IDE Setup
 - [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
 
