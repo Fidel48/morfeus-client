@@ -9,6 +9,15 @@
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk0RUY3RDQwM0QzM0E0M0YKUldRL3BETTlRSDN2bEgzeWRUa1hEeFhYc084QVFxZWl4a1NCUzBrNXhDMG9VOFdWUkg0YlpCMnUK",
+      "endpoints": [
+        "https://github.com/Fidel48/morfeus-client/releases/latest/download/latest.json",
+        "https://github.com/Fidel48/morfeus-client/releases/latest/download/latest.json"
+      ]
+    }
+  },
   "app": {
     "windows": [
       {

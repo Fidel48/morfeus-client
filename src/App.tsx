@@ -7,6 +7,9 @@ import { SettingsModal } from '@/components/settings/SettingsModal';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { tauriApi } from '@/lib/tauri';
+import { check } from '@tauri-apps/plugin-updater';
+import { ask } from '@tauri-apps/plugin-dialog';
+import { relaunch } from '@tauri-apps/plugin-process';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -34,6 +37,23 @@ const AppContent: React.FC = () => {
     tauriApi.getVoices()
       .then(setAvailableVoices)
       .catch(() => {});
+
+    // Check for OTA updates automatically
+    if (tauriApi.isDesktopApp()) {
+      check().then(async (update) => {
+        if (update) {
+          const yes = await ask(
+            `Update v${update.version} is available! (Released: ${update.date})\n\nRelease notes:\n${update.body}\n\nWould you like to install it now?`,
+            { title: 'Update Available', kind: 'info' }
+          );
+          
+          if (yes) {
+            await update.downloadAndInstall();
+            await relaunch();
+          }
+        }
+      }).catch(console.error);
+    }
 
     // Keyboard shortcut: Ctrl+\ to toggle right panel
     const handleKeyDown = (e: KeyboardEvent) => {
