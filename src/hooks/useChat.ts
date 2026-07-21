@@ -73,7 +73,9 @@ export function useChat() {
       addMessage(userMessage);
 
       // Update conversation title from first message
-      const currentMessages = useChatStore.getState().messages;
+      const allMessages = useChatStore.getState().messages;
+      const currentMessages = allMessages.filter(m => m.conversation_id === convId);
+      
       if (currentMessages.length <= 1) {
         updateConversation(convId, {
           title: userDisplayContent.slice(0, 60) + (userDisplayContent.length > 60 ? '…' : ''),
@@ -321,7 +323,7 @@ export function useChat() {
   );
 
   return {
-    messages,
+    messages: messages.filter(m => m.conversation_id === activeConversationId),
     isStreaming,
     streamingContent,
     chatStatus,

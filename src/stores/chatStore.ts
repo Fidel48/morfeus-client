@@ -66,7 +66,7 @@ export const useChatStore = create<ChatStore>()(
           conversations: state.conversations.filter((c) => c.id !== id),
           activeConversationId:
             state.activeConversationId === id ? null : state.activeConversationId,
-          messages: state.activeConversationId === id ? [] : state.messages,
+          messages: state.messages.filter((m) => m.conversation_id !== id),
         })),
 
       setActiveConversation: (id) => set({ activeConversationId: id }),
@@ -160,7 +160,6 @@ export const useChatStore = create<ChatStore>()(
         set({
           conversations: [conversation, ...get().conversations],
           activeConversationId: conversation.id,
-          messages: [],
           streamingContent: '',
           streamingToolCalls: [],
           chatStatus: 'idle',
