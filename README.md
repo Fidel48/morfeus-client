@@ -2,6 +2,7 @@
   <img src="app-icon.svg" width="128" height="128" alt="Morfeus Logo">
   <h1>Morfeus Client</h1>
   <p><strong>The Ultimate Local-First AI Assistant</strong></p>
+  <p>⚠️ <em>Note: This application is currently in Beta / Work In Progress. Features and stability may vary!</em></p>
 </div>
 
 ---
