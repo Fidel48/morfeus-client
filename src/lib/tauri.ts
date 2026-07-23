@@ -159,6 +159,11 @@ export const tauriApi = {
     return tauriInvoke('find_project_rules', { workspacePath });
   },
 
+  /** Fetch the full transcript of a YouTube video by URL */
+  async readYoutubeTranscript(url: string): Promise<string> {
+    return tauriInvoke<string>('read_youtube_transcript', { url });
+  },
+
   /** Start a native Language Server */
   async lspStartServer(languageId: string, command: string, args: string[], workspaceRoot?: string): Promise<void> {
     return tauriInvoke('lsp_start_server', { languageId, command, args, workspaceRoot });

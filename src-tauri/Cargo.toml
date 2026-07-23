@@ -51,6 +51,7 @@ libc = "0.2.186"
 async-lsp = { version = "0.2.4", features = ["tokio", "stdio"] }
 lsp-types = "0.97.0"
 tokio-util = { version = "0.7.19", features = ["compat"] }
+yt-transcript-rs = "0.1.8"
 [profile.release]
 panic = "abort"
 codegen-units = 1

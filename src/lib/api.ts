@@ -106,6 +106,23 @@ export const WEB_TOOLS: ToolDefinition[] = [
       }
     }
   },
+  {
+    type: 'function',
+    function: {
+      name: 'read_youtube_video',
+      description: 'Fetch the full spoken transcript of a YouTube video by its URL. Use this whenever the user pastes a YouTube link and wants a summary, key facts, or any information about the video content.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: 'The full YouTube video URL (e.g. https://www.youtube.com/watch?v=XXXXX or https://youtu.be/XXXXX)',
+          },
+        },
+        required: ['url'],
+      },
+    },
+  },
 ];
 
 // ─── Model list ──────────────────────────────────────────────────────────────

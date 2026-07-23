@@ -236,6 +236,8 @@ export function useChat() {
                 } else if (tc.function.name === 'read_webpage') {
                   const scrapeRes = await tauriApi.fetchWebpage(args.url);
                   result = scrapeRes;
+                } else if (tc.function.name === 'read_youtube_video') {
+                  result = await tauriApi.readYoutubeTranscript(args.url);
                 } else if (tc.function.name === 'lsp_start_server') {
                   await tauriApi.lspStartServer(args.languageId, args.command, args.args, args.workspaceRoot);
                   result = `LSP server started successfully for language ID: ${args.languageId}`;

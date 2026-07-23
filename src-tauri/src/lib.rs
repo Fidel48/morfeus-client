@@ -58,6 +58,8 @@ pub fn run() {
             // Files
             commands::files::parse_local_file,
             commands::rules::find_project_rules,
+            // YouTube
+            commands::youtube::read_youtube_transcript,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Morfeus");
