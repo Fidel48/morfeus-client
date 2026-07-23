@@ -5,7 +5,7 @@ import { useVoiceStore } from '@/stores/voiceStore';
 import { streamChat } from '@/lib/api';
 import { tauriApi } from '@/lib/tauri';
 import { generateId, extractTextContent } from '@/lib/utils';
-import { Message, ContentPart } from '@/types';
+import { Message, ContentPart, ToolDefinition } from '@/types';
 
 export function useChat() {
   const {

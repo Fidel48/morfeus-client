@@ -1,6 +1,6 @@
 [package]
 name = "morfeus"
-version = "0.1.7"
+version = "0.1.8"
 description = "Morfeus — Local-First LLM Desktop Client"
 authors = ["Morfeus"]
 edition = "2021"
