@@ -58,6 +58,10 @@ export const tauriApi = {
     return tauriInvoke<string[]>('get_audio_devices');
   },
 
+  async transcribeNative(base64Wav: string): Promise<string> {
+    return tauriInvoke<string>('transcribe_native', { base64Wav });
+  },
+
   async speakText(text: string, rate: number = 1.0, voiceId?: string): Promise<void> {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       const utterance = new SpeechSynthesisUtterance(text);
@@ -148,6 +152,36 @@ export const tauriApi = {
   /** Parse a plain text / code / csv file via Rust backend */
   async parseLocalFile(path: string): Promise<string> {
     return tauriInvoke<string>('parse_local_file', { path });
+  },
+
+  /** Finds project level rules (.morfeusrules, .cursorrules) given a workspace path */
+  async findProjectRules(workspacePath: string): Promise<Array<{ file_name: string, path: string, content: string }>> {
+    return tauriInvoke('find_project_rules', { workspacePath });
+  },
+
+  /** Start a native Language Server */
+  async lspStartServer(languageId: string, command: string, args: string[], workspaceRoot?: string): Promise<void> {
+    return tauriInvoke('lsp_start_server', { languageId, command, args, workspaceRoot });
+  },
+
+  /** Execute a Go To Definition request on an active LSP */
+  async lspGotoDefinition(languageId: string, filePath: string, line: number, col: number): Promise<any> {
+    return tauriInvoke('lsp_goto_definition', { languageId, filePath, line, col });
+  },
+
+  /** Start an MCP server */
+  async mcpStartServer(id: string, command: string, args: string[], env: Record<string, string>): Promise<void> {
+    return tauriInvoke('mcp_start_server', { id, command, args, env });
+  },
+
+  /** List tools from an MCP server */
+  async mcpListTools(id: string): Promise<any> {
+    return tauriInvoke('mcp_list_tools', { id });
+  },
+
+  /** Call a tool on an MCP server */
+  async mcpCallTool(id: string, toolName: string, argumentsObj: any): Promise<any> {
+    return tauriInvoke('mcp_call_tool', { id, toolName, arguments: argumentsObj });
   },
 
   /** Whether we're running inside the Tauri desktop app */

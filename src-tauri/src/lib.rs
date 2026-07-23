@@ -1,5 +1,7 @@
 pub mod models;
 pub mod commands;
+pub mod lsp;
+pub mod mcp;
 
 use commands::voice::RecordingBuffer;
 use commands::db::get_migrations;
@@ -24,7 +26,16 @@ pub fn run() {
                 .build(),
         )
         .manage(RecordingBuffer::default())
+        .manage(lsp::LspState::default())
+        .manage(mcp::McpState::default())
         .invoke_handler(tauri::generate_handler![
+            // MCP
+            mcp::mcp_start_server,
+            mcp::mcp_list_tools,
+            mcp::mcp_call_tool,
+            // LSP
+            lsp::lsp_start_server,
+            lsp::lsp_goto_definition,
             // Settings
             commands::settings::get_settings,
             commands::settings::save_settings,
@@ -37,6 +48,7 @@ pub fn run() {
             commands::voice::stop_recording,
             commands::voice::check_microphone,
             commands::voice::get_audio_devices,
+            commands::voice::transcribe_native,
             commands::voice::speak_text,
             commands::voice::get_voices,
             commands::voice::stop_speaking,
@@ -45,6 +57,7 @@ pub fn run() {
             commands::web::fetch_webpage,
             // Files
             commands::files::parse_local_file,
+            commands::rules::find_project_rules,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Morfeus");

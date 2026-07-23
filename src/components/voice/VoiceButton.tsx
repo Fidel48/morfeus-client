@@ -4,6 +4,7 @@ import { Mic, MicOff, Square } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { tauriApi } from '@/lib/tauri';
 
 interface VoiceButtonProps {
   onTranscript: (text: string) => void;
@@ -18,8 +19,15 @@ declare global {
   }
 }
 
-const getSpeechRecognition = () =>
-  typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
+const getSpeechRecognition = () => {
+  if (typeof window === 'undefined') return false;
+  // macOS WebKit crashes if we try to use webkitSpeechRecognition directly.
+  // We MUST use the native fallback via Rust + MediaRecorder.
+  const isMacOS = /Mac|iPhone|iPad|iPod/.test(navigator.platform) || 
+                  (navigator.userAgent.includes('Mac') && !navigator.userAgent.includes('Chrome'));
+  if (isMacOS) return false;
+  return window.SpeechRecognition || window.webkitSpeechRecognition;
+};
 
 export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSend, className }) => {
   const { status, setStatus, micAvailable, waveformData, updateWaveform } = useVoiceStore();
@@ -30,24 +38,97 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
 
   const isHandlingClick = useRef(false);
   const recognitionRef = useRef<any>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const waveformIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const usingNativeRef = useRef(false);
 
-  // Use refs to always have the latest callbacks — avoids stale closures entirely
   const onTranscriptRef = useRef(onTranscript);
   const onAutoSendRef = useRef(onAutoSend);
   React.useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
   React.useEffect(() => { onAutoSendRef.current = onAutoSend; }, [onAutoSend]);
 
-  const startRecording = useCallback(() => {
-    const SR = getSpeechRecognition();
-    if (!SR) {
-      alert('Your browser does not support speech recognition.');
-      return;
-    }
+  // ─── Native Tauri recording (macOS fallback using MediaRecorder) ──────────
+  const startNativeRecording = useCallback(async () => {
     if (!micAvailable || status !== 'idle') return;
 
-    // ── Create a FRESH instance every session — no stale closures ──────────
+    try {
+      usingNativeRef.current = true;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.start();
+      setStatus('recording');
+
+      waveformIntervalRef.current = setInterval(() => {
+        updateWaveform(Array.from({ length: 20 }, () => Math.random()));
+      }, 80);
+    } catch (err: any) {
+      console.error('MediaRecorder failed to start:', err);
+      usingNativeRef.current = false;
+      setStatus('idle');
+    }
+  }, [micAvailable, status, setStatus, updateWaveform]);
+
+  const stopNativeRecording = useCallback(async () => {
+    if (status !== 'recording' || !mediaRecorderRef.current) return;
+
+    if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
+    updateWaveform(new Array(20).fill(0));
+
+    setStatus('transcribing');
+
+    try {
+      const mediaRecorder = mediaRecorderRef.current;
+      const audioDataPromise = new Promise<string>((resolve, reject) => {
+        mediaRecorder.onstop = () => {
+          const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/mp4' });
+          const reader = new FileReader();
+          reader.readAsDataURL(audioBlob);
+          reader.onloadend = () => {
+            const base64data = (reader.result as string).split(',')[1];
+            resolve(base64data);
+          };
+          reader.onerror = reject;
+        };
+      });
+
+      mediaRecorder.stop();
+      mediaRecorder.stream.getTracks().forEach(t => t.stop());
+
+      const base64Wav = await audioDataPromise;
+      const text = await tauriApi.transcribeNative(base64Wav);
+
+      if (text.trim()) {
+        onTranscriptRef.current(text.trim());
+        setTimeout(() => {
+          onAutoSendRef.current?.();
+        }, 80);
+      }
+    } catch (err: any) {
+      console.error('Native transcription failed:', err);
+      alert('Transcription error: ' + (err?.message || err));
+    } finally {
+      usingNativeRef.current = false;
+      mediaRecorderRef.current = null;
+      setStatus('idle');
+    }
+  }, [status, setStatus, updateWaveform]);
+
+  // ─── Browser SpeechRecognition (Windows / Chromium) ───────────────────
+  const startBrowserRecording = useCallback(() => {
+    const SR = getSpeechRecognition();
+    if (!SR || !micAvailable || status !== 'idle') return;
+
     const rec = new SR();
     rec.continuous = true;
     rec.interimResults = true;
@@ -55,75 +136,88 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
 
     let fullTranscript = '';
 
-    // Silence detection: stop automatically after 3.5s of no speech
     const resetSilenceTimer = () => {
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = setTimeout(() => {
-        rec.stop();
+        if (recognitionRef.current) recognitionRef.current.stop();
       }, 3500);
     };
 
     rec.onstart = () => {
+      setStatus('recording');
       resetSilenceTimer();
+      waveformIntervalRef.current = setInterval(() => {
+        updateWaveform(Array.from({ length: 20 }, () => Math.random()));
+      }, 80);
     };
 
     rec.onresult = (event: any) => {
-      // Reset silence timer on every new word
       resetSilenceTimer();
-      // Accumulate the entire transcript across all result chunks
-      fullTranscript = Array.from(event.results as SpeechRecognitionResultList)
-        .map((r: SpeechRecognitionResult) => r[0].transcript)
-        .join('');
+      let interimTranscript = '';
+      let finalTranscript = '';
+
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript;
+        } else {
+          interimTranscript += event.results[i][0].transcript;
+        }
+      }
+
+      if (finalTranscript) fullTranscript += (fullTranscript ? ' ' : '') + finalTranscript;
+      
+      const currentText = fullTranscript + (interimTranscript ? ' ' + interimTranscript : '');
+      onTranscriptRef.current(currentText.trim());
     };
 
-    // onend is the ONLY place we dispatch the transcript — guaranteed to fire
+    rec.onerror = (event: any) => {
+      console.error('Speech recognition error:', event.error);
+    };
+
     rec.onend = () => {
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
       updateWaveform(new Array(20).fill(0));
-
-      const text = fullTranscript.trim();
-      if (text) {
-        // 1. Put text into the input box
-        onTranscriptRef.current(text);
-        // 2. Wait 80ms for React state to update, then auto-send
-        setTimeout(() => {
-          onAutoSendRef.current?.();
-        }, 80);
-      }
-
       setStatus('idle');
+      
+      setTimeout(() => {
+        if (fullTranscript.trim()) onAutoSendRef.current?.();
+      }, 100);
     };
 
-    rec.onerror = (e: any) => {
-      console.error('Speech recognition error:', e.error);
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-      if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
-      updateWaveform(new Array(20).fill(0));
-      setStatus('idle');
-    };
-
-    // Store ref and start
-    recognitionRef.current = rec;
-    rec.start();
-
-    setStatus('recording');
-
-    // Animate the waveform bars while recording
-    waveformIntervalRef.current = setInterval(() => {
-      updateWaveform(Array.from({ length: 20 }, () => Math.random()));
-    }, 80);
+    try {
+      rec.start();
+      recognitionRef.current = rec;
+      usingNativeRef.current = false;
+    } catch (e) {
+      console.error('Failed to start recognition:', e);
+    }
   }, [micAvailable, status, setStatus, updateWaveform]);
+
+  const stopBrowserRecording = useCallback(() => {
+    if (status !== 'recording' || !recognitionRef.current) return;
+    recognitionRef.current.stop();
+  }, [status]);
+
+  const startRecording = useCallback(() => {
+    const SR = getSpeechRecognition();
+    if (SR) startBrowserRecording();
+    else startNativeRecording();
+  }, [startBrowserRecording, startNativeRecording]);
 
   const stopRecording = useCallback(() => {
     if (status !== 'recording') return;
-    // Stopping rec fires onend, which handles transcript dispatch
-    recognitionRef.current?.stop();
-  }, [status]);
+    if (usingNativeRef.current) stopNativeRecording();
+    else stopBrowserRecording();
+  }, [status, stopNativeRecording, stopBrowserRecording]);
+
+  // ─── Interaction Handlers ──────────────────────────────────────────────
+
 
   // ─── Interaction Handlers ──────────────────────────────────────────────
 
   const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    console.log('[VoiceButton] handlePointerDown fired. ptt_mode:', settings.ptt_mode);
     if (!settings.ptt_mode) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -143,6 +237,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
   };
 
   const handleClick = (e: React.MouseEvent) => {
+    console.log('[VoiceButton] handleClick fired. ptt_mode:', settings.ptt_mode, 'isRecording:', isRecording);
     // If we are in PTT mode, normal clicks are handled by Pointer events, 
     // but just in case they click super fast, we shouldn't start a permanent recording.
     if (settings.ptt_mode) return;

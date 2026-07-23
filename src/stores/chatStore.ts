@@ -13,6 +13,7 @@ interface ChatStore {
   chatStatus: ChatStatus;
   abortController: AbortController | null;
   rightPanelOpen: boolean;
+  activeMcpServers: string[];
 
   // Actions
   setConversations: (conversations: Conversation[]) => void;
@@ -32,6 +33,7 @@ interface ChatStore {
   stopStreaming: () => void;
   newConversation: () => Conversation;
   toggleRightPanel: () => void;
+  addMcpServer: (id: string) => void;
 }
 
 export const useChatStore = create<ChatStore>()(
@@ -46,6 +48,7 @@ export const useChatStore = create<ChatStore>()(
       chatStatus: 'idle',
       abortController: null,
       rightPanelOpen: false,
+      activeMcpServers: [],
 
       setConversations: (conversations) => set({ conversations }),
       
@@ -168,6 +171,9 @@ export const useChatStore = create<ChatStore>()(
       },
 
       toggleRightPanel: () => set((state) => ({ rightPanelOpen: !state.rightPanelOpen })),
+      addMcpServer: (id) => set((state) => ({ 
+        activeMcpServers: state.activeMcpServers.includes(id) ? state.activeMcpServers : [...state.activeMcpServers, id] 
+      })),
     }),
     {
       name: 'morfeus-chat-storage',

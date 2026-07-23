@@ -104,66 +104,99 @@ export function useChat() {
         finalSystemPrompt += `- State the date of the information (e.g., "As of June 7, 2026, the price is...").\n`;
         finalSystemPrompt += `- Do not hallucinate or guess facts; rely strictly on the data provided by your tools.`;
 
+      const executeChatLoop = async (isInitialUserTurn: boolean = false) => {
         // ─── CONTEXT WINDOW PRUNING ───
         const estimateTokens = (text: string) => Math.ceil(text.length / 4);
         
         // Reserve tokens for system prompt + max generation output
         let currentTokens = estimateTokens(finalSystemPrompt) + settings.max_tokens;
 
-        // Reserve tokens for the NEW user message
-        if (typeof apiContent === 'string') {
-          currentTokens += estimateTokens(apiContent);
-        } else {
-          apiContent.forEach(p => {
-            if (p.type === 'text' && p.text) currentTokens += estimateTokens(p.text);
-            if (p.type === 'image_url') currentTokens += 85; // rough estimate
-          });
-        }
-
-        // Build history from current messages
-        const fullHistory = [...currentMessages].map((m) => ({
-          role: m.role,
-          content: m.content ?? null,
-          tool_calls: m.tool_calls,
-          tool_call_id: m.tool_call_id,
-        }));
-
-        // Traverse backwards and keep messages until we hit the context limit
+        // Build history from current messages in the store (excluding the very last one if it's the initial turn because we handle it specially with apiContent)
+        const allMessages = useChatStore.getState().messages.filter(m => m.conversation_id === convId);
+        
+        // If this is the initial user turn, the last message in store is the user message.
+        // If it's a tool loop, the last messages in store are tool responses.
+        const historyToPrune = [...allMessages];
+        
         const prunedHistory = [];
-        for (let i = fullHistory.length - 1; i >= 0; i--) {
-          const msg = fullHistory[i];
+        for (let i = historyToPrune.length - 1; i >= 0; i--) {
+          const msg = historyToPrune[i];
           let msgTokens = 20; // JSON overhead
-          if (msg.content) msgTokens += estimateTokens(msg.content);
+          
+          // Special handling: if this is the initial turn and we are at the very last message, 
+          // we use the apiContent (which might contain base64 images) for token estimation.
+          if (isInitialUserTurn && i === historyToPrune.length - 1) {
+            if (typeof apiContent === 'string') {
+              msgTokens += estimateTokens(apiContent);
+            } else {
+              apiContent.forEach((p: any) => {
+                if (p.type === 'text' && p.text) msgTokens += estimateTokens(p.text);
+                if (p.type === 'image_url') msgTokens += 85; 
+              });
+            }
+          } else {
+            if (msg.content) msgTokens += estimateTokens(msg.content);
+          }
+          
           if (msg.tool_calls) msgTokens += 50; 
           
           if (currentTokens + msgTokens > settings.context_length) {
-            console.log(`[Context Window] Truncated history at message ${i} to fit ${settings.context_length} limit.`);
+            console.log(`[Context Window] Truncated history to fit ${settings.context_length} limit.`);
             break;
           }
           currentTokens += msgTokens;
-          prunedHistory.unshift(msg);
+          
+          // Format for API
+          const apiMsg: any = {
+            role: msg.role,
+            content: msg.content ?? null,
+            tool_calls: msg.tool_calls,
+            tool_call_id: msg.tool_call_id,
+          };
+          
+          // Replace content for the last user message on initial turn
+          if (isInitialUserTurn && i === historyToPrune.length - 1) {
+            apiMsg.content = apiContent;
+          }
+          
+          prunedHistory.unshift(apiMsg);
         }
 
         const apiMessages = [
           {
             role: 'system',
             content: finalSystemPrompt,
-            tool_calls: undefined,
-            tool_call_id: undefined,
           },
           ...prunedHistory,
-          {
-            role: 'user' as const,
-            content: apiContent,
-            tool_calls: undefined,
-            tool_call_id: undefined,
-          },
         ];
 
-      const executeChatLoop = async (apiMessages: any[]) => {
+        // ─── MCP DYNAMIC TOOL INJECTION ───
+        const mcpTools: ToolDefinition[] = [];
+        const activeMcpServers = useChatStore.getState().activeMcpServers;
+        
+        for (const serverId of activeMcpServers) {
+          try {
+            const result = await tauriApi.mcpListTools(serverId);
+            if (result && Array.isArray(result.tools)) {
+              for (const tool of result.tools) {
+                mcpTools.push({
+                  type: 'function',
+                  function: {
+                    name: `mcp__${serverId}__${tool.name}`,
+                    description: `[MCP Server: ${serverId}] ${tool.description || ''}`,
+                    parameters: tool.inputSchema || { type: 'object', properties: {} },
+                  },
+                });
+              }
+            }
+          } catch (e) {
+            console.error(`Failed to list tools from MCP server ${serverId}:`, e);
+          }
+        }
+
         let firstToken = false;
         
-        for await (const chunk of streamChat(settings, apiMessages, controller.signal)) {
+        for await (const chunk of streamChat(settings, apiMessages, controller.signal, mcpTools)) {
           const delta = chunk.choices[0]?.delta;
           if (!delta) continue;
 
@@ -203,6 +236,27 @@ export function useChat() {
                 } else if (tc.function.name === 'read_webpage') {
                   const scrapeRes = await tauriApi.fetchWebpage(args.url);
                   result = scrapeRes;
+                } else if (tc.function.name === 'lsp_start_server') {
+                  await tauriApi.lspStartServer(args.languageId, args.command, args.args, args.workspaceRoot);
+                  result = `LSP server started successfully for language ID: ${args.languageId}`;
+                } else if (tc.function.name === 'lsp_goto_definition') {
+                  const defRes = await tauriApi.lspGotoDefinition(args.languageId, args.filePath, args.line, args.col);
+                  result = JSON.stringify(defRes, null, 2);
+                } else if (tc.function.name === 'mcp_start_server') {
+                  await tauriApi.mcpStartServer(args.id, args.command, args.args, args.env || {});
+                  useChatStore.getState().addMcpServer(args.id);
+                  result = `MCP server started successfully with ID: ${args.id}. The tools will be available in the next turn.`;
+                } else if (tc.function.name.startsWith('mcp__')) {
+                  // Format: mcp__SERVERID__TOOLNAME
+                  const parts = tc.function.name.split('__');
+                  if (parts.length >= 3) {
+                    const serverId = parts[1];
+                    const toolName = parts.slice(2).join('__');
+                    const callRes = await tauriApi.mcpCallTool(serverId, toolName, args);
+                    result = JSON.stringify(callRes, null, 2);
+                  } else {
+                    result = `Error: Invalid MCP tool name format: ${tc.function.name}`;
+                  }
                 } else {
                   result = `Error: Unknown tool ${tc.function.name}`;
                 }
@@ -217,18 +271,9 @@ export function useChat() {
                   created_at: Date.now(),
                 };
                 addMessage(toolMsg);
-                
-                // Append to apiMessages for the next loop
-                apiMessages.push({
-                  role: 'assistant',
-                  content: finalMessage.content || null,
-                  tool_calls: finalMessage.tool_calls,
-                });
-                apiMessages.push({
-                  role: 'tool',
-                  content: toolMsg.content,
-                  tool_call_id: toolMsg.tool_call_id,
-                });
+                // We DO NOT manually append to apiMessages here anymore,
+                // because the recursive executeChatLoop() will rebuild and prune it 
+                // directly from useChatStore state!
                 
               } catch (e) {
                 console.error('Tool execution error:', e);
@@ -243,16 +288,9 @@ export function useChat() {
                 };
                 addMessage(errorMsg);
                 
-                apiMessages.push({
-                  role: 'assistant',
-                  content: finalMessage.content || null,
-                  tool_calls: finalMessage.tool_calls,
-                });
-                apiMessages.push({
-                  role: 'tool',
-                  content: errorMsg.content,
-                  tool_call_id: errorMsg.tool_call_id,
-                });
+                // We DO NOT manually append to apiMessages here anymore,
+                // because the recursive executeChatLoop() will rebuild and prune it 
+                // directly from useChatStore state!
               }
             }
           }
@@ -263,7 +301,7 @@ export function useChat() {
           setChatStatus('thinking');
           clearStreamingContent();
           firstToken = false;
-          await executeChatLoop(apiMessages);
+          await executeChatLoop(false);
           return; // exit current frame to prevent duplicate TTS on intermediate steps
         }
 
@@ -277,7 +315,7 @@ export function useChat() {
           }
       };
 
-      await executeChatLoop(apiMessages);
+      await executeChatLoop(true);
 
       updateConversation(convId, { updated_at: Date.now() });
       } catch (error: unknown) {

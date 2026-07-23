@@ -4,5 +4,7 @@
   <dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>Morfeus requires microphone access to hear your voice commands.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Morfeus requires speech recognition to transcribe your voice input into text.</string>
   </dict>
 </plist>

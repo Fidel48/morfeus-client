@@ -160,6 +160,21 @@ export const ChatWindow: React.FC = () => {
         }
       }
 
+      let rulesContext = '';
+      if (currentAttachments.length > 0) {
+        try {
+          const rules = await tauriApi.findProjectRules(currentAttachments[0].path);
+          for (const rule of rules) {
+             rulesContext += `\n--- Project Rule (${rule.file_name}) ---\n${rule.content}\n---\n`;
+          }
+          if (rules.length > 0) {
+            console.log(`[context] Injected ${rules.length} project rule file(s).`);
+          }
+        } catch (e) {
+          console.error('Failed to load project rules', e);
+        }
+      }
+
       setIsParsing(false);
 
       const questionText = userText || 'Please analyze the attached file(s).';
@@ -170,7 +185,7 @@ export const ChatWindow: React.FC = () => {
       if (hasImages) {
         // Build a multimodal content array for vision-capable models
         const fullText = textContext
-          ? `I have attached the following files for reference:${textContext}\nUser Question/Message: ${questionText}`
+          ? `I have attached the following files for reference:${textContext}\n${rulesContext ? "\n--- Context Rules ---\n" + rulesContext : ""}\nUser Question/Message: ${questionText}`
           : questionText;
 
         const multimodalContent: ContentPart[] = [
@@ -186,7 +201,7 @@ export const ChatWindow: React.FC = () => {
         }));
       } else {
         // Pure text — normal flow, but still hide the raw text from UI!
-        const finalPrompt = `I have attached the following files for reference:${textContext}\nUser Question/Message: ${questionText}`;
+        const finalPrompt = `I have attached the following files for reference:${textContext}\n${rulesContext ? "\n--- Context Rules ---\n" + rulesContext : ""}\nUser Question/Message: ${questionText}`;
         
         await sendMessage(JSON.stringify({
           __system_payload: true,

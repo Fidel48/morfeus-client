@@ -1,6 +1,6 @@
 [package]
 name = "morfeus"
-version = "0.1.0"
+version = "0.1.7"
 description = "Morfeus — Local-First LLM Desktop Client"
 authors = ["Morfeus"]
 edition = "2021"
@@ -46,6 +46,11 @@ urlencoding = "2.1"
 pdf-extract = "0.7"
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
+libloading = "0.9.0"
+libc = "0.2.186"
+async-lsp = { version = "0.2.4", features = ["tokio", "stdio"] }
+lsp-types = "0.97.0"
+tokio-util = { version = "0.7.19", features = ["compat"] }
 [profile.release]
 panic = "abort"
 codegen-units = 1
