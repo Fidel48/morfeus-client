@@ -256,6 +256,14 @@ export function useChat() {
                 } else if (tc.function.name === 'get_special_dirs') {
                   const dirs = await tauriApi.getSpecialDirs();
                   result = `User's special directories:\n${JSON.stringify(dirs, null, 2)}`;
+                } else if (tc.function.name === 'search_files') {
+                  const found = await tauriApi.searchFiles(args.query, args.root);
+                  if (found.length === 0) {
+                    result = `No files or folders found matching "${args.query}".`;
+                  } else {
+                    const lines = found.map(f => f.is_dir ? `📁 ${f.path}/` : `📄 ${f.path}`);
+                    result = `Found ${found.length} result(s) for "${args.query}":\n${lines.join('\n')}`;
+                  }
                 } else if (tc.function.name === 'lsp_start_server') {
                   await tauriApi.lspStartServer(args.languageId, args.command, args.args, args.workspaceRoot);
                   result = `LSP server started successfully for language ID: ${args.languageId}`;

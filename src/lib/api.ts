@@ -152,6 +152,27 @@ export const WEB_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'search_files',
+      description: "Recursively search for files or folders by name anywhere inside the user's home directory. Use this when the user asks to 'find', 'look for', or 'locate' a file by name. Much faster than browsing folder by folder. After finding a file, use parse_local_file to read its content (supports .txt, .md, .pdf, .docx, .csv, .json, code files, etc.).",
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'The filename or partial name to search for (case-insensitive). E.g. "resume", "fidel", "report 2024".',
+          },
+          root: {
+            type: 'string',
+            description: 'Optional: absolute path to start searching from. Defaults to the user home directory if not provided.',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
 ];
 
 // ─── Model list ──────────────────────────────────────────────────────────────

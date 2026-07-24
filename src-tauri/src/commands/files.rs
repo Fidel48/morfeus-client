@@ -1,7 +1,54 @@
 use std::fs;
+use std::io::{Read, Cursor};
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tauri::command;
+
+/// Extract plain text from a .docx file (which is a ZIP of XML files).
+fn extract_docx_text(path: &str) -> Result<String, String> {
+    let data = fs::read(path).map_err(|e| format!("Cannot read file: {}", e))?;
+    let cursor = Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| format!("Not a valid .docx file: {}", e))?;
+
+    let mut xml_content = String::new();
+    {
+        let mut doc = archive.by_name("word/document.xml")
+            .map_err(|_| "Could not find word/document.xml inside the .docx file.".to_string())?;
+        doc.read_to_string(&mut xml_content)
+            .map_err(|e| format!("Failed to read document XML: {}", e))?;
+    }
+
+    // Extract text content by reading XML events
+    let mut text = String::new();
+    let mut reader = quick_xml::Reader::from_str(&xml_content);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(quick_xml::events::Event::End(ref e)) => {
+                if e.name().as_ref() == b"w:p" {
+                    text.push('\n');
+                }
+            }
+            Ok(quick_xml::events::Event::Text(ref e)) => {
+                if let Ok(s) = std::str::from_utf8(e.as_ref()) {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        text.push_str(trimmed);
+                        text.push(' ');
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(text.trim().to_string())
+}
 
 #[command]
 pub async fn parse_local_file(path: String) -> Result<String, String> {
@@ -17,29 +64,15 @@ pub async fn parse_local_file(path: String) -> Result<String, String> {
         .unwrap_or("")
         .to_lowercase();
 
-    let mut content = String::new();
-
-    if extension == "pdf" {
-        // Use pdf-extract
-        match pdf_extract::extract_text(&path) {
-            Ok(text) => {
-                content = text;
-            }
-            Err(e) => {
-                return Err(format!("Failed to parse PDF: {}", e));
-            }
-        }
+    let content = if extension == "pdf" {
+        pdf_extract::extract_text(&path)
+            .map_err(|e| format!("Failed to parse PDF: {}", e))?
+    } else if extension == "docx" {
+        extract_docx_text(&path)?
     } else {
-        // Attempt to read as UTF-8 string
-        match fs::read_to_string(&path) {
-            Ok(text) => {
-                content = text;
-            }
-            Err(e) => {
-                return Err(format!("Failed to read file (might be binary or unsupported format): {}", e));
-            }
-        }
-    }
+        fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read file (might be binary): {}", e))?
+    };
 
     // Clean up whitespace a bit to save context
     let cleaned_content = content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
@@ -162,4 +195,71 @@ fn home_dir_path() -> Option<PathBuf> {
         .or_else(|_| std::env::var("HOME"))
         .ok()
         .map(PathBuf::from)
+}
+
+// ─── File search ────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SearchMatch {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+/// Recursively search for files/folders matching a name pattern inside a root directory.
+/// Returns up to 50 matches. Case-insensitive.
+#[command]
+pub async fn search_files(query: String, root: Option<String>) -> Result<Vec<SearchMatch>, String> {
+    let search_root = if let Some(r) = root {
+        PathBuf::from(r)
+    } else {
+        home_dir_path().ok_or("Cannot determine home directory".to_string())?
+    };
+
+    if !search_root.exists() {
+        return Err(format!("Root path does not exist: {}", search_root.display()));
+    }
+
+    let query_lower = query.to_lowercase();
+    let mut matches = Vec::new();
+
+    walk_dir(&search_root, &query_lower, &mut matches, 0);
+
+    Ok(matches)
+}
+
+fn walk_dir(dir: &Path, query: &str, matches: &mut Vec<SearchMatch>, depth: usize) {
+    // Cap recursion depth and result count
+    if depth > 5 || matches.len() >= 50 {
+        return;
+    }
+
+    let read_dir = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+
+    for entry in read_dir.filter_map(|e| e.ok()) {
+        let file_name = entry.file_name().to_string_lossy().to_string();
+
+        // Skip hidden dirs (but don't skip hidden files that match)
+        let is_dir = entry.path().is_dir();
+        if is_dir && file_name.starts_with('.') {
+            continue;
+        }
+
+        // Check for match
+        if file_name.to_lowercase().contains(query) {
+            matches.push(SearchMatch {
+                name: file_name.clone(),
+                path: entry.path().to_string_lossy().to_string(),
+                is_dir,
+            });
+        }
+
+        // Recurse into directories
+        if is_dir && matches.len() < 50 {
+            walk_dir(&entry.path(), query, matches, depth + 1);
+        }
+    }
 }

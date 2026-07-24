@@ -164,6 +164,11 @@ export const tauriApi = {
     return tauriInvoke('get_special_dirs');
   },
 
+  /** Recursively search for files/folders by name within the user's home directory */
+  async searchFiles(query: string, root?: string): Promise<Array<{name: string, path: string, is_dir: boolean}>> {
+    return tauriInvoke('search_files', { query, root: root ?? null });
+  },
+
   /** Finds project level rules (.morfeusrules, .cursorrules) given a workspace path */
   async findProjectRules(workspacePath: string): Promise<Array<{ file_name: string, path: string, content: string }>> {
     return tauriInvoke('find_project_rules', { workspacePath });
