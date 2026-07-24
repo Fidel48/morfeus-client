@@ -156,7 +156,7 @@ export const WEB_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'search_files',
-      description: "Recursively search for files or folders by name anywhere inside the user's home directory. Use this when the user asks to 'find', 'look for', or 'locate' a file by name. Much faster than browsing folder by folder. After finding a file, use parse_local_file to read its content (supports .txt, .md, .pdf, .docx, .csv, .json, code files, etc.).",
+      description: "Recursively search for files or folders by name anywhere inside the user's home directory. Use this when the user asks to 'find', 'look for', or 'locate' a file by name. Much faster than browsing folder by folder. After finding a file, use read_local_file to read its content (supports .txt, .md, .pdf, .docx, .csv, .json, code files, etc.).",
       parameters: {
         type: 'object',
         properties: {
@@ -170,6 +170,23 @@ export const WEB_TOOLS: ToolDefinition[] = [
           },
         },
         required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_local_file',
+      description: "Read the text content of a file on the user's local computer by its absolute path. Supports text files, code files, Markdown, PDF, DOCX, CSV, JSON, etc. Use this after finding a file path with search_files or list_directory, or when given a file path.",
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: "The absolute path to the local file to read (e.g. /Users/admin/Documents/resume/Fidel Ruiz Resume.pdf).",
+          },
+        },
+        required: ['path'],
       },
     },
   },

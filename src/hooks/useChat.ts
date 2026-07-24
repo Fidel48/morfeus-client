@@ -264,6 +264,8 @@ export function useChat() {
                     const lines = found.map(f => f.is_dir ? `📁 ${f.path}/` : `📄 ${f.path}`);
                     result = `Found ${found.length} result(s) for "${args.query}":\n${lines.join('\n')}`;
                   }
+                } else if (tc.function.name === 'read_local_file') {
+                  result = await tauriApi.parseLocalFile(args.path);
                 } else if (tc.function.name === 'lsp_start_server') {
                   await tauriApi.lspStartServer(args.languageId, args.command, args.args, args.workspaceRoot);
                   result = `LSP server started successfully for language ID: ${args.languageId}`;

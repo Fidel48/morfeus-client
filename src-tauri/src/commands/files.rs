@@ -221,14 +221,19 @@ pub async fn search_files(query: String, root: Option<String>) -> Result<Vec<Sea
     }
 
     let query_lower = query.to_lowercase();
+    let query_words: Vec<String> = query_lower
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+
     let mut matches = Vec::new();
 
-    walk_dir(&search_root, &query_lower, &mut matches, 0);
+    walk_dir(&search_root, &query_words, &mut matches, 0);
 
     Ok(matches)
 }
 
-fn walk_dir(dir: &Path, query: &str, matches: &mut Vec<SearchMatch>, depth: usize) {
+fn walk_dir(dir: &Path, query_words: &[String], matches: &mut Vec<SearchMatch>, depth: usize) {
     // Cap recursion depth and result count
     if depth > 5 || matches.len() >= 50 {
         return;
@@ -248,8 +253,13 @@ fn walk_dir(dir: &Path, query: &str, matches: &mut Vec<SearchMatch>, depth: usiz
             continue;
         }
 
-        // Check for match
-        if file_name.to_lowercase().contains(query) {
+        // Normalize filename for matching: replace underscores and dashes with spaces
+        let normalized_name = file_name.to_lowercase().replace(['_', '-'], " ");
+
+        // Check if all query words appear in the normalized filename
+        let is_match = query_words.iter().all(|word| normalized_name.contains(word));
+
+        if is_match {
             matches.push(SearchMatch {
                 name: file_name.clone(),
                 path: entry.path().to_string_lossy().to_string(),
@@ -259,7 +269,7 @@ fn walk_dir(dir: &Path, query: &str, matches: &mut Vec<SearchMatch>, depth: usiz
 
         // Recurse into directories
         if is_dir && matches.len() < 50 {
-            walk_dir(&entry.path(), query, matches, depth + 1);
+            walk_dir(&entry.path(), query_words, matches, depth + 1);
         }
     }
 }
