@@ -179,6 +179,27 @@ export const tauriApi = {
     return tauriInvoke<string>('read_youtube_transcript', { url });
   },
 
+  /** Log an event to the system log file */
+  async appendSystemLog(level: string, message: string): Promise<void> {
+    if (!isTauri) {
+      console.log(`[${level.toUpperCase()}] ${message}`);
+      return;
+    }
+    return tauriInvoke('append_system_log', { level, message });
+  },
+
+  /** Get last 200 lines of system logs */
+  async getSystemLogs(): Promise<string[]> {
+    if (!isTauri) return ['Web mode: logs are output to browser console.'];
+    return tauriInvoke<string[]>('get_system_logs');
+  },
+
+  /** Open the native log folder in Finder/Explorer */
+  async openLogFolder(): Promise<void> {
+    if (!isTauri) return;
+    return tauriInvoke('open_log_folder');
+  },
+
   /** Start a native Language Server */
   async lspStartServer(languageId: string, command: string, args: string[], workspaceRoot?: string): Promise<void> {
     return tauriInvoke('lsp_start_server', { languageId, command, args, workspaceRoot });

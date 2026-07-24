@@ -229,6 +229,7 @@ export function useChat() {
               try {
                 const args = JSON.parse(tc.function.arguments);
                 let result = '';
+                tauriApi.appendSystemLog('info', `Tool Call: ${tc.function.name}(${tc.function.arguments})`);
                 
                 if (tc.function.name === 'web_search') {
                   const searchRes = await tauriApi.webSearch(args.query);
@@ -291,6 +292,8 @@ export function useChat() {
                   result = `Error: Unknown tool ${tc.function.name}`;
                 }
 
+                tauriApi.appendSystemLog('info', `Tool Result [${tc.function.name}]: ${result.length > 200 ? result.slice(0, 200) + '...' : result}`);
+
                 // Add tool result message
                 const toolMsg: Message = {
                   id: generateId(),
@@ -307,12 +310,13 @@ export function useChat() {
                 
               } catch (e) {
                 console.error('Tool execution error:', e);
+                tauriApi.appendSystemLog('error', `Tool Error [${tc.function.name}]: ${String(e)}`);
                 // Add error message as tool result
                 const errorMsg: Message = {
                   id: generateId(),
                   conversation_id: convId,
                   role: 'tool',
-                  content: `Tool execution failed: ${String(e)}`,
+                  content: `Error executing tool ${tc.function.name}: ${String(e)}`,
                   tool_call_id: tc.id,
                   created_at: Date.now(),
                 };

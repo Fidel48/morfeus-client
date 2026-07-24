@@ -19,6 +19,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   tts_volume: 1.0,
   stt_model_path: '',
   ptt_mode: true,
+  debug_mode: false,
 };
 
 interface SettingsStore {

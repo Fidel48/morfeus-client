@@ -2,6 +2,7 @@ pub mod models;
 pub mod commands;
 pub mod lsp;
 pub mod mcp;
+pub mod logger;
 
 use commands::voice::RecordingBuffer;
 use commands::db::get_migrations;
@@ -63,6 +64,10 @@ pub fn run() {
             commands::rules::find_project_rules,
             // YouTube
             commands::youtube::read_youtube_transcript,
+            // Logger
+            logger::append_system_log,
+            logger::get_system_logs,
+            logger::open_log_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Morfeus");

@@ -38,6 +38,8 @@ pub struct AppSettings {
     pub tts_volume: f64,
     pub stt_model_path: String,
     pub ptt_mode: bool,
+    #[serde(default)]
+    pub debug_mode: bool,
 }
 
 impl Default for AppSettings {
@@ -58,6 +60,7 @@ impl Default for AppSettings {
             tts_volume: 1.0,
             stt_model_path: String::new(),
             ptt_mode: true,
+            debug_mode: false,
         }
     }
 }

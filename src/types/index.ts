@@ -59,6 +59,7 @@ export interface AppSettings {
   tts_volume: number;
   stt_model_path: string;
   ptt_mode: boolean;
+  debug_mode?: boolean;
 }
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';

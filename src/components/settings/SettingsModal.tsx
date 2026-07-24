@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   X, Server, Mic, Volume2, Check, AlertCircle,
-  Loader2, RefreshCw, ChevronDown, Zap,
+  Loader2, RefreshCw, ChevronDown, Zap, Bug, FolderOpen, Terminal, Copy, FileText,
 } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useVoiceStore } from '@/stores/voiceStore';
@@ -11,7 +11,7 @@ import { tauriApi } from '@/lib/tauri';
 import { cn } from '@/lib/utils';
 import { Model, AppSettings } from '@/types';
 
-type SettingsTab = 'connection' | 'parameters' | 'voice';
+type SettingsTab = 'connection' | 'parameters' | 'voice' | 'developer';
 
 export const SettingsModal: React.FC = () => {
   const { settings, isSettingsOpen, updateSettings, saveToBackend, closeSettings } = useSettingsStore();
@@ -22,6 +22,7 @@ export const SettingsModal: React.FC = () => {
   const [testMessage, setTestMessage] = useState('');
   const [models, setModels] = useState<Model[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
+  const [showLogsModal, setShowLogsModal] = useState(false);
 
   // Load voices when modal opens
   useEffect(() => {
@@ -115,6 +116,7 @@ export const SettingsModal: React.FC = () => {
                 <TabBtn icon={<Server size={13} />} label="Connection" active={tab === 'connection'} onClick={() => setTab('connection')} />
                 <TabBtn icon={<Zap size={13} />} label="Parameters" active={tab === 'parameters'} onClick={() => setTab('parameters')} />
                 <TabBtn icon={<Mic size={13} />} label="Voice" active={tab === 'voice'} onClick={() => setTab('voice')} />
+                <TabBtn icon={<Bug size={13} />} label="Developer" active={tab === 'developer'} onClick={() => setTab('developer')} />
               </div>
 
               {/* Content */}
@@ -143,6 +145,13 @@ export const SettingsModal: React.FC = () => {
                     availableVoices={availableVoices}
                   />
                 )}
+                {tab === 'developer' && (
+                  <DeveloperTab
+                    settings={settings}
+                    updateSettings={updateSettings}
+                    onOpenLogsModal={() => setShowLogsModal(true)}
+                  />
+                )}
               </div>
 
               {/* Footer */}
@@ -162,6 +171,8 @@ export const SettingsModal: React.FC = () => {
               </div>
             </div>
           </motion.div>
+
+          <LogViewerModal isOpen={showLogsModal} onClose={() => setShowLogsModal(false)} />
         </>
       )}
     </AnimatePresence>
@@ -498,3 +509,122 @@ const VoiceTab: React.FC<{
     </div>
   </div>
 );
+
+const DeveloperTab: React.FC<{
+  settings: AppSettings;
+  updateSettings: (partial: Partial<AppSettings>) => void;
+  onOpenLogsModal: () => void;
+}> = ({ settings, updateSettings, onOpenLogsModal }) => (
+  <div className="space-y-4">
+    <div className="flex items-center justify-between p-3 bg-white/3 rounded-xl border border-white/8">
+      <div>
+        <p className="text-xs text-zinc-200 font-medium">Developer Debug Mode</p>
+        <p className="text-[10px] text-zinc-500 mt-0.5">
+          Show step-by-step tool execution badges in the chat timeline (useful for inspecting tool calls and args).
+        </p>
+      </div>
+      <button
+        onClick={() => updateSettings({ debug_mode: !settings.debug_mode })}
+        className={cn(
+          'w-10 h-6 rounded-full transition-all relative flex-shrink-0 ml-3',
+          settings.debug_mode ? 'bg-violet-600' : 'bg-zinc-800 border border-white/10'
+        )}
+      >
+        <div className={cn(
+          'absolute top-1 w-4 h-4 rounded-full bg-white transition-all shadow',
+          settings.debug_mode ? 'left-5' : 'left-1'
+        )} />
+      </button>
+    </div>
+
+    <div className="border-t border-white/8 pt-4">
+      <p className="text-[10px] font-semibold text-zinc-600 uppercase tracking-wider mb-2">Native Diagnostics & Logging</p>
+      <p className="text-xs text-zinc-400 leading-relaxed mb-3">
+        Morfeus logs tool executions, system events, and errors to a lightweight local file (<code className="text-violet-300 font-mono text-[11px]">morfeus.log</code>) capped at 5MB.
+      </p>
+
+      <div className="flex gap-2">
+        <button
+          onClick={onOpenLogsModal}
+          className="flex items-center gap-1.5 px-3 py-2 text-xs bg-zinc-900 hover:bg-zinc-800 border border-white/10 rounded-lg text-zinc-200 transition-colors"
+        >
+          <FileText size={13} className="text-violet-400" />
+          View System Logs
+        </button>
+        <button
+          onClick={() => tauriApi.openLogFolder()}
+          className="flex items-center gap-1.5 px-3 py-2 text-xs bg-zinc-900 hover:bg-zinc-800 border border-white/10 rounded-lg text-zinc-200 transition-colors"
+        >
+          <FolderOpen size={13} className="text-violet-400" />
+          Open Logs Folder
+        </button>
+      </div>
+    </div>
+  </div>
+);
+
+const LogViewerModal: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ isOpen, onClose }) => {
+  const [logs, setLogs] = useState<string[]>([]);
+  const [copied, setCopied] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      setLoading(true);
+      tauriApi.getSystemLogs()
+        .then(setLogs)
+        .catch((e) => setLogs([`Error reading logs: ${e}`]))
+        .finally(() => setLoading(false));
+    }
+  }, [isOpen]);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(logs.join('\n'));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[60] flex items-center justify-center p-4">
+      <div className="bg-zinc-950 border border-white/10 rounded-2xl w-full max-w-2xl overflow-hidden shadow-2xl flex flex-col max-h-[80vh]">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/8">
+          <div className="flex items-center gap-2">
+            <Terminal size={15} className="text-violet-400" />
+            <h3 className="text-sm font-semibold text-white">System Logs</h3>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleCopy}
+              className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white px-2.5 py-1.5 rounded-lg bg-white/5 border border-white/10 transition-colors"
+            >
+              <Copy size={12} />
+              {copied ? 'Copied!' : 'Copy'}
+            </button>
+            <button onClick={onClose} className="p-1 text-zinc-500 hover:text-white">
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+
+        <div className="p-4 flex-1 overflow-y-auto font-mono text-xs text-zinc-300 bg-black/60 leading-relaxed space-y-1">
+          {loading ? (
+            <div className="flex items-center justify-center py-12 text-zinc-500">Loading logs...</div>
+          ) : logs.length === 0 ? (
+            <div className="text-zinc-600 italic">No logs recorded yet.</div>
+          ) : (
+            logs.map((line, i) => (
+              <div key={i} className={cn(
+                'whitespace-pre-wrap break-all',
+                line.includes('[ERROR]') ? 'text-red-400' : line.includes('[WARN]') ? 'text-amber-400' : 'text-zinc-300'
+              )}>
+                {line}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};

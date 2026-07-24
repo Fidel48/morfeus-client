@@ -3,7 +3,8 @@ import { motion } from 'framer-motion';
 import { Message } from '@/types';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { cn } from '@/lib/utils';
-import { Bot, User, Wrench, Globe, FileText, Copy, VolumeX } from 'lucide-react';
+import { Bot, User, Wrench, Globe, FileText, Search, Folder, Video, Terminal, Copy, VolumeX } from 'lucide-react';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { tauriApi } from '@/lib/tauri';
 
 interface MessageBubbleProps {
@@ -12,8 +13,20 @@ interface MessageBubbleProps {
 }
 
 export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) => {
+  const { settings } = useSettingsStore();
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
+
+  // Hide tool result messages completely from the chat timeline
+  if (message.role === 'tool') {
+    return null;
+  }
+
+  // If debug mode is OFF and this is a tool-call message without final text content, hide it
+  const isToolCallOnly = message.tool_calls && message.tool_calls.length > 0 && !message.content?.trim();
+  if (!settings.debug_mode && isToolCallOnly) {
+    return null;
+  }
 
   return (
     <motion.div
@@ -60,21 +73,44 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
               {message.content && <MarkdownRenderer content={message.content} />}
               {message.tool_calls.map((tc, idx) => {
                 const toolName = tc.function?.name;
-                let text = `Using tool: ${toolName || 'unknown'}`;
+                let text = `Tool: ${toolName || 'unknown'}`;
                 let Icon = Wrench;
                 
                 if (toolName === 'web_search') {
-                  text = 'Searching the web';
+                  text = 'Web Search';
                   Icon = Globe;
                 } else if (toolName === 'read_webpage') {
-                  text = 'Reading webpage';
+                  text = 'Read Webpage';
                   Icon = FileText;
+                } else if (toolName === 'read_youtube_video') {
+                  text = 'Read YouTube Video';
+                  Icon = Video;
+                } else if (toolName === 'search_files') {
+                  text = 'Search Files';
+                  Icon = Search;
+                } else if (toolName === 'list_directory' || toolName === 'get_special_dirs') {
+                  text = 'Browse Directory';
+                  Icon = Folder;
+                } else if (toolName === 'read_local_file') {
+                  text = 'Read Local File';
+                  Icon = FileText;
+                } else if (toolName?.startsWith('lsp_')) {
+                  text = `LSP: ${toolName.replace('lsp_', '')}`;
+                  Icon = Terminal;
+                } else if (toolName?.startsWith('mcp')) {
+                  text = `MCP: ${toolName}`;
+                  Icon = Wrench;
                 }
 
                 return (
-                  <div key={idx} className="flex items-center gap-2 text-xs text-zinc-300 bg-white/5 px-3 py-1.5 rounded-full border border-white/10 w-fit shadow-sm">
+                  <div key={idx} className="flex items-center gap-2 text-xs text-violet-300 bg-violet-950/40 px-3 py-1.5 rounded-full border border-violet-500/20 w-fit shadow-sm">
                     <Icon size={12} className="text-violet-400" />
-                    <span className="font-medium">{text}</span>
+                    <span className="font-mono text-[11px] font-semibold">{text}</span>
+                    {tc.function?.arguments && (
+                      <span className="text-[10px] text-zinc-400 max-w-xs truncate border-l border-white/10 pl-2">
+                        {tc.function.arguments}
+                      </span>
+                    )}
                   </div>
                 );
               })}
