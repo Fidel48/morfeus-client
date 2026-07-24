@@ -19,15 +19,24 @@ declare global {
   }
 }
 
+const getSupportedMimeType = () => {
+  if (typeof MediaRecorder === 'undefined') return '';
+  const types = [
+    'audio/mp4',
+    'audio/m4a',
+    'audio/aac',
+    'audio/wav',
+    'audio/webm;codecs=opus',
+    'audio/webm',
+  ];
+  for (const t of types) {
+    if (MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return '';
+};
+
 const getSpeechRecognition = () => {
   if (typeof window === 'undefined') return false;
-  // Inside Tauri desktop app (macOS WKWebView / Windows WebView2), webkitSpeechRecognition
-  // is unstable and crashes the WebView process. Always use MediaRecorder + native transcription in Desktop mode.
-  if (tauriApi.isDesktopApp()) return false;
-  
-  const isMacOS = /Mac|iPhone|iPad|iPod/.test(navigator.platform) || 
-                  (navigator.userAgent.includes('Mac') && !navigator.userAgent.includes('Chrome'));
-  if (isMacOS) return false;
   return window.SpeechRecognition || window.webkitSpeechRecognition;
 };
 
@@ -52,7 +61,12 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
   React.useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
   React.useEffect(() => { onAutoSendRef.current = onAutoSend; }, [onAutoSend]);
 
-  // ─── Native Tauri recording (MediaRecorder) ──────────
+  // Enable microphone button by default so browser/Tauri can request permission on click
+  React.useEffect(() => {
+    setMicAvailable(true);
+  }, [setMicAvailable]);
+
+  // ─── Native MediaRecorder Fallback ───────────────────
   const startNativeRecording = useCallback(async () => {
     if (isStartingRef.current || status === 'recording' || status === 'transcribing') return;
     isStartingRef.current = true;
@@ -61,14 +75,8 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
       usingNativeRef.current = true;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
-      // Double check status hasn't changed while waiting for getUserMedia permission
-      if (mediaRecorderRef.current) {
-        stream.getTracks().forEach(t => t.stop());
-        isStartingRef.current = false;
-        return;
-      }
-
-      const mediaRecorder = new MediaRecorder(stream);
+      const mimeType = getSupportedMimeType();
+      const mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
@@ -78,152 +86,121 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
         }
       };
 
-      mediaRecorder.start(100); // collect 100ms chunks
+      mediaRecorder.start(100);
       setStatus('recording');
-      setMicAvailable(true);
 
       if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
       waveformIntervalRef.current = setInterval(() => {
         updateWaveform(Array.from({ length: 20 }, () => Math.random()));
       }, 80);
     } catch (err: any) {
-      console.error('MediaRecorder failed to start:', err);
-      tauriApi.appendSystemLog('error', `Microphone capture error: ${err?.message || err}`);
+      console.error('Microphone access error:', err);
+      tauriApi.appendSystemLog('error', `Microphone permission or capture error: ${err?.message || err}`);
       usingNativeRef.current = false;
       mediaRecorderRef.current = null;
       setStatus('idle');
     } finally {
       isStartingRef.current = false;
     }
-  }, [status, setStatus, setMicAvailable, updateWaveform]);
+  }, [status, setStatus, updateWaveform]);
 
   const stopNativeRecording = useCallback(async () => {
-    const mediaRecorder = mediaRecorderRef.current;
-    if (!mediaRecorder) {
-      setStatus('idle');
-      return;
-    }
-
     if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
     updateWaveform(new Array(20).fill(0));
 
-    setStatus('transcribing');
+    setStatus('idle');
 
-    try {
-      // Ensure MediaRecorder is actually recording before calling stop()
-      if (mediaRecorder.state === 'recording') {
-        const audioDataPromise = new Promise<string>((resolve, reject) => {
-          mediaRecorder.onstop = () => {
-            try {
-              const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
-              const reader = new FileReader();
-              reader.readAsDataURL(audioBlob);
-              reader.onloadend = () => {
-                const base64data = (reader.result as string).split(',')[1] || '';
-                resolve(base64data);
-              };
-              reader.onerror = reject;
-            } catch (e) {
-              reject(e);
-            }
-          };
-        });
-
-        mediaRecorder.stop();
-        mediaRecorder.stream.getTracks().forEach(t => t.stop());
-
-        const base64Wav = await audioDataPromise;
-        if (base64Wav) {
-          const text = await tauriApi.transcribeNative(base64Wav);
-          if (text && text.trim()) {
-            onTranscriptRef.current(text.trim());
-            setTimeout(() => {
-              onAutoSendRef.current?.();
-            }, 80);
-          }
-        }
-      } else {
-        mediaRecorder.stream.getTracks().forEach(t => t.stop());
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      try {
+        mediaRecorderRef.current.stop();
+        mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop());
+      } catch (e) {
+        console.error('Error stopping MediaRecorder:', e);
       }
-    } catch (err: any) {
-      console.error('Native transcription failed:', err);
-      tauriApi.appendSystemLog('error', `Native transcription error: ${err?.message || err}`);
-    } finally {
-      usingNativeRef.current = false;
-      mediaRecorderRef.current = null;
-      setStatus('idle');
     }
+    mediaRecorderRef.current = null;
+    usingNativeRef.current = false;
   }, [setStatus, updateWaveform]);
 
-  // ─── Browser SpeechRecognition (Windows / Chromium) ───────────────────
+  // ─── Browser SpeechRecognition (WebKit / Chromium) ───────────────────
   const startBrowserRecording = useCallback(() => {
     const SR = getSpeechRecognition();
-    if (!SR || !micAvailable || status !== 'idle') return;
-
-    const rec = new SR();
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.lang = 'en-US';
-
-    let fullTranscript = '';
-
-    const resetSilenceTimer = () => {
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = setTimeout(() => {
-        if (recognitionRef.current) recognitionRef.current.stop();
-      }, 3500);
-    };
-
-    rec.onstart = () => {
-      setStatus('recording');
-      resetSilenceTimer();
-      waveformIntervalRef.current = setInterval(() => {
-        updateWaveform(Array.from({ length: 20 }, () => Math.random()));
-      }, 80);
-    };
-
-    rec.onresult = (event: any) => {
-      resetSilenceTimer();
-      let interimTranscript = '';
-      let finalTranscript = '';
-
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) {
-          finalTranscript += event.results[i][0].transcript;
-        } else {
-          interimTranscript += event.results[i][0].transcript;
-        }
-      }
-
-      if (finalTranscript) fullTranscript += (fullTranscript ? ' ' : '') + finalTranscript;
-      
-      const currentText = fullTranscript + (interimTranscript ? ' ' + interimTranscript : '');
-      onTranscriptRef.current(currentText.trim());
-    };
-
-    rec.onerror = (event: any) => {
-      console.error('Speech recognition error:', event.error);
-    };
-
-    rec.onend = () => {
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-      if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
-      updateWaveform(new Array(20).fill(0));
-      setStatus('idle');
-      
-      setTimeout(() => {
-        if (fullTranscript.trim()) onAutoSendRef.current?.();
-      }, 100);
-    };
+    if (!SR || status !== 'idle') return;
 
     try {
+      const rec = new SR();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = 'en-US';
+
+      let fullTranscript = '';
+      let latestText = '';
+
+      const resetSilenceTimer = () => {
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = setTimeout(() => {
+          if (recognitionRef.current) recognitionRef.current.stop();
+        }, 3500);
+      };
+
+      rec.onstart = () => {
+        setStatus('recording');
+        resetSilenceTimer();
+        if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
+        waveformIntervalRef.current = setInterval(() => {
+          updateWaveform(Array.from({ length: 20 }, () => Math.random()));
+        }, 80);
+      };
+
+      rec.onresult = (event: any) => {
+        resetSilenceTimer();
+        let interimTranscript = '';
+        let finalTranscript = '';
+
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript;
+          } else {
+            interimTranscript += event.results[i][0].transcript;
+          }
+        }
+
+        if (finalTranscript) fullTranscript += (fullTranscript ? ' ' : '') + finalTranscript;
+        
+        latestText = (fullTranscript + (interimTranscript ? ' ' + interimTranscript : '')).trim();
+        onTranscriptRef.current(latestText);
+      };
+
+      rec.onerror = (event: any) => {
+        console.error('Speech recognition error:', event.error);
+        tauriApi.appendSystemLog('warn', `Speech recognition status: ${event.error}`);
+      };
+
+      rec.onend = () => {
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
+        updateWaveform(new Array(20).fill(0));
+        setStatus('idle');
+        
+        const textToSend = latestText.trim();
+        if (textToSend) {
+          onTranscriptRef.current(textToSend);
+          setTimeout(() => {
+            onAutoSendRef.current?.();
+          }, 100);
+        }
+      };
+
       rec.start();
       recognitionRef.current = rec;
       usingNativeRef.current = false;
-    } catch (e) {
-      console.error('Failed to start recognition:', e);
+    } catch (e: any) {
+      console.error('Failed to start SpeechRecognition:', e);
+      tauriApi.appendSystemLog('error', `SpeechRecognition failed to launch: ${e?.message || e}`);
+      // Fallback to MediaRecorder
+      startNativeRecording();
     }
-  }, [micAvailable, status, setStatus, updateWaveform]);
+  }, [status, setStatus, updateWaveform, startNativeRecording]);
 
   const stopBrowserRecording = useCallback(() => {
     if (status !== 'recording' || !recognitionRef.current) return;

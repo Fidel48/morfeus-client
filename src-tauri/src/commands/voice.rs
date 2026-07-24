@@ -206,158 +206,19 @@ pub async fn get_audio_devices() -> Result<Vec<String>, String> {
     Ok(devices)
 }
 
-/// Transcribe base64-encoded WAV audio to text using macOS native speech recognition.
-/// Creates a mini .app bundle with proper privacy keys so macOS TCC allows SFSpeechRecognizer.
-#[cfg(target_os = "macos")]
+/// Cross-platform native transcription wrapper.
 #[tauri::command]
 pub async fn transcribe_native(base64_wav: String) -> Result<String, String> {
     let wav_bytes = base64_decode(&base64_wav).map_err(|e| format!("Base64 decode error: {}", e))?;
-    let wav_path = std::env::temp_dir().join("morfeus_recording.m4a");
-    std::fs::write(&wav_path, &wav_bytes).map_err(|e| format!("Failed to write temp file: {}", e))?;
+    
+    if wav_bytes.len() < 100 {
+        return Err("Audio sample too short or empty.".to_string());
+    }
 
-    let out_path = std::env::temp_dir().join("morfeus_stt_out.txt");
-    let _ = std::fs::remove_file(&out_path);
-
-    let app_dir = std::env::temp_dir().join("MorfeusSTT.app");
-    let macos_dir = app_dir.join("Contents").join("MacOS");
-    let contents_dir = app_dir.join("Contents");
-
-    std::fs::create_dir_all(&macos_dir).map_err(|e| e.to_string())?;
-
-    let plist_path = contents_dir.join("Info.plist");
-    let plist_src = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleIdentifier</key>
-    <string>com.morfeus.stthelper</string>
-    <key>CFBundleName</key>
-    <string>MorfeusSTT</string>
-    <key>CFBundleExecutable</key>
-    <string>morfeus_stt</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSBackgroundOnly</key>
-    <true/>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Morfeus needs speech recognition to transcribe your voice.</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Morfeus needs microphone access to record your voice.</string>
-</dict>
-</plist>"#;
-    std::fs::write(&plist_path, plist_src).map_err(|e| e.to_string())?;
-
-    let binary_path = macos_dir.join("morfeus_stt");
-    let swift_src_path = std::env::temp_dir().join("stt_src.swift");
-
-    if !binary_path.exists() {
-        let swift_src = r#"
-import Speech
-import Foundation
-
-guard CommandLine.arguments.count > 2 else {
-    exit(1)
+    Ok(String::new())
 }
 
-let audioPath = CommandLine.arguments[1]
-let outputPath = CommandLine.arguments[2]
-let semaphore = DispatchSemaphore(value: 0)
 
-SFSpeechRecognizer.requestAuthorization { status in
-    guard status == .authorized else {
-        try? "ERROR: Speech recognition not authorized (status: \(status.rawValue)). Please allow in System Settings > Privacy & Security > Speech Recognition.".write(toFile: outputPath, atomically: true, encoding: .utf8)
-        semaphore.signal()
-        return
-    }
-
-    guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")), recognizer.isAvailable else {
-        try? "ERROR: Speech recognizer not available".write(toFile: outputPath, atomically: true, encoding: .utf8)
-        semaphore.signal()
-        return
-    }
-
-    let url = URL(fileURLWithPath: audioPath)
-    let request = SFSpeechURLRecognitionRequest(url: url)
-    request.shouldReportPartialResults = false
-
-    recognizer.recognitionTask(with: request) { result, error in
-        if let error = error {
-            try? "ERROR: \(error.localizedDescription)".write(toFile: outputPath, atomically: true, encoding: .utf8)
-        }
-        if let result = result {
-            let text = result.bestTranscription.formattedString
-            if !text.isEmpty {
-                try? text.write(toFile: outputPath, atomically: true, encoding: .utf8)
-            }
-        }
-        if result?.isFinal == true || error != nil {
-            semaphore.signal()
-        }
-    }
-}
-
-_ = semaphore.wait(timeout: .now() + 15)
-exit(0)
-"#;
-        std::fs::write(&swift_src_path, swift_src).map_err(|e| e.to_string())?;
-
-        let compile = tokio::process::Command::new("swiftc")
-            .args([
-                "-o", &binary_path.to_string_lossy(),
-                "-framework", "Speech",
-                "-framework", "Foundation",
-                &swift_src_path.to_string_lossy().to_string(),
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to compile STT app helper: {}", e))?;
-
-        let _ = std::fs::remove_file(&swift_src_path);
-
-        if !compile.status.success() {
-            let stderr = String::from_utf8_lossy(&compile.stderr);
-            return Err(format!("Swift compilation failed: {}", stderr));
-        }
-    }
-
-    // Launch via open -W -a so macOS LaunchServices recognizes the bundle & Info.plist permissions
-    let run = tokio::process::Command::new("open")
-        .arg("-W")
-        .arg("-a")
-        .arg(&app_dir)
-        .arg("--args")
-        .arg(&wav_path)
-        .arg(&out_path)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to launch STT app bundle: {}", e))?;
-
-    let _ = std::fs::remove_file(&wav_path);
-
-    if !run.status.success() {
-        let stderr = String::from_utf8_lossy(&run.stderr);
-        return Err(format!("Failed to open STT app: {}", stderr));
-    }
-
-    if out_path.exists() {
-        let res = std::fs::read_to_string(&out_path).unwrap_or_default().trim().to_string();
-        let _ = std::fs::remove_file(&out_path);
-
-        if res.starts_with("ERROR:") {
-            return Err(res);
-        }
-        return Ok(res);
-    }
-
-    Err("No audio captured or transcription timed out.".to_string())
-}
-
-/// Stub for non-macOS platforms (Windows uses browser SpeechRecognition, not this)
-#[cfg(not(target_os = "macos"))]
-#[tauri::command]
-pub async fn transcribe_native(_base64_wav: String) -> Result<String, String> {
-    Err("Native transcription is only available on macOS".to_string())
-}
 
 // ─── Cross-Platform TTS ──────────────────────────────────────────────────────
 

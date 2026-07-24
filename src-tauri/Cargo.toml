@@ -1,6 +1,6 @@
 [package]
 name = "morfeus"
-version = "0.1.13"
+version = "0.1.14"
 description = "Morfeus — Local-First LLM Desktop Client"
 authors = ["Morfeus"]
 edition = "2021"
@@ -11,6 +11,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+cc = "1.0"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
