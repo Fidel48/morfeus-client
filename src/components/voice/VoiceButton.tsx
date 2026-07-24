@@ -21,8 +21,10 @@ declare global {
 
 const getSpeechRecognition = () => {
   if (typeof window === 'undefined') return false;
-  // macOS WebKit crashes if we try to use webkitSpeechRecognition directly.
-  // We MUST use the native fallback via Rust + MediaRecorder.
+  // Inside Tauri desktop app (macOS WKWebView / Windows WebView2), webkitSpeechRecognition
+  // is unstable and crashes the WebView process. Always use MediaRecorder + native transcription in Desktop mode.
+  if (tauriApi.isDesktopApp()) return false;
+  
   const isMacOS = /Mac|iPhone|iPad|iPod/.test(navigator.platform) || 
                   (navigator.userAgent.includes('Mac') && !navigator.userAgent.includes('Chrome'));
   if (isMacOS) return false;
@@ -30,13 +32,14 @@ const getSpeechRecognition = () => {
 };
 
 export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSend, className }) => {
-  const { status, setStatus, micAvailable, waveformData, updateWaveform } = useVoiceStore();
+  const { status, setStatus, micAvailable, setMicAvailable, waveformData, updateWaveform } = useVoiceStore();
   const { settings } = useSettingsStore();
 
   const isRecording = status === 'recording';
   const isTranscribing = status === 'transcribing';
 
   const isHandlingClick = useRef(false);
+  const isStartingRef = useRef(false);
   const recognitionRef = useRef<any>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -49,38 +52,57 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
   React.useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
   React.useEffect(() => { onAutoSendRef.current = onAutoSend; }, [onAutoSend]);
 
-  // ─── Native Tauri recording (macOS fallback using MediaRecorder) ──────────
+  // ─── Native Tauri recording (MediaRecorder) ──────────
   const startNativeRecording = useCallback(async () => {
-    if (!micAvailable || status !== 'idle') return;
+    if (isStartingRef.current || status === 'recording' || status === 'transcribing') return;
+    isStartingRef.current = true;
 
     try {
       usingNativeRef.current = true;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      
+      // Double check status hasn't changed while waiting for getUserMedia permission
+      if (mediaRecorderRef.current) {
+        stream.getTracks().forEach(t => t.stop());
+        isStartingRef.current = false;
+        return;
+      }
+
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
+        if (event.data && event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
       };
 
-      mediaRecorder.start();
+      mediaRecorder.start(100); // collect 100ms chunks
       setStatus('recording');
+      setMicAvailable(true);
 
+      if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
       waveformIntervalRef.current = setInterval(() => {
         updateWaveform(Array.from({ length: 20 }, () => Math.random()));
       }, 80);
     } catch (err: any) {
       console.error('MediaRecorder failed to start:', err);
+      tauriApi.appendSystemLog('error', `Microphone capture error: ${err?.message || err}`);
       usingNativeRef.current = false;
+      mediaRecorderRef.current = null;
       setStatus('idle');
+    } finally {
+      isStartingRef.current = false;
     }
-  }, [micAvailable, status, setStatus, updateWaveform]);
+  }, [status, setStatus, setMicAvailable, updateWaveform]);
 
   const stopNativeRecording = useCallback(async () => {
-    if (status !== 'recording' || !mediaRecorderRef.current) return;
+    const mediaRecorder = mediaRecorderRef.current;
+    if (!mediaRecorder) {
+      setStatus('idle');
+      return;
+    }
 
     if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
     updateWaveform(new Array(20).fill(0));
@@ -88,41 +110,50 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
     setStatus('transcribing');
 
     try {
-      const mediaRecorder = mediaRecorderRef.current;
-      const audioDataPromise = new Promise<string>((resolve, reject) => {
-        mediaRecorder.onstop = () => {
-          const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/mp4' });
-          const reader = new FileReader();
-          reader.readAsDataURL(audioBlob);
-          reader.onloadend = () => {
-            const base64data = (reader.result as string).split(',')[1];
-            resolve(base64data);
+      // Ensure MediaRecorder is actually recording before calling stop()
+      if (mediaRecorder.state === 'recording') {
+        const audioDataPromise = new Promise<string>((resolve, reject) => {
+          mediaRecorder.onstop = () => {
+            try {
+              const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
+              const reader = new FileReader();
+              reader.readAsDataURL(audioBlob);
+              reader.onloadend = () => {
+                const base64data = (reader.result as string).split(',')[1] || '';
+                resolve(base64data);
+              };
+              reader.onerror = reject;
+            } catch (e) {
+              reject(e);
+            }
           };
-          reader.onerror = reject;
-        };
-      });
+        });
 
-      mediaRecorder.stop();
-      mediaRecorder.stream.getTracks().forEach(t => t.stop());
+        mediaRecorder.stop();
+        mediaRecorder.stream.getTracks().forEach(t => t.stop());
 
-      const base64Wav = await audioDataPromise;
-      const text = await tauriApi.transcribeNative(base64Wav);
-
-      if (text.trim()) {
-        onTranscriptRef.current(text.trim());
-        setTimeout(() => {
-          onAutoSendRef.current?.();
-        }, 80);
+        const base64Wav = await audioDataPromise;
+        if (base64Wav) {
+          const text = await tauriApi.transcribeNative(base64Wav);
+          if (text && text.trim()) {
+            onTranscriptRef.current(text.trim());
+            setTimeout(() => {
+              onAutoSendRef.current?.();
+            }, 80);
+          }
+        }
+      } else {
+        mediaRecorder.stream.getTracks().forEach(t => t.stop());
       }
     } catch (err: any) {
       console.error('Native transcription failed:', err);
-      alert('Transcription error: ' + (err?.message || err));
+      tauriApi.appendSystemLog('error', `Native transcription error: ${err?.message || err}`);
     } finally {
       usingNativeRef.current = false;
       mediaRecorderRef.current = null;
       setStatus('idle');
     }
-  }, [status, setStatus, updateWaveform]);
+  }, [setStatus, updateWaveform]);
 
   // ─── Browser SpeechRecognition (Windows / Chromium) ───────────────────
   const startBrowserRecording = useCallback(() => {
