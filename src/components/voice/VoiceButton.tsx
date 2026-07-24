@@ -154,20 +154,19 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
 
       rec.onresult = (event: any) => {
         resetSilenceTimer();
-        let interimTranscript = '';
         let finalTranscript = '';
+        let interimTranscript = '';
 
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) {
-            finalTranscript += event.results[i][0].transcript;
+        for (let i = 0; i < event.results.length; ++i) {
+          const res = event.results[i];
+          if (res.isFinal) {
+            finalTranscript += (finalTranscript ? ' ' : '') + res[0].transcript.trim();
           } else {
-            interimTranscript += event.results[i][0].transcript;
+            interimTranscript += (interimTranscript ? ' ' : '') + res[0].transcript.trim();
           }
         }
 
-        if (finalTranscript) fullTranscript += (fullTranscript ? ' ' : '') + finalTranscript;
-        
-        latestText = (fullTranscript + (interimTranscript ? ' ' + interimTranscript : '')).trim();
+        latestText = (finalTranscript + (interimTranscript ? ' ' + interimTranscript : '')).trim();
         onTranscriptRef.current(latestText);
       };
 

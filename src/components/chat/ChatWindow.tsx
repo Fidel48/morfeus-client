@@ -8,7 +8,7 @@ import { useChatStore } from '@/stores/chatStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { tauriApi } from '@/lib/tauri';
 import { extractPdfText, renderPdfToImages } from '@/lib/pdfParser';
-import { ContentPart } from '@/types';
+import { ContentPart, Message } from '@/types';
 import { cn, bytesToBase64, isVisionModel } from '@/lib/utils';
 
 interface Attachment {
@@ -271,6 +271,36 @@ export const ChatWindow: React.FC = () => {
     setAttachments(prev => prev.filter((_, i) => i !== index));
   };
 
+  // Consolidate duplicate web_search badges so only ONE Web Search indicator is shown per user turn
+  const displayMessages = React.useMemo(() => {
+    const filtered = messages.filter(m => m.role !== 'tool' && m.role !== 'system');
+    const result: Message[] = [];
+    let seenWebSearchInTurn = false;
+
+    for (const msg of filtered) {
+      if (msg.role === 'user') {
+        seenWebSearchInTurn = false;
+        result.push(msg);
+        continue;
+      }
+
+      const hasWebSearch = msg.tool_calls?.some(tc => tc.function?.name === 'web_search' || tc.function?.name === 'read_webpage');
+      const isToolCallOnly = msg.tool_calls && msg.tool_calls.length > 0 && !msg.content?.trim();
+
+      if (hasWebSearch && isToolCallOnly) {
+        if (seenWebSearchInTurn) {
+          // Skip duplicate web_search / read_webpage badges in the same user turn
+          continue;
+        }
+        seenWebSearchInTurn = true;
+      }
+
+      result.push(msg);
+    }
+
+    return result;
+  }, [messages]);
+
   const isEmpty = messages.length === 0 && !isStreaming;
 
   return (
@@ -302,7 +332,7 @@ export const ChatWindow: React.FC = () => {
           <EmptyState />
         ) : (
           <>
-            {messages.filter(m => m.role !== 'tool' && m.role !== 'system').map((message, index) => (
+            {displayMessages.map((message, index) => (
               <div key={message.id} className="flex justify-center">
                 <MessageBubble message={message} index={index} />
               </div>

@@ -99,12 +99,19 @@ export function useChat() {
         const timeString = now.toLocaleTimeString('en-US');
         
         finalSystemPrompt += `\n\n[SYSTEM CONTEXT]\nCurrent Date: ${dateString}\nCurrent Time: ${timeString}\n`;
-        finalSystemPrompt += `When using tools like web_search or answering questions about current events, prices, or facts:\n`;
-        finalSystemPrompt += `- ALWAYS cite your sources by providing the exact URL links from the search results.\n`;
-        finalSystemPrompt += `- State the date of the information (e.g., "As of June 7, 2026, the price is...").\n`;
-        finalSystemPrompt += `- Do not hallucinate or guess facts; rely strictly on the data provided by your tools.`;
+        finalSystemPrompt += `CRITICAL INSTRUCTIONS FOR WEB SEARCH & REAL-TIME DATA:\n`;
+        finalSystemPrompt += `1. When asked for current prices (e.g. Bitcoin, crypto, stock quotes), weather, news, or real-time facts, ALWAYS run the 'web_search' tool first.\n`;
+        finalSystemPrompt += `2. In your response, ALWAYS state the exact Current Date and Time (e.g., "As of ${dateString} at ${timeString}...").\n`;
+        finalSystemPrompt += `3. ALWAYS include direct clickable Markdown source links (e.g., [CoinMarketCap](url), [CoinGecko](url), or [Article Title](url)) using the exact URLs returned by the search tool.\n`;
+        finalSystemPrompt += `4. NEVER output plain website names without full Markdown links. Always link directly to the source URL.`;
 
-      const executeChatLoop = async (isInitialUserTurn: boolean = false) => {
+      const executeChatLoop = async (isInitialUserTurn: boolean = false, depth: number = 0) => {
+        if (depth >= 5) {
+          console.warn('[useChat] Max tool recursion depth reached (5). Halting tool loop.');
+          tauriApi.appendSystemLog('warn', 'Max tool recursion depth reached (5).');
+          return;
+        }
+
         // ─── CONTEXT WINDOW PRUNING ───
         const estimateTokens = (text: string) => Math.ceil(text.length / 4);
         
@@ -335,7 +342,7 @@ export function useChat() {
           setChatStatus('thinking');
           clearStreamingContent();
           firstToken = false;
-          await executeChatLoop(false);
+          await executeChatLoop(false, depth + 1);
           return; // exit current frame to prevent duplicate TTS on intermediate steps
         }
 

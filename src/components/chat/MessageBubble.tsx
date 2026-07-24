@@ -22,9 +22,17 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
     return null;
   }
 
-  // If debug mode is OFF and this is a tool-call message without final text content, hide it
+  // Always display user-facing tool calls (like web_search) so clients see when AI searches the web
+  const hasAlwaysVisibleTool = message.tool_calls?.some(tc => 
+    tc.function?.name === 'web_search' || 
+    tc.function?.name === 'read_webpage' || 
+    tc.function?.name === 'read_youtube_video' ||
+    tc.function?.name === 'read_local_file'
+  );
+
+  // If debug mode is OFF and this is a tool-call-only message, hide internal tools but ALWAYS show web_search
   const isToolCallOnly = message.tool_calls && message.tool_calls.length > 0 && !message.content?.trim();
-  if (!settings.debug_mode && isToolCallOnly) {
+  if (!settings.debug_mode && isToolCallOnly && !hasAlwaysVisibleTool) {
     return null;
   }
 
@@ -76,13 +84,29 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
                 let text = `Tool: ${toolName || 'unknown'}`;
                 let Icon = Wrench;
                 
-                if (toolName === 'web_search') {
-                  text = 'Web Search';
-                  Icon = Globe;
-                } else if (toolName === 'read_webpage') {
-                  text = 'Read Webpage';
-                  Icon = FileText;
-                } else if (toolName === 'read_youtube_video') {
+                if (toolName === 'web_search' || toolName === 'read_webpage') {
+                  let queryDisplay = '';
+                  try {
+                    const parsed = JSON.parse(tc.function?.arguments || '{}');
+                    queryDisplay = parsed.query || parsed.url || '';
+                  } catch {
+                    queryDisplay = tc.function?.arguments || '';
+                  }
+
+                  return (
+                    <div key={idx} className="flex items-center gap-2.5 text-xs text-violet-300 bg-violet-950/50 border border-violet-500/30 px-3.5 py-1.5 rounded-full w-fit shadow-md shadow-violet-950/30 animate-pulse">
+                      <Globe size={13} className="text-violet-400 animate-spin" style={{ animationDuration: '3s' }} />
+                      <span className="font-mono text-[11px] font-semibold text-violet-200">Web Search</span>
+                      {queryDisplay && (
+                        <span className="text-[10px] text-zinc-400 max-w-xs truncate border-l border-violet-500/30 pl-2 font-mono">
+                          {queryDisplay}
+                        </span>
+                      )}
+                    </div>
+                  );
+                }
+
+                if (toolName === 'read_youtube_video') {
                   text = 'Read YouTube Video';
                   Icon = Video;
                 } else if (toolName === 'search_files') {

@@ -11,8 +11,14 @@ pub struct SearchResult {
 
 fn make_client() -> Client {
     Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("Accept-Language", "en-US,en;q=0.9".parse().unwrap());
+            headers.insert("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".parse().unwrap());
+            headers
+        })
+        .timeout(std::time::Duration::from_secs(12))
         .build()
         .expect("Failed to build HTTP client")
 }
@@ -20,55 +26,105 @@ fn make_client() -> Client {
 #[tauri::command]
 pub async fn search_duckduckgo(query: String) -> Result<Vec<SearchResult>, String> {
     let client = make_client();
-    let url = "https://html.duckduckgo.com/html/";
-    
-    let resp = client.post(url)
-        .form(&[("q", query.as_str())])
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("DuckDuckGo returned HTTP {}", resp.status().as_u16()));
-    }
-
-    let body = resp.text().await.map_err(|e| e.to_string())?;
-    let document = Html::parse_document(&body);
-    
-    // DuckDuckGo lite selectors
-    let result_selector = Selector::parse(".result").unwrap();
-    let title_selector = Selector::parse(".result__title .result__a").unwrap();
-    let snippet_selector = Selector::parse(".result__snippet").unwrap();
-
     let mut results = Vec::new();
 
-    for element in document.select(&result_selector).take(5) {
-        if let Some(title_el) = element.select(&title_selector).next() {
-            let title = title_el.text().collect::<Vec<_>>().join("").trim().to_string();
-            let href = title_el.value().attr("href").unwrap_or("").to_string();
-            
-            // Clean up duckduckgo redirect URL
-            let mut url = href.clone();
-            if url.starts_with("//duckduckgo.com/l/?uddg=") {
-                if let Some(encoded) = url.split("uddg=").nth(1) {
-                    if let Some(clean) = encoded.split('&').next() {
-                        if let Ok(decoded) = urlencoding::decode(clean) {
-                            url = decoded.to_string();
+    // 1. Try DuckDuckGo HTML
+    let html_url = "https://html.duckduckgo.com/html/";
+    if let Ok(resp) = client.post(html_url).form(&[("q", query.as_str()), ("b", ""), ("kl", "us-en")]).send().await {
+        if resp.status().is_success() {
+            if let Ok(body) = resp.text().await {
+                let document = Html::parse_document(&body);
+                
+                let result_selector = Selector::parse(".result").unwrap();
+                let title_selector = Selector::parse(".result__title .result__a, a.result__a").unwrap();
+                let snippet_selector = Selector::parse(".result__snippet, .result__body").unwrap();
+
+                for element in document.select(&result_selector).take(6) {
+                    if let Some(title_el) = element.select(&title_selector).next() {
+                        let title = title_el.text().collect::<Vec<_>>().join("").trim().to_string();
+                        let href = title_el.value().attr("href").unwrap_or("").to_string();
+                        
+                        let mut url = href.clone();
+                        if url.starts_with("//duckduckgo.com/l/?uddg=") {
+                            if let Some(encoded) = url.split("uddg=").nth(1) {
+                                if let Some(clean) = encoded.split('&').next() {
+                                    if let Ok(decoded) = urlencoding::decode(clean) {
+                                        url = decoded.to_string();
+                                    }
+                                }
+                            }
+                        } else if url.starts_with('/') {
+                            url = format!("https://duckduckgo.com{}", url);
+                        }
+
+                        let snippet = if let Some(snippet_el) = element.select(&snippet_selector).next() {
+                            snippet_el.text().collect::<Vec<_>>().join("").trim().to_string()
+                        } else {
+                            String::new()
+                        };
+
+                        if !title.is_empty() && !url.is_empty() {
+                            results.push(SearchResult { title, url, snippet });
                         }
                     }
                 }
             }
+        }
+    }
 
-            let snippet = if let Some(snippet_el) = element.select(&snippet_selector).next() {
-                snippet_el.text().collect::<Vec<_>>().join("").trim().to_string()
-            } else {
-                String::new()
-            };
+    // 2. Fallback to DuckDuckGo Lite if HTML gave 0 results
+    if results.is_empty() {
+        let lite_url = "https://lite.duckduckgo.com/lite/";
+        if let Ok(resp) = client.post(lite_url).form(&[("q", query.as_str())]).send().await {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.text().await {
+                    let document = Html::parse_document(&body);
+                    let link_selector = Selector::parse("a.result-link").unwrap();
+                    let snippet_selector = Selector::parse("td.result-snippet").unwrap();
 
-            if !title.is_empty() && !url.is_empty() {
-                results.push(SearchResult { title, url, snippet });
+                    let links: Vec<_> = document.select(&link_selector).collect();
+                    let snippets: Vec<_> = document.select(&snippet_selector).collect();
+
+                    for (i, link_el) in links.iter().take(6).enumerate() {
+                        let title = link_el.text().collect::<Vec<_>>().join("").trim().to_string();
+                        let url = link_el.value().attr("href").unwrap_or("").to_string();
+                        let snippet = if i < snippets.len() {
+                            snippets[i].text().collect::<Vec<_>>().join("").trim().to_string()
+                        } else {
+                            String::new()
+                        };
+
+                        if !title.is_empty() && !url.is_empty() {
+                            results.push(SearchResult { title, url, snippet });
+                        }
+                    }
+                }
             }
         }
+    }
+
+    // 3. Fallback to DuckDuckGo Instant Answer API if still empty
+    if results.is_empty() {
+        let api_url = format!("https://api.duckduckgo.com/?q={}&format=json&no_html=1", urlencoding::encode(&query));
+        if let Ok(resp) = client.get(&api_url).send().await {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(abstract_text) = json.get("AbstractText").and_then(|v| v.as_str()) {
+                    if !abstract_text.is_empty() {
+                        let source_url = json.get("AbstractURL").and_then(|v| v.as_str()).unwrap_or("https://duckduckgo.com");
+                        let source_title = json.get("Heading").and_then(|v| v.as_str()).unwrap_or("Search Result");
+                        results.push(SearchResult {
+                            title: source_title.to_string(),
+                            url: source_url.to_string(),
+                            snippet: abstract_text.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if results.is_empty() {
+        return Err(format!("No search results found for query: '{}'. Please try a simpler search term.", query));
     }
 
     Ok(results)
