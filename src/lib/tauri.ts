@@ -154,6 +154,16 @@ export const tauriApi = {
     return tauriInvoke<string>('parse_local_file', { path });
   },
 
+  /** List the contents of a directory */
+  async listDirectory(path: string): Promise<Array<{name: string, path: string, is_dir: boolean, size_bytes: number | null, extension: string | null}>> {
+    return tauriInvoke('list_directory', { path });
+  },
+
+  /** Get platform-aware paths to Home, Downloads, Documents, Desktop */
+  async getSpecialDirs(): Promise<{home: string | null, downloads: string | null, documents: string | null, desktop: string | null}> {
+    return tauriInvoke('get_special_dirs');
+  },
+
   /** Finds project level rules (.morfeusrules, .cursorrules) given a workspace path */
   async findProjectRules(workspacePath: string): Promise<Array<{ file_name: string, path: string, content: string }>> {
     return tauriInvoke('find_project_rules', { workspacePath });

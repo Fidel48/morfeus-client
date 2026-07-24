@@ -57,6 +57,8 @@ pub fn run() {
             commands::web::fetch_webpage,
             // Files
             commands::files::parse_local_file,
+            commands::files::list_directory,
+            commands::files::get_special_dirs,
             commands::rules::find_project_rules,
             // YouTube
             commands::youtube::read_youtube_transcript,

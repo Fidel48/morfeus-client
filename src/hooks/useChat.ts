@@ -238,6 +238,24 @@ export function useChat() {
                   result = scrapeRes;
                 } else if (tc.function.name === 'read_youtube_video') {
                   result = await tauriApi.readYoutubeTranscript(args.url);
+                } else if (tc.function.name === 'list_directory') {
+                  const entries = await tauriApi.listDirectory(args.path);
+                  const lines = entries.map(e => {
+                    const size = e.size_bytes != null
+                      ? e.size_bytes > 1_000_000
+                        ? `${(e.size_bytes / 1_000_000).toFixed(1)} MB`
+                        : e.size_bytes > 1_000
+                          ? `${(e.size_bytes / 1_000).toFixed(1)} KB`
+                          : `${e.size_bytes} B`
+                      : '';
+                    return e.is_dir
+                      ? `📁 ${e.name}/`
+                      : `📄 ${e.name}${size ? ` (${size})` : ''}`;
+                  });
+                  result = `Contents of ${args.path}:\n${lines.join('\n')}`;
+                } else if (tc.function.name === 'get_special_dirs') {
+                  const dirs = await tauriApi.getSpecialDirs();
+                  result = `User's special directories:\n${JSON.stringify(dirs, null, 2)}`;
                 } else if (tc.function.name === 'lsp_start_server') {
                   await tauriApi.lspStartServer(args.languageId, args.command, args.args, args.workspaceRoot);
                   result = `LSP server started successfully for language ID: ${args.languageId}`;

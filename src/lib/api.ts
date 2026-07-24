@@ -123,6 +123,35 @@ export const WEB_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'list_directory',
+      description: "List the files and folders inside a directory on the user's local computer. Use this to browse the filesystem, explore folders like Downloads or Documents, and find files by name. Always call get_special_dirs first if you need to find standard folders like Home, Downloads, or Documents.",
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: "The absolute path to the directory to list (e.g. /Users/john/Downloads on macOS or C:\\Users\\john\\Downloads on Windows).",
+          },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_special_dirs',
+      description: "Get the absolute paths to the user's standard directories: Home, Downloads, Documents, and Desktop. Always call this first before trying to browse the filesystem so you know the correct paths for this user's operating system.",
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+  },
 ];
 
 // ─── Model list ──────────────────────────────────────────────────────────────
