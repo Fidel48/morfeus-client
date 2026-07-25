@@ -222,7 +222,7 @@ export const ChatWindow: React.FC = () => {
   };
 
   const handleVoiceTranscript = useCallback((text: string) => {
-    setInput((prev) => (prev ? `${prev} ${text}` : text));
+    setInput(text);
   }, []);
 
   // Always keep handleSendRef current so triggerAutoSend can call it without stale closures
@@ -395,6 +395,7 @@ export const ChatWindow: React.FC = () => {
 
             {/* Voice button */}
             <VoiceButton 
+              currentInput={input}
               onTranscript={handleVoiceTranscript} 
               onAutoSend={triggerAutoSend}
               className="self-end mb-0.5" 

@@ -7,6 +7,7 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { tauriApi } from '@/lib/tauri';
 
 interface VoiceButtonProps {
+  currentInput?: string;
   onTranscript: (text: string) => void;
   onAutoSend?: () => void;
   className?: string;
@@ -40,7 +41,7 @@ const getSpeechRecognition = () => {
   return window.SpeechRecognition || window.webkitSpeechRecognition;
 };
 
-export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSend, className }) => {
+export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onTranscript, onAutoSend, className }) => {
   const { status, setStatus, micAvailable, setMicAvailable, waveformData, updateWaveform } = useVoiceStore();
   const { settings } = useSettingsStore();
 
@@ -55,9 +56,11 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const waveformIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const usingNativeRef = useRef(false);
+  const currentInputRef = useRef(currentInput);
 
   const onTranscriptRef = useRef(onTranscript);
   const onAutoSendRef = useRef(onAutoSend);
+  React.useEffect(() => { currentInputRef.current = currentInput; }, [currentInput]);
   React.useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
   React.useEffect(() => { onAutoSendRef.current = onAutoSend; }, [onAutoSend]);
 
@@ -135,6 +138,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
 
       let fullTranscript = '';
       let latestText = '';
+      let initialInput = '';
 
       const resetSilenceTimer = () => {
         if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
@@ -144,6 +148,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
       };
 
       rec.onstart = () => {
+        initialInput = currentInputRef.current.trim();
         setStatus('recording');
         resetSilenceTimer();
         if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
@@ -166,7 +171,8 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ onTranscript, onAutoSe
           }
         }
 
-        latestText = (finalTranscript + (interimTranscript ? ' ' + interimTranscript : '')).trim();
+        const sessionText = (finalTranscript + (interimTranscript ? ' ' + interimTranscript : '')).trim();
+        latestText = initialInput ? `${initialInput} ${sessionText}` : sessionText;
         onTranscriptRef.current(latestText);
       };
 
