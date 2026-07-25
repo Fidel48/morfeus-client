@@ -231,7 +231,7 @@ export function useChat() {
         if (finalMessage.tool_calls && finalMessage.tool_calls.length > 0) {
           setChatStatus('calling-tool');
           
-          for (const tc of finalMessage.tool_calls) {
+          await Promise.all(finalMessage.tool_calls.map(async (tc) => {
             if (tc.type === 'function') {
               try {
                 const args = JSON.parse(tc.function.arguments);
@@ -301,7 +301,6 @@ export function useChat() {
 
                 tauriApi.appendSystemLog('info', `Tool Result [${tc.function.name}]: ${result.length > 200 ? result.slice(0, 200) + '...' : result}`);
 
-                // Add tool result message
                 const toolMsg: Message = {
                   id: generateId(),
                   conversation_id: convId,
@@ -311,14 +310,10 @@ export function useChat() {
                   created_at: Date.now(),
                 };
                 addMessage(toolMsg);
-                // We DO NOT manually append to apiMessages here anymore,
-                // because the recursive executeChatLoop() will rebuild and prune it 
-                // directly from useChatStore state!
                 
               } catch (e) {
                 console.error('Tool execution error:', e);
                 tauriApi.appendSystemLog('error', `Tool Error [${tc.function.name}]: ${String(e)}`);
-                // Add error message as tool result
                 const errorMsg: Message = {
                   id: generateId(),
                   conversation_id: convId,
@@ -328,13 +323,9 @@ export function useChat() {
                   created_at: Date.now(),
                 };
                 addMessage(errorMsg);
-                
-                // We DO NOT manually append to apiMessages here anymore,
-                // because the recursive executeChatLoop() will rebuild and prune it 
-                // directly from useChatStore state!
               }
             }
-          }
+          }));
           
           setChatStatus('tool-result');
           // Automatically re-trigger LLM with new tool result context
