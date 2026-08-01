@@ -91,27 +91,20 @@ export function useChat() {
       clearStreamingContent();
 
       try {
-        // Dynamically inject temporal awareness and anti-hallucination guidelines
-        let finalSystemPrompt = settings.system_prompt || 'You are a helpful AI assistant.';
+        let finalSystemPrompt = settings.system_prompt || 'You are Morfeus, a highly capable, articulate, and intelligent AI assistant.';
         
         const now = new Date();
         const dateString = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
         const timeString = now.toLocaleTimeString('en-US');
         
-        finalSystemPrompt += `\n\n[SYSTEM CONTEXT]\nCurrent Date: ${dateString}\nCurrent Time: ${timeString}\n`;
-        finalSystemPrompt += `CRITICAL INSTRUCTIONS FOR WEB SEARCH & REAL-TIME DATA:\n`;
-        finalSystemPrompt += `1. When asked for current prices (e.g. Bitcoin, crypto, stock quotes), weather, news, or real-time facts, ALWAYS run the 'web_search' tool first.\n`;
-        finalSystemPrompt += `2. In your response, ALWAYS state the exact Current Date and Time (e.g., "As of ${dateString} at ${timeString}...").\n`;
-        finalSystemPrompt += `3. ALWAYS include direct clickable Markdown source links (e.g., [CoinMarketCap](url), [CoinGecko](url), or [Article Title](url)) using the exact URLs returned by the search tool.\n`;
-        finalSystemPrompt += `4. NEVER output plain website names without full Markdown links. Always link directly to the source URL.`;
+        finalSystemPrompt += `\n\nToday's Date: ${dateString}\nCurrent Time: ${timeString}\n`;
+        finalSystemPrompt += `Response Guidelines:\n`;
+        finalSystemPrompt += `- Always answer the user's specific prompt directly, intelligently, and concisely, seamlessly building on previous turns in the conversation.\n`;
+        finalSystemPrompt += `- Do NOT call local file tools (e.g. read_local_file, list_directory, search_files) unless the user explicitly asks to view, debug, search, or edit code files.\n`;
+        finalSystemPrompt += `- For general advice, investments, crypto, or web queries, answer directly or use web_search.\n`;
+        finalSystemPrompt += `- Never repeat a previous response word-for-word or output raw system tags.`;
 
       const executeChatLoop = async (isInitialUserTurn: boolean = false, depth: number = 0) => {
-        if (depth >= 5) {
-          console.warn('[useChat] Max tool recursion depth reached (5). Halting tool loop.');
-          tauriApi.appendSystemLog('warn', 'Max tool recursion depth reached (5).');
-          return;
-        }
-
         // ─── CONTEXT WINDOW PRUNING ───
         const estimateTokens = (text: string) => Math.ceil(text.length / 4);
         
@@ -183,7 +176,13 @@ export function useChat() {
         
         for (const serverId of activeMcpServers) {
           try {
-            const result = await tauriApi.mcpListTools(serverId);
+            // Bug #7: wrap mcpListTools in a timeout so a hung MCP server can't freeze the UI
+            const result = await Promise.race([
+              tauriApi.mcpListTools(serverId),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error(`MCP server ${serverId} timed out`)), 5000)
+              ),
+            ]);
             if (result && Array.isArray(result.tools)) {
               for (const tool of result.tools) {
                 mcpTools.push({
@@ -201,9 +200,20 @@ export function useChat() {
           }
         }
 
+        // If we reached max tool depth (3+), disable tool calling and force final synthesis
+        const isMaxDepth = depth >= 3;
+        if (isMaxDepth) {
+          apiMessages.push({
+            role: 'system',
+            content: '[SYSTEM NOTICE]: Search depth limit reached. DO NOT call any tools. Synthesize your complete, detailed final answer now.',
+          });
+        }
+
+        const availableTools = isMaxDepth ? [] : mcpTools;
+
         let firstToken = false;
         
-        for await (const chunk of streamChat(settings, apiMessages, controller.signal, mcpTools)) {
+        for await (const chunk of streamChat(settings, apiMessages, controller.signal, availableTools)) {
           const delta = chunk.choices[0]?.delta;
           if (!delta) continue;
 
@@ -231,16 +241,47 @@ export function useChat() {
         if (finalMessage.tool_calls && finalMessage.tool_calls.length > 0) {
           setChatStatus('calling-tool');
           
-          for (const tc of finalMessage.tool_calls) {
+          // Max 2 tool calls per turn limit to prevent models from spamming 10+ calls
+          const callsToExecute = finalMessage.tool_calls.slice(0, 2);
+          const executedToolKeysInTurn = new Set<string>();
+          
+          for (const tc of callsToExecute) {
+            // Bug #3: skip tool execution if the user aborted
+            if (controller.signal.aborted) break;
             if (tc.type === 'function') {
               try {
-                const args = JSON.parse(tc.function.arguments);
+                const args = JSON.parse(tc.function?.arguments || '{}');
+                const toolKey = `${tc.function?.name}::${tc.function?.arguments}`;
+                
+                // In-turn deduplication check: skip if this exact tool call ran earlier in this turn
+                if (executedToolKeysInTurn.has(toolKey)) {
+                  console.log(`[Tool Loop] Skipped duplicate in-turn tool call: ${toolKey}`);
+                  continue;
+                }
+                executedToolKeysInTurn.add(toolKey);
+
                 let result = '';
                 tauriApi.appendSystemLog('info', `Tool Call: ${tc.function.name}(${tc.function.arguments})`);
                 
-                if (tc.function.name === 'web_search') {
-                  const searchRes = await tauriApi.webSearch(args.query);
-                  result = JSON.stringify(searchRes, null, 2);
+                // Duplicate Tool Call Guard: Check if this tool with identical arguments already ran in history
+                const currentConvMessages = useChatStore.getState().messages.filter(m => m.conversation_id === convId);
+                const hasDuplicateCall = currentConvMessages.some(
+                  m => m.role === 'tool' && 
+                  m.content && 
+                  (m.content.includes(`Tool Call: ${tc.function.name}`) || m.content.includes(tc.function.name)) &&
+                  m.content.includes(tc.function?.arguments || '')
+                );
+
+                if (hasDuplicateCall) {
+                  result = `[SYSTEM NOTICE]: The tool '${tc.function.name}' with these exact arguments was already executed in a previous step. DO NOT call it again. Formulate your final response now using all existing information.`;
+                } else if (tc.function.name === 'web_search') {
+                  const q = (args.query || '').trim();
+                  if (q.startsWith('http://') || q.startsWith('https://')) {
+                    result = await tauriApi.fetchWebpage(q);
+                  } else {
+                    const searchRes = await tauriApi.webSearch(q);
+                    result = JSON.stringify(searchRes, null, 2);
+                  }
                 } else if (tc.function.name === 'read_webpage') {
                   const scrapeRes = await tauriApi.fetchWebpage(args.url);
                   result = scrapeRes;
@@ -337,11 +378,12 @@ export function useChat() {
           }
           
           setChatStatus('tool-result');
+          // Bug #3: do not re-enter the loop if user aborted during tool execution
+          if (controller.signal.aborted) return;
           // Automatically re-trigger LLM with new tool result context
-          setIsStreaming(true);
+          // Bug #20: removed redundant setIsStreaming(true) — already true
           setChatStatus('thinking');
           clearStreamingContent();
-          firstToken = false;
           await executeChatLoop(false, depth + 1);
           return; // exit current frame to prevent duplicate TTS on intermediate steps
         }
@@ -360,12 +402,14 @@ export function useChat() {
 
       updateConversation(convId, { updated_at: Date.now() });
       } catch (error: unknown) {
-        if (error instanceof Error && error.name === 'AbortError') {
-          // User stopped streaming — finalize partial content
+        if (error instanceof Error && (error.name === 'AbortError' || error.message === 'Aborted')) {
+          // User stopped streaming — finalize partial content if any
           const { streamingContent: partial } = useChatStore.getState();
           if (partial) {
             finalizeStreamMessage(convId);
           }
+          // Bug #4: ALWAYS clear streaming state even when partial is empty
+          clearStreamingContent();
         } else {
           console.error('Streaming error:', error);
           const errMsg = error instanceof Error ? error.message : 'Unknown error';

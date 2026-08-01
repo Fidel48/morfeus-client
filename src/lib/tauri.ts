@@ -63,10 +63,12 @@ export const tauriApi = {
   },
 
   async speakText(text: string, rate: number = 1.0, voiceId?: string): Promise<void> {
+    if (isTauri) {
+      return tauriInvoke('speak_text', { text, rate, voiceId });
+    }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = rate;
-      
       if (voiceId) {
         const voices = window.speechSynthesis.getVoices();
         const selectedVoice = voices.find(v => v.name === voiceId);
@@ -75,38 +77,37 @@ export const tauriApi = {
         }
       }
       window.speechSynthesis.speak(utterance);
-    } else {
-      return tauriInvoke('speak_text', { text, rate });
     }
   },
 
   async getVoices(): Promise<string[]> {
+    if (isTauri) {
+      return tauriInvoke<string[]>('get_voices');
+    }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       return new Promise(resolve => {
         let voices = window.speechSynthesis.getVoices();
         if (voices.length > 0) {
           resolve(voices.map(v => v.name));
         } else {
-          // Chrome/Edge load voices asynchronously
           window.speechSynthesis.onvoiceschanged = () => {
             resolve(window.speechSynthesis.getVoices().map(v => v.name));
           };
-          // Fallback if event never fires
           setTimeout(() => {
             resolve(window.speechSynthesis.getVoices().map(v => v.name));
           }, 1000);
         }
       });
-    } else {
-      return tauriInvoke<string[]>('get_voices');
     }
+    return [];
   },
 
   async stopSpeaking(): Promise<void> {
+    if (isTauri) {
+      return tauriInvoke('stop_speaking');
+    }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
-    } else {
-      return tauriInvoke('stop_speaking');
     }
   },
 

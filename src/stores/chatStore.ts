@@ -117,11 +117,14 @@ export const useChatStore = create<ChatStore>()(
           ? (streamingToolCalls as ToolCall[]) 
           : undefined;
 
+        // Bug #14: guard against fully empty messages (no content, no tool calls)
+        const content = streamingContent || (tool_calls ? undefined : '[empty response]');
+
         const message: Message = {
           id: generateId(),
           conversation_id: conversationId,
           role: 'assistant',
-          content: streamingContent || undefined,
+          content,
           tool_calls,
           created_at: Date.now(),
         };

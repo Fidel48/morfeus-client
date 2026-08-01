@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Morfeus Client",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "identifier": "com.morfeus.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -31,7 +31,8 @@
         "fullscreen": false,
         "decorations": true,
         "transparent": false,
-        "center": true
+        "center": true,
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
       }
     ],
     "security": {

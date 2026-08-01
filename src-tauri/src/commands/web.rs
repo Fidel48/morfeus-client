@@ -9,7 +9,7 @@ pub struct SearchResult {
     snippet: String,
 }
 
-fn make_client() -> Client {
+fn make_client() -> Result<Client, String> {
     Client::builder()
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
         .default_headers({
@@ -20,12 +20,12 @@ fn make_client() -> Client {
         })
         .timeout(std::time::Duration::from_secs(12))
         .build()
-        .expect("Failed to build HTTP client")
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))
 }
 
 #[tauri::command]
 pub async fn search_duckduckgo(query: String) -> Result<Vec<SearchResult>, String> {
-    let client = make_client();
+    let client = make_client()?;
     let mut results = Vec::new();
 
     // 1. Try DuckDuckGo HTML
@@ -132,11 +132,11 @@ pub async fn search_duckduckgo(query: String) -> Result<Vec<SearchResult>, Strin
 
 #[tauri::command]
 pub async fn fetch_webpage(url: String) -> Result<String, String> {
-    let client = make_client();
+    let client = make_client()?;
     let resp = client.get(&url).send().await.map_err(|e| format!("Request failed: {}", e))?;
     
     if !resp.status().is_success() {
-        return Err(format!("Server returned HTTP {}", resp.status().as_u16()));
+        return Ok(format!("[Webpage Notice]: Could not read full page at {} (HTTP {}). Please answer using the search snippets provided by web_search.", url, resp.status().as_u16()));
     }
 
     let body = resp.text().await.map_err(|e| e.to_string())?;

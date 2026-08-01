@@ -21,6 +21,11 @@ impl Default for RecordingBuffer {
     }
 }
 
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn check_and_request_mic_permission() -> i32;
+}
+
 /// Start recording audio from the default microphone.
 /// Uses the device's native sample rate to avoid StreamConfigNotSupported.
 #[tauri::command]
@@ -28,6 +33,14 @@ pub async fn start_recording(
     app: AppHandle,
     state: tauri::State<'_, RecordingBuffer>,
 ) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = unsafe { check_and_request_mic_permission() };
+        if status == 2 {
+            return Err("Microphone permission denied. Please allow microphone access in macOS System Settings → Privacy & Security → Microphone.".to_string());
+        }
+    }
+
     {
         let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
         if *is_recording {
@@ -114,6 +127,8 @@ pub async fn start_recording(
 
         if let Err(e) = stream.play() {
             eprintln!("[morfeus] Failed to play stream: {}", e);
+            // Bug #9: reset is_recording so the user can retry without restarting the app
+            if let Ok(mut rec) = is_recording_ref.lock() { *rec = false; }
             return;
         }
 
@@ -207,6 +222,7 @@ pub async fn get_audio_devices() -> Result<Vec<String>, String> {
 }
 
 /// Cross-platform native transcription wrapper.
+#[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn transcribe_native(base64_wav: String) -> Result<String, String> {
     let wav_bytes = base64_decode(&base64_wav).map_err(|e| format!("Base64 decode error: {}", e))?;
@@ -215,6 +231,40 @@ pub async fn transcribe_native(base64_wav: String) -> Result<String, String> {
         return Err("Audio sample too short or empty.".to_string());
     }
 
+    tokio::task::spawn_blocking(move || {
+        let temp_dir = std::env::temp_dir();
+        let file_id = uuid::Uuid::new_v4().to_string();
+        let temp_wav = temp_dir.join(format!("morfeus_audio_{}.wav", file_id));
+        
+        std::fs::write(&temp_wav, &wav_bytes).map_err(|e| format!("Failed to save temp WAV: {}", e))?;
+
+        let mac_speech_bin = env!("MAC_SPEECH_BIN");
+        let output = std::process::Command::new(mac_speech_bin)
+            .arg(&temp_wav)
+            .output()
+            .map_err(|e| format!("Failed to execute Apple Speech recognizer: {}", e))?;
+
+        let _ = std::fs::remove_file(&temp_wav);
+
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() {
+            let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if !err.is_empty() && !err.contains("timed out") {
+                return Err(format!("Apple Speech error: {}", err));
+            }
+        }
+
+        Ok(text)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub async fn transcribe_native(base64_wav: String) -> Result<String, String> {
+    let wav_bytes = base64_decode(&base64_wav).map_err(|e| format!("Base64 decode error: {}", e))?;
+    if wav_bytes.len() < 100 {
+        return Err("Audio sample too short or empty.".to_string());
+    }
     Ok(String::new())
 }
 
@@ -244,12 +294,21 @@ pub async fn speak_text(text: String, rate: Option<f64>) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
-pub async fn speak_text(text: String, rate: Option<f64>) -> Result<(), String> {
+#[allow(non_snake_case)]
+pub async fn speak_text(text: String, rate: Option<f64>, voiceId: Option<String>) -> Result<(), String> {
     let rate_val = rate.unwrap_or(1.0);
     let wpm = (175.0 * rate_val) as i32;
     
-    tokio::process::Command::new("say")
-        .args(["-r", &wpm.to_string(), &text])
+    let mut cmd = tokio::process::Command::new("say");
+    cmd.args(["-r", &wpm.to_string()]);
+
+    if let Some(ref voice) = voiceId {
+        if !voice.trim().is_empty() {
+            cmd.args(["-v", voice]);
+        }
+    }
+
+    cmd.arg(&text)
         .spawn()
         .map_err(|e| e.to_string())?;
 

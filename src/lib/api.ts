@@ -289,18 +289,30 @@ export async function* streamChat(
     push({ done: true, error: evt.payload.error });
   });
 
+  let streamDone = false;
+
   const cleanup = () => {
+    streamDone = true;
     unlistenToken();
     unlistenDone();
     unlistenError();
+    if (signal && abortHandler) {
+      signal.removeEventListener('abort', abortHandler);
+    }
+    if (watchdogTimer) clearTimeout(watchdogTimer);
   };
 
-  // Handle abort
+  // Handle abort — store handler so it can be removed on cleanup (bug #1)
+  let abortHandler: (() => void) | null = null;
   if (signal) {
-    signal.addEventListener('abort', () => {
-      push({ done: true, error: 'Aborted' });
-    });
+    abortHandler = () => { if (!streamDone) push({ done: true, error: 'Aborted' }); };
+    signal.addEventListener('abort', abortHandler);
   }
+
+  // Watchdog: if Rust panics without emitting stream-done/stream-error, unblock after 60s (bug #17)
+  let watchdogTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    if (!streamDone) push({ done: true, error: 'Stream timeout: no response from backend after 60s.' });
+  }, 60000);
 
   // Fire the Rust command (non-awaited — it streams back via events)
   invoke('proxy_stream_chat', {
@@ -309,7 +321,8 @@ export async function* streamChat(
     payload: JSON.stringify(body),
     streamId,
   }).catch((e: unknown) => {
-    push({ done: true, error: String(e) });
+    // Only push if stream not already terminated (bug #10)
+    if (!streamDone) push({ done: true, error: String(e) });
   });
 
   // Yield chunks as they arrive
@@ -353,9 +366,28 @@ export async function transcribeAudio(base64Wav: string, settings: AppSettings):
   const byteArray = new Uint8Array(byteNumbers);
   const blob = new Blob([byteArray], { type: 'audio/wav' });
 
+  return _postAudioBlob(url, blob, 'recording.wav', settings);
+}
+
+/**
+ * Transcribe a raw audio Blob via the /audio/transcriptions endpoint.
+ * Used by the macOS MediaRecorder path — avoids base64 round-tripping.
+ * Signature: transcribeAudio(settings, blob, mimeType)
+ */
+export async function transcribeAudioBlob(settings: AppSettings, blob: Blob, mimeType: string): Promise<string> {
+  const baseUrl = settings.base_url.replace(/\/$/, '');
+  const url = `${baseUrl}/audio/transcriptions`;
+  // Pick a sensible file extension from the mime type
+  const ext = mimeType.includes('mp4') || mimeType.includes('m4a') ? 'm4a'
+    : mimeType.includes('wav') ? 'wav'
+    : 'webm';
+  return _postAudioBlob(url, blob, `recording.${ext}`, settings);
+}
+
+async function _postAudioBlob(url: string, blob: Blob, filename: string, settings: AppSettings): Promise<string> {
   const formData = new FormData();
-  formData.append('file', blob, 'recording.wav');
-  formData.append('model', settings.model_id || 'whisper-1');
+  formData.append('file', blob, filename);
+  formData.append('model', settings.stt_model_path || settings.model_id || 'whisper-1');
 
   const headers: Record<string, string> = {};
   if (settings.api_key) {
