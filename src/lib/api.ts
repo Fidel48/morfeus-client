@@ -58,57 +58,6 @@ export const WEB_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
-      name: 'lsp_start_server',
-      description: 'Start a native Language Server for a specific project/language.',
-      parameters: {
-        type: 'object',
-        properties: {
-          languageId: { type: 'string', description: 'The language identifier (e.g., "rust", "typescript", "python")' },
-          command: { type: 'string', description: 'The binary name to launch (e.g., "rust-analyzer", "npx", "pyright")' },
-          args: { type: 'array', items: { type: 'string' }, description: 'Command line arguments for the LSP server (e.g., ["typescript-language-server", "--stdio"])' },
-          workspaceRoot: { type: 'string', description: 'The absolute path to the project root directory' }
-        },
-        required: ['languageId', 'command', 'args']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'lsp_goto_definition',
-      description: 'Execute a Go To Definition request on an active LSP server. Returns an array of file locations.',
-      parameters: {
-        type: 'object',
-        properties: {
-          languageId: { type: 'string', description: 'The language identifier of the active LSP server (e.g., "rust")' },
-          filePath: { type: 'string', description: 'The absolute path to the source file' },
-          line: { type: 'number', description: 'The 0-indexed line number where the cursor is' },
-          col: { type: 'number', description: 'The 0-indexed column number where the cursor is' }
-        },
-        required: ['languageId', 'filePath', 'line', 'col']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'mcp_start_server',
-      description: 'Start a Model Context Protocol (MCP) server to access third-party tools (like sqlite, github, postgres).',
-      parameters: {
-        type: 'object',
-        properties: {
-          id: { type: 'string', description: 'A unique identifier you choose for this MCP connection (e.g. "sqlite")' },
-          command: { type: 'string', description: 'The binary name to launch (e.g. "npx")' },
-          args: { type: 'array', items: { type: 'string' }, description: 'Command line arguments (e.g. ["-y", "@modelcontextprotocol/server-sqlite", "--db", "test.db"])' },
-          env: { type: 'object', additionalProperties: { type: 'string' }, description: 'Optional environment variables' }
-        },
-        required: ['id', 'command', 'args']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
       name: 'read_youtube_video',
       description: 'Fetch the full spoken transcript of a YouTube video by its URL. Use this whenever the user pastes a YouTube link and wants a summary, key facts, or any information about the video content.',
       parameters: {
@@ -242,13 +191,14 @@ export async function* streamChat(
 ): AsyncGenerator<StreamChunk, void, unknown> {
   const streamId = genStreamId();
 
-  const body: ChatRequest & { num_ctx?: number } = {
+  const body: ChatRequest & { num_ctx?: number; repetition_penalty?: number } = {
     model: settings.model_id,
     messages,
     temperature: settings.temperature,
     top_p: settings.top_p,
     max_tokens: settings.max_tokens,
     frequency_penalty: settings.frequency_penalty,
+    repetition_penalty: 1.1, // Ollama/vLLM/llama.cpp — penalizes any repeated tokens
     stream: true,
     tools: extraTools ? [...WEB_TOOLS, ...extraTools] : WEB_TOOLS,
     num_ctx: settings.context_length,

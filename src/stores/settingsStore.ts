@@ -11,7 +11,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   top_p: 1.0,
   max_tokens: 2048,
   context_length: 8192,
-  frequency_penalty: 0.0,
+  frequency_penalty: 0.3,
   system_prompt: 'You are a helpful AI assistant.',
   tts_enabled: false,
   tts_voice: '',

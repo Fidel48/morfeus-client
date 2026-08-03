@@ -1,11 +1,19 @@
 import { useCallback } from 'react';
 import { useChatStore } from '@/stores/chatStore';
 import { useSettingsStore } from '@/stores/settingsStore';
-import { useVoiceStore } from '@/stores/voiceStore';
 import { streamChat } from '@/lib/api';
 import { tauriApi } from '@/lib/tauri';
 import { generateId, extractTextContent } from '@/lib/utils';
 import { Message, ContentPart, ToolDefinition } from '@/types';
+
+// Max chars returned from any single file/page tool call.
+// Keeps local 14B model context from being flooded.
+const MAX_TOOL_OUTPUT_CHARS = 6000;
+
+function capOutput(text: string): string {
+  if (text.length <= MAX_TOOL_OUTPUT_CHARS) return text;
+  return text.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n\n[... output truncated at ${MAX_TOOL_OUTPUT_CHARS} chars ...]`;
+}
 
 export function useChat() {
   const {
@@ -24,7 +32,6 @@ export function useChat() {
     setAbortController,
     stopStreaming,
     updateConversation,
-    newConversation,
   } = useChatStore();
 
   const { settings } = useSettingsStore();
@@ -37,7 +44,7 @@ export function useChat() {
         return;
       }
 
-      // Detect system payload that splits display text vs API context
+      // ── Parse display vs API content (for image/attachment payloads) ──
       let userDisplayContent: string;
       let apiContent: string | ContentPart[];
 
@@ -55,14 +62,14 @@ export function useChat() {
         userDisplayContent = content;
       }
 
-      // Ensure we have an active conversation
+      // ── Ensure active conversation ──
       let convId = activeConversationId;
       if (!convId) {
         const conv = useChatStore.getState().newConversation();
         convId = conv.id;
       }
 
-      // Add user message (display content shown in UI)
+      // ── Add user message to store ──
       const userMessage: Message = {
         id: generateId(),
         conversation_id: convId,
@@ -72,18 +79,18 @@ export function useChat() {
       };
       addMessage(userMessage);
 
-      // Update conversation title from first message
-      const allMessages = useChatStore.getState().messages;
-      const currentMessages = allMessages.filter(m => m.conversation_id === convId);
-      
-      if (currentMessages.length <= 1) {
+      // Set conversation title from first message
+      const existingMessages = useChatStore.getState().messages.filter(
+        m => m.conversation_id === convId
+      );
+      if (existingMessages.length <= 1) {
         updateConversation(convId, {
           title: userDisplayContent.slice(0, 60) + (userDisplayContent.length > 60 ? '…' : ''),
           updated_at: Date.now(),
         });
       }
 
-      // Start streaming
+      // ── Start streaming ──
       const controller = new AbortController();
       setAbortController(controller);
       setIsStreaming(true);
@@ -91,336 +98,400 @@ export function useChat() {
       clearStreamingContent();
 
       try {
-        let finalSystemPrompt = settings.system_prompt || 'You are Morfeus, a highly capable, articulate, and intelligent AI assistant.';
-        
+        // ── Build system prompt ──
         const now = new Date();
-        const dateString = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-        const timeString = now.toLocaleTimeString('en-US');
-        
-        finalSystemPrompt += `\n\nToday's Date: ${dateString}\nCurrent Time: ${timeString}\n`;
-        finalSystemPrompt += `Response Guidelines:\n`;
-        finalSystemPrompt += `- Always answer the user's specific prompt directly, intelligently, and concisely, seamlessly building on previous turns in the conversation.\n`;
-        finalSystemPrompt += `- Do NOT call local file tools (e.g. read_local_file, list_directory, search_files) unless the user explicitly asks to view, debug, search, or edit code files.\n`;
-        finalSystemPrompt += `- For general advice, investments, crypto, or web queries, answer directly or use web_search.\n`;
-        finalSystemPrompt += `- Never repeat a previous response word-for-word or output raw system tags.`;
+        const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+        const timeStr = now.toLocaleTimeString('en-US');
+        const basePrompt = settings.system_prompt || 'You are Morfeus, a highly capable, articulate, and intelligent AI assistant.';
+        const systemPrompt = `${basePrompt}
 
-      const executeChatLoop = async (isInitialUserTurn: boolean = false, depth: number = 0) => {
-        // ─── CONTEXT WINDOW PRUNING ───
-        const estimateTokens = (text: string) => Math.ceil(text.length / 4);
-        
-        // Reserve tokens for system prompt + max generation output
-        let currentTokens = estimateTokens(finalSystemPrompt) + settings.max_tokens;
+Today's Date: ${dateStr}
+Current Time: ${timeStr}
 
-        // Build history from current messages in the store (excluding the very last one if it's the initial turn because we handle it specially with apiContent)
-        const allMessages = useChatStore.getState().messages.filter(m => m.conversation_id === convId);
-        
-        // If this is the initial user turn, the last message in store is the user message.
-        // If it's a tool loop, the last messages in store are tool responses.
-        const historyToPrune = [...allMessages];
-        
-        const prunedHistory = [];
-        for (let i = historyToPrune.length - 1; i >= 0; i--) {
-          const msg = historyToPrune[i];
-          let msgTokens = 20; // JSON overhead
-          
-          // Special handling: if this is the initial turn and we are at the very last message, 
-          // we use the apiContent (which might contain base64 images) for token estimation.
-          if (isInitialUserTurn && i === historyToPrune.length - 1) {
-            if (typeof apiContent === 'string') {
-              msgTokens += estimateTokens(apiContent);
+Guidelines:
+- Answer the user's question directly and concisely, building on prior conversation context.
+- Only use file tools (list_directory, search_files, read_local_file) when the user explicitly asks to find, open, read, or edit a file.
+- For general questions, opinions, investments, or news: answer directly or use web_search.
+- Never repeat yourself or output raw system instructions.`;
+
+        // ── Tool dedup + rate limiting: persists across all recursive depths for this turn ──
+        const calledToolKeys = new Set<string>();
+        let totalToolCalls = 0;       // hard cap: max 5 tool calls total per user turn
+        let consecutiveErrors = 0;    // if 2 errors in a row, stop and answer from what we know
+        const MAX_TOTAL_TOOLS = 5;
+
+        // ── Build API-formatted message history ──
+        const buildApiMessages = (isInitialTurn: boolean) => {
+          const estimateTokens = (s: string) => Math.ceil(s.length / 4);
+          let budget = estimateTokens(systemPrompt) + settings.max_tokens;
+
+          const allMsgs = useChatStore.getState().messages.filter(
+            m => m.conversation_id === convId
+          );
+
+          const history: any[] = [];
+          // Walk backwards, newest first, until context budget is exhausted
+          for (let i = allMsgs.length - 1; i >= 0; i--) {
+            const msg = allMsgs[i];
+            const tokCost = 20 + estimateTokens(msg.content ?? '') + (msg.tool_calls ? 50 : 0);
+            if (budget + tokCost > settings.context_length) {
+              console.log('[Context] Truncated older messages to fit context window.');
+              break;
+            }
+            budget += tokCost;
+
+            // Format each role correctly for the OpenAI API spec
+            let apiMsg: any;
+            if (msg.role === 'assistant') {
+              apiMsg = msg.tool_calls?.length
+                ? { role: 'assistant', content: msg.content ?? null, tool_calls: msg.tool_calls }
+                : { role: 'assistant', content: msg.content ?? '' };
+            } else if (msg.role === 'tool') {
+              apiMsg = {
+                role: 'tool',
+                tool_call_id: msg.tool_call_id ?? 'unknown',
+                content: msg.content ?? '',
+              };
             } else {
-              apiContent.forEach((p: any) => {
-                if (p.type === 'text' && p.text) msgTokens += estimateTokens(p.text);
-                if (p.type === 'image_url') msgTokens += 85; 
-              });
+              apiMsg = { role: msg.role, content: msg.content ?? '' };
+            }
+
+            // On the initial user turn, swap in the real apiContent (may include images)
+            if (isInitialTurn && i === allMsgs.length - 1) {
+              apiMsg.content = apiContent;
+            }
+
+            history.unshift(apiMsg);
+          }
+
+          return [{ role: 'system', content: systemPrompt }, ...history];
+        };
+
+        // ── Execute tool call ──
+        const executeTool = async (name: string, args: Record<string, any>, callId: string): Promise<string> => {
+          let result: string;
+
+          if (name === 'web_search') {
+            const q = (args.query || '').trim();
+            if (q.startsWith('http://') || q.startsWith('https://')) {
+              result = await tauriApi.fetchWebpage(q);
+            } else {
+              const res = await tauriApi.webSearch(q);
+              result = JSON.stringify(res, null, 2);
+            }
+          } else if (name === 'read_webpage') {
+            result = await tauriApi.fetchWebpage(args.url);
+          } else if (name === 'read_youtube_video') {
+            result = await tauriApi.readYoutubeTranscript(args.url);
+          } else if (name === 'list_directory') {
+            const entries = await tauriApi.listDirectory(args.path);
+            const lines = entries.map(e => {
+              const size = e.size_bytes != null
+                ? e.size_bytes > 1_000_000 ? `${(e.size_bytes / 1_000_000).toFixed(1)} MB`
+                : e.size_bytes > 1_000 ? `${(e.size_bytes / 1_000).toFixed(1)} KB`
+                : `${e.size_bytes} B`
+                : '';
+              return e.is_dir ? `📁 ${e.name}/` : `📄 ${e.name}${size ? ` (${size})` : ''}`;
+            });
+            result = `Contents of ${args.path}:\n${lines.join('\n')}`;
+          } else if (name === 'get_special_dirs') {
+            const dirs = await tauriApi.getSpecialDirs();
+            result = `Special directories:\n${JSON.stringify(dirs, null, 2)}`;
+          } else if (name === 'search_files') {
+            const found = await tauriApi.searchFiles(args.query, args.root);
+            result = found.length === 0
+              ? `No files found matching "${args.query}".`
+              : `Found ${found.length} result(s):\n${found.map(f => f.is_dir ? `📁 ${f.path}/` : `📄 ${f.path}`).join('\n')}`;
+          } else if (name === 'read_local_file') {
+            result = await tauriApi.parseLocalFile(args.path);
+          } else if (name.startsWith('mcp__')) {
+            const parts = name.split('__');
+            if (parts.length >= 3) {
+              const serverId = parts[1];
+              const toolName = parts.slice(2).join('__');
+              const res = await tauriApi.mcpCallTool(serverId, toolName, args);
+              result = JSON.stringify(res, null, 2);
+            } else {
+              result = `Error: Invalid MCP tool name format: ${name}`;
             }
           } else {
-            if (msg.content) msgTokens += estimateTokens(msg.content);
-          }
-          
-          if (msg.tool_calls) msgTokens += 50; 
-          
-          if (currentTokens + msgTokens > settings.context_length) {
-            console.log(`[Context Window] Truncated history to fit ${settings.context_length} limit.`);
-            break;
-          }
-          currentTokens += msgTokens;
-          
-          // Format for API
-          const apiMsg: any = {
-            role: msg.role,
-            content: msg.content ?? null,
-            tool_calls: msg.tool_calls,
-            tool_call_id: msg.tool_call_id,
-          };
-          
-          // Replace content for the last user message on initial turn
-          if (isInitialUserTurn && i === historyToPrune.length - 1) {
-            apiMsg.content = apiContent;
-          }
-          
-          prunedHistory.unshift(apiMsg);
-        }
-
-        const apiMessages = [
-          {
-            role: 'system',
-            content: finalSystemPrompt,
-          },
-          ...prunedHistory,
-        ];
-
-        // ─── MCP DYNAMIC TOOL INJECTION ───
-        const mcpTools: ToolDefinition[] = [];
-        const activeMcpServers = useChatStore.getState().activeMcpServers;
-        
-        for (const serverId of activeMcpServers) {
-          try {
-            // Bug #7: wrap mcpListTools in a timeout so a hung MCP server can't freeze the UI
-            const result = await Promise.race([
-              tauriApi.mcpListTools(serverId),
-              new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error(`MCP server ${serverId} timed out`)), 5000)
-              ),
-            ]);
-            if (result && Array.isArray(result.tools)) {
-              for (const tool of result.tools) {
-                mcpTools.push({
-                  type: 'function',
-                  function: {
-                    name: `mcp__${serverId}__${tool.name}`,
-                    description: `[MCP Server: ${serverId}] ${tool.description || ''}`,
-                    parameters: tool.inputSchema || { type: 'object', properties: {} },
-                  },
-                });
-              }
-            }
-          } catch (e) {
-            console.error(`Failed to list tools from MCP server ${serverId}:`, e);
-          }
-        }
-
-        // If we reached max tool depth (3+), disable tool calling and force final synthesis
-        const isMaxDepth = depth >= 3;
-        if (isMaxDepth) {
-          apiMessages.push({
-            role: 'system',
-            content: '[SYSTEM NOTICE]: Search depth limit reached. DO NOT call any tools. Synthesize your complete, detailed final answer now.',
-          });
-        }
-
-        const availableTools = isMaxDepth ? [] : mcpTools;
-
-        let firstToken = false;
-        
-        for await (const chunk of streamChat(settings, apiMessages, controller.signal, availableTools)) {
-          const delta = chunk.choices[0]?.delta;
-          if (!delta) continue;
-
-          if (!firstToken && (delta.content || delta.tool_calls)) {
-            firstToken = true;
-            setChatStatus('streaming');
+            result = `Error: Unknown tool "${name}"`;
           }
 
-          if (delta.content) {
-            appendStreamToken(delta.content);
-          }
-          if (delta.tool_calls) {
-            appendToolCallDelta(delta.tool_calls);
-          }
+          return capOutput(result);
+        };
 
-          if (chunk.choices[0]?.finish_reason === 'stop' || chunk.choices[0]?.finish_reason === 'tool_calls') {
-            break;
-          }
-        }
-
-        // Finalize the assistant message
-        const finalMessage = finalizeStreamMessage(convId);
-        
-        // Handle tool calls
-        if (finalMessage.tool_calls && finalMessage.tool_calls.length > 0) {
-          setChatStatus('calling-tool');
-          
-          // Max 2 tool calls per turn limit to prevent models from spamming 10+ calls
-          const callsToExecute = finalMessage.tool_calls.slice(0, 2);
-          const executedToolKeysInTurn = new Set<string>();
-          
-          for (const tc of callsToExecute) {
-            // Bug #3: skip tool execution if the user aborted
-            if (controller.signal.aborted) break;
-            if (tc.type === 'function') {
-              try {
-                const args = JSON.parse(tc.function?.arguments || '{}');
-                const toolKey = `${tc.function?.name}::${tc.function?.arguments}`;
-                
-                // In-turn deduplication check: skip if this exact tool call ran earlier in this turn
-                if (executedToolKeysInTurn.has(toolKey)) {
-                  console.log(`[Tool Loop] Skipped duplicate in-turn tool call: ${toolKey}`);
-                  continue;
-                }
-                executedToolKeysInTurn.add(toolKey);
-
-                let result = '';
-                tauriApi.appendSystemLog('info', `Tool Call: ${tc.function.name}(${tc.function.arguments})`);
-                
-                // Duplicate Tool Call Guard: Check if this tool with identical arguments already ran in history
-                const currentConvMessages = useChatStore.getState().messages.filter(m => m.conversation_id === convId);
-                const hasDuplicateCall = currentConvMessages.some(
-                  m => m.role === 'tool' && 
-                  m.content && 
-                  (m.content.includes(`Tool Call: ${tc.function.name}`) || m.content.includes(tc.function.name)) &&
-                  m.content.includes(tc.function?.arguments || '')
-                );
-
-                if (hasDuplicateCall) {
-                  result = `[SYSTEM NOTICE]: The tool '${tc.function.name}' with these exact arguments was already executed in a previous step. DO NOT call it again. Formulate your final response now using all existing information.`;
-                } else if (tc.function.name === 'web_search') {
-                  const q = (args.query || '').trim();
-                  if (q.startsWith('http://') || q.startsWith('https://')) {
-                    result = await tauriApi.fetchWebpage(q);
-                  } else {
-                    const searchRes = await tauriApi.webSearch(q);
-                    result = JSON.stringify(searchRes, null, 2);
-                  }
-                } else if (tc.function.name === 'read_webpage') {
-                  const scrapeRes = await tauriApi.fetchWebpage(args.url);
-                  result = scrapeRes;
-                } else if (tc.function.name === 'read_youtube_video') {
-                  result = await tauriApi.readYoutubeTranscript(args.url);
-                } else if (tc.function.name === 'list_directory') {
-                  const entries = await tauriApi.listDirectory(args.path);
-                  const lines = entries.map(e => {
-                    const size = e.size_bytes != null
-                      ? e.size_bytes > 1_000_000
-                        ? `${(e.size_bytes / 1_000_000).toFixed(1)} MB`
-                        : e.size_bytes > 1_000
-                          ? `${(e.size_bytes / 1_000).toFixed(1)} KB`
-                          : `${e.size_bytes} B`
-                      : '';
-                    return e.is_dir
-                      ? `📁 ${e.name}/`
-                      : `📄 ${e.name}${size ? ` (${size})` : ''}`;
-                  });
-                  result = `Contents of ${args.path}:\n${lines.join('\n')}`;
-                } else if (tc.function.name === 'get_special_dirs') {
-                  const dirs = await tauriApi.getSpecialDirs();
-                  result = `User's special directories:\n${JSON.stringify(dirs, null, 2)}`;
-                } else if (tc.function.name === 'search_files') {
-                  const found = await tauriApi.searchFiles(args.query, args.root);
-                  if (found.length === 0) {
-                    result = `No files or folders found matching "${args.query}".`;
-                  } else {
-                    const lines = found.map(f => f.is_dir ? `📁 ${f.path}/` : `📄 ${f.path}`);
-                    result = `Found ${found.length} result(s) for "${args.query}":\n${lines.join('\n')}`;
-                  }
-                } else if (tc.function.name === 'read_local_file') {
-                  result = await tauriApi.parseLocalFile(args.path);
-                } else if (tc.function.name === 'lsp_start_server') {
-                  await tauriApi.lspStartServer(args.languageId, args.command, args.args, args.workspaceRoot);
-                  result = `LSP server started successfully for language ID: ${args.languageId}`;
-                } else if (tc.function.name === 'lsp_goto_definition') {
-                  const defRes = await tauriApi.lspGotoDefinition(args.languageId, args.filePath, args.line, args.col);
-                  result = JSON.stringify(defRes, null, 2);
-                } else if (tc.function.name === 'mcp_start_server') {
-                  await tauriApi.mcpStartServer(args.id, args.command, args.args, args.env || {});
-                  useChatStore.getState().addMcpServer(args.id);
-                  result = `MCP server started successfully with ID: ${args.id}. The tools will be available in the next turn.`;
-                } else if (tc.function.name.startsWith('mcp__')) {
-                  // Format: mcp__SERVERID__TOOLNAME
-                  const parts = tc.function.name.split('__');
-                  if (parts.length >= 3) {
-                    const serverId = parts[1];
-                    const toolName = parts.slice(2).join('__');
-                    const callRes = await tauriApi.mcpCallTool(serverId, toolName, args);
-                    result = JSON.stringify(callRes, null, 2);
-                  } else {
-                    result = `Error: Invalid MCP tool name format: ${tc.function.name}`;
-                  }
-                } else {
-                  result = `Error: Unknown tool ${tc.function.name}`;
-                }
-
-                tauriApi.appendSystemLog('info', `Tool Result [${tc.function.name}]: ${result.length > 200 ? result.slice(0, 200) + '...' : result}`);
-
-                // Add tool result message
-                const toolMsg: Message = {
-                  id: generateId(),
-                  conversation_id: convId,
-                  role: 'tool',
-                  content: result,
-                  tool_call_id: tc.id,
-                  created_at: Date.now(),
-                };
-                addMessage(toolMsg);
-                // We DO NOT manually append to apiMessages here anymore,
-                // because the recursive executeChatLoop() will rebuild and prune it 
-                // directly from useChatStore state!
-                
-              } catch (e) {
-                console.error('Tool execution error:', e);
-                tauriApi.appendSystemLog('error', `Tool Error [${tc.function.name}]: ${String(e)}`);
-                // Add error message as tool result
-                const errorMsg: Message = {
-                  id: generateId(),
-                  conversation_id: convId,
-                  role: 'tool',
-                  content: `Error executing tool ${tc.function.name}: ${String(e)}`,
-                  tool_call_id: tc.id,
-                  created_at: Date.now(),
-                };
-                addMessage(errorMsg);
-                
-                // We DO NOT manually append to apiMessages here anymore,
-                // because the recursive executeChatLoop() will rebuild and prune it 
-                // directly from useChatStore state!
-              }
-            }
-          }
-          
-          setChatStatus('tool-result');
-          // Bug #3: do not re-enter the loop if user aborted during tool execution
+        // ── Main streaming loop (recursive for tool calls) ──
+        const executeChatLoop = async (isInitialTurn: boolean, depth: number): Promise<void> => {
           if (controller.signal.aborted) return;
-          // Automatically re-trigger LLM with new tool result context
-          // Bug #20: removed redundant setIsStreaming(true) — already true
-          setChatStatus('thinking');
-          clearStreamingContent();
-          await executeChatLoop(false, depth + 1);
-          return; // exit current frame to prevent duplicate TTS on intermediate steps
-        }
 
-        // Auto-speak if enabled (only for final text output)
-          // Speak aloud if enabled
-          if (settings.tts_enabled) {
-            const textToSpeak = extractTextContent(finalMessage.content);
-            if (textToSpeak) {
-              await tauriApi.speakText(textToSpeak, settings.tts_rate, settings.tts_voice);
+          const apiMessages = buildApiMessages(isInitialTurn);
+
+          // At max depth, stop passing tools so model must respond with text
+          const isMaxDepth = depth >= 3;
+          if (isMaxDepth) {
+            apiMessages.push({
+              role: 'system',
+              content: 'You have reached the maximum tool call depth. DO NOT call any more tools. Write your final answer now using the information already gathered.',
+            });
+          }
+
+          // Get active MCP tools (with 5s timeout per server)
+          const mcpTools: ToolDefinition[] = [];
+          if (!isMaxDepth) {
+            for (const serverId of useChatStore.getState().activeMcpServers) {
+              try {
+                const res = await Promise.race([
+                  tauriApi.mcpListTools(serverId),
+                  new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error('timeout')), 5000)
+                  ),
+                ]);
+                if (res?.tools) {
+                  for (const tool of res.tools) {
+                    mcpTools.push({
+                      type: 'function',
+                      function: {
+                        name: `mcp__${serverId}__${tool.name}`,
+                        description: `[MCP: ${serverId}] ${tool.description || ''}`,
+                        parameters: tool.inputSchema || { type: 'object', properties: {} },
+                      },
+                    });
+                  }
+                }
+              } catch {
+                // MCP server unavailable — skip silently
+              }
             }
           }
-      };
 
-      await executeChatLoop(true);
+          const availableTools = isMaxDepth ? [] : mcpTools;
 
-      updateConversation(convId, { updated_at: Date.now() });
-      } catch (error: unknown) {
-        if (error instanceof Error && (error.name === 'AbortError' || error.message === 'Aborted')) {
-          // User stopped streaming — finalize partial content if any
-          const { streamingContent: partial } = useChatStore.getState();
-          if (partial) {
-            finalizeStreamMessage(convId);
+          // ── Stream response ──
+          let firstToken = false;
+          const recentTokens: string[] = [];
+          let totalChars = 0;
+          let repetitionAborted = false;
+
+          const detectRepetition = (): boolean => {
+            const len = recentTokens.length;
+            if (len < 15) return false;
+
+            // Pattern 1: same token 15 times in a row
+            const tail = recentTokens.slice(-15);
+            if (tail.every(t => t === tail[0])) return true;
+
+            // Pattern 2: cycling pattern of period 2–4
+            for (const period of [2, 3, 4]) {
+              const needed = period * 5;
+              if (len < needed) continue;
+              const window = recentTokens.slice(-needed);
+              const cycle = window.slice(0, period);
+              if (window.every((t, i) => t === cycle[i % period])) return true;
+            }
+
+            // Pattern 3: repeated multi-word phrase in recent 30 tokens
+            if (len >= 30) {
+              const chunk = recentTokens.slice(-30).join('');
+              if (chunk.length >= 40) {
+                for (let subLen = 5; subLen <= 20; subLen++) {
+                  const sub = chunk.slice(-subLen);
+                  if ((chunk.split(sub).length - 1) >= 6) return true;
+                }
+              }
+            }
+
+            return false;
+          };
+
+          for await (const chunk of streamChat(settings, apiMessages, controller.signal, availableTools)) {
+            if (controller.signal.aborted) break;
+            const delta = chunk.choices[0]?.delta;
+            if (!delta) continue;
+
+            if (!firstToken && (delta.content || delta.tool_calls)) {
+              firstToken = true;
+              setChatStatus('streaming');
+            }
+
+            if (delta.content) {
+              totalChars += delta.content.length;
+              const trimmed = delta.content.trim();
+              if (trimmed) {
+                recentTokens.push(trimmed);
+                if (recentTokens.length > 60) recentTokens.splice(0, recentTokens.length - 50);
+                // Only run detection after 200 chars to avoid false positives
+                if (totalChars > 200 && detectRepetition()) {
+                  console.warn('[Repetition] Loop detected — aborting stream');
+                  tauriApi.appendSystemLog('warn', 'Repetition loop detected. Auto-aborting.');
+                  repetitionAborted = true;
+                  // Trim output back to last clean sentence
+                  const current = useChatStore.getState().streamingContent;
+                  if (current) {
+                    const cutoff = Math.floor(current.length * 0.8);
+                    let cleanEnd = -1;
+                    for (const m of current.matchAll(/[.!?]\s/g)) {
+                      if (m.index != null && m.index < cutoff) cleanEnd = m.index + 1;
+                    }
+                    useChatStore.setState({
+                      streamingContent: cleanEnd > 50 ? current.slice(0, cleanEnd).trimEnd() : current.slice(0, cutoff).trimEnd(),
+                    });
+                  }
+                  controller.abort();
+                  break;
+                }
+              }
+              appendStreamToken(delta.content);
+            }
+
+            if (delta.tool_calls) {
+              appendToolCallDelta(delta.tool_calls);
+            }
+
+            if (chunk.choices[0]?.finish_reason === 'stop' || chunk.choices[0]?.finish_reason === 'tool_calls') {
+              break;
+            }
           }
-          // Bug #4: ALWAYS clear streaming state even when partial is empty
+
+          if (repetitionAborted) {
+            finalizeStreamMessage(convId!);
+            return;
+          }
+
+          const finalMessage = finalizeStreamMessage(convId!);
+
+          // ── Handle tool calls ──
+          const hasToolCalls = finalMessage.tool_calls && finalMessage.tool_calls.length > 0;
+          const toolBudgetExhausted = totalToolCalls >= MAX_TOTAL_TOOLS;
+
+          if (hasToolCalls && !isMaxDepth && !toolBudgetExhausted) {
+            setChatStatus('calling-tool');
+
+            // Execute at most 2 tool calls per depth to keep things fast
+            for (const tc of finalMessage.tool_calls!.slice(0, 2)) {
+              if (controller.signal.aborted) break;
+              if (tc.type !== 'function') continue;
+
+              // Hard cap: if we've already run 5 tool calls this turn, stop
+              if (totalToolCalls >= MAX_TOTAL_TOOLS) {
+                tauriApi.appendSystemLog('warn', `Tool budget exhausted (${MAX_TOTAL_TOOLS} calls). Forcing final answer.`);
+                addMessage({
+                  id: generateId(),
+                  conversation_id: convId!,
+                  role: 'tool',
+                  content: '[NOTICE]: Maximum tool calls reached for this turn. Stop calling tools and write your final answer now using whatever information you already have.',
+                  tool_call_id: tc.id,
+                  created_at: Date.now(),
+                });
+                break;
+              }
+
+              const toolKey = `${tc.function?.name}::${tc.function?.arguments}`;
+              const toolName = tc.function?.name ?? '';
+              const toolArgs = (() => { try { return JSON.parse(tc.function?.arguments || '{}'); } catch { return {}; } })();
+
+              // Cross-depth dedup: skip if this exact call already ran this turn
+              if (calledToolKeys.has(toolKey)) {
+                console.log(`[Dedup] Blocked repeated tool call: ${toolKey}`);
+                tauriApi.appendSystemLog('warn', `Duplicate blocked: ${toolName}`);
+                addMessage({
+                  id: generateId(),
+                  conversation_id: convId!,
+                  role: 'tool',
+                  content: `[NOTICE]: "${toolName}" with these exact arguments was already called. You already have its result. Write your final answer now.`,
+                  tool_call_id: tc.id,
+                  created_at: Date.now(),
+                });
+                continue;
+              }
+              calledToolKeys.add(toolKey);
+              totalToolCalls++;
+
+              tauriApi.appendSystemLog('info', `Tool Call: ${toolName}(${tc.function?.arguments})`);
+
+              let result: string;
+              try {
+                result = await executeTool(toolName, toolArgs, tc.id);
+                consecutiveErrors = 0; // reset on success
+              } catch (e) {
+                result = `Error running ${toolName}: ${String(e)}`;
+                tauriApi.appendSystemLog('error', `Tool Error [${toolName}]: ${String(e)}`);
+                consecutiveErrors++;
+              }
+
+              // If 2 errors in a row (e.g. repeated no-results searches), tell the model to stop
+              if (consecutiveErrors >= 2) {
+                result += '\n\n[NOTICE]: Multiple searches have failed. Stop searching and answer the user directly based on what you already know, or tell them the information could not be found.';
+                consecutiveErrors = 0;
+              }
+
+              tauriApi.appendSystemLog('info', `Tool Result [${toolName}]: ${result.length > 200 ? result.slice(0, 200) + '...' : result}`);
+
+              addMessage({
+                id: generateId(),
+                conversation_id: convId!,
+                role: 'tool',
+                content: result,
+                tool_call_id: tc.id,
+                created_at: Date.now(),
+              });
+            }
+
+            if (controller.signal.aborted) return;
+            setChatStatus('thinking');
+            clearStreamingContent();
+            await executeChatLoop(false, depth + 1);
+            return; // Don't run TTS on intermediate steps
+          } else if (hasToolCalls && (isMaxDepth || toolBudgetExhausted)) {
+            // Model tried to call tools but budget is exhausted — inject a final-answer notice
+            // and add synthetic results for each orphaned tool call so the sequence stays valid
+            for (const tc of finalMessage.tool_calls!.slice(0, 2)) {
+              if (tc.type !== 'function') continue;
+              addMessage({
+                id: generateId(),
+                conversation_id: convId!,
+                role: 'tool',
+                content: '[NOTICE]: Tool call limit reached. Write your final answer now based on information already gathered.',
+                tool_call_id: tc.id,
+                created_at: Date.now(),
+              });
+            }
+            if (controller.signal.aborted) return;
+            setChatStatus('thinking');
+            clearStreamingContent();
+            await executeChatLoop(false, depth + 1);
+            return;
+          }
+
+          // ── Final response: TTS if enabled ──
+          if (settings.tts_enabled) {
+            const text = extractTextContent(finalMessage.content);
+            if (text) await tauriApi.speakText(text, settings.tts_rate, settings.tts_voice);
+          }
+        };
+
+        await executeChatLoop(true, 0);
+        updateConversation(convId, { updated_at: Date.now() });
+
+      } catch (error: unknown) {
+        const isAbort = error instanceof Error &&
+          (error.name === 'AbortError' || error.message === 'Aborted');
+
+        if (isAbort) {
+          // Finalize any partial streamed content
+          const partial = useChatStore.getState().streamingContent;
+          if (partial) finalizeStreamMessage(convId!);
           clearStreamingContent();
         } else {
-          console.error('Streaming error:', error);
-          const errMsg = error instanceof Error ? error.message : 'Unknown error';
-          const errorMessage: Message = {
+          console.error('Chat error:', error);
+          const errMsg = error instanceof Error ? error.message : String(error);
+          addMessage({
             id: generateId(),
-            conversation_id: convId,
+            conversation_id: convId!,
             role: 'assistant',
             content: `⚠️ Error: ${errMsg}`,
             created_at: Date.now(),
-          };
-          addMessage(errorMessage);
+          });
           clearStreamingContent();
         }
       } finally {
