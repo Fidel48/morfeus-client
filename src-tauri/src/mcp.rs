@@ -39,7 +39,12 @@ pub struct McpClient {
 
 impl McpClient {
     pub async fn start(command: &str, args: &[&str], envs: HashMap<String, String>) -> Result<Self, String> {
-        let mut child = Command::new(command)
+        #[cfg(target_os = "windows")]
+        let cmd_to_run = if command == "npx" { "npx.cmd" } else if command == "npm" { "npm.cmd" } else { command };
+        #[cfg(not(target_os = "windows"))]
+        let cmd_to_run = command;
+
+        let mut child = Command::new(cmd_to_run)
             .args(args)
             .envs(envs)
             .stdin(Stdio::piped())

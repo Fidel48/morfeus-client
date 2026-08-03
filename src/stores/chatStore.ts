@@ -1,7 +1,36 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage, StateStorage } from 'zustand/middleware';
+import { LazyStore } from '@tauri-apps/plugin-store';
 import { Conversation, Message, ChatStatus, ToolCall, ToolCallDelta } from '@/types';
 import { generateId } from '@/lib/utils';
+
+// Initialize filesystem store to bypass the 5MB localStorage limit
+const tauriStore = new LazyStore('chat-storage.json');
+
+const tauriStorage: StateStorage = {
+  getItem: async (name: string): Promise<string | null> => {
+    let val = await tauriStore.get<string>(name);
+    if (!val) {
+       // Fallback to localStorage for migration
+       const localVal = localStorage.getItem(name);
+       if (localVal) {
+          val = localVal;
+          // Migrate it silently
+          await tauriStore.set(name, localVal);
+          await tauriStore.save();
+       }
+    }
+    return val || null;
+  },
+  setItem: async (name: string, value: string): Promise<void> => {
+    await tauriStore.set(name, value);
+    await tauriStore.save();
+  },
+  removeItem: async (name: string): Promise<void> => {
+    await tauriStore.delete(name);
+    await tauriStore.save();
+  },
+};
 
 interface ChatStore {
   conversations: Conversation[];
@@ -180,6 +209,7 @@ export const useChatStore = create<ChatStore>()(
     }),
     {
       name: 'morfeus-chat-storage',
+      storage: createJSONStorage(() => tauriStorage),
       partialize: (state) => ({
         conversations: state.conversations,
         messages: state.messages,
