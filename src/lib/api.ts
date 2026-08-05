@@ -218,9 +218,25 @@ export async function* streamChat(
     }
   }
 
+  let streamDone = false;
+  let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const resetWatchdog = () => {
+    if (watchdogTimer) clearTimeout(watchdogTimer);
+    if (!streamDone) {
+      watchdogTimer = setTimeout(() => {
+        if (!streamDone) push({ done: true, error: 'Stream timeout: no response from backend after 120s of inactivity.' });
+      }, 120000);
+    }
+  };
+
+  // Initial watchdog setup
+  resetWatchdog();
+
   // Subscribe to Tauri events from the Rust stream
   const unlistenToken = await listen<{ id: string; data: string }>('stream-token', (evt) => {
     if (evt.payload.id !== streamId) return;
+    resetWatchdog();
     try {
       const chunk: StreamChunk = JSON.parse(evt.payload.data);
       push({ chunk, done: false });
@@ -239,8 +255,6 @@ export async function* streamChat(
     push({ done: true, error: evt.payload.error });
   });
 
-  let streamDone = false;
-
   const cleanup = () => {
     streamDone = true;
     unlistenToken();
@@ -258,11 +272,6 @@ export async function* streamChat(
     abortHandler = () => { if (!streamDone) push({ done: true, error: 'Aborted' }); };
     signal.addEventListener('abort', abortHandler);
   }
-
-  // Watchdog: if Rust panics without emitting stream-done/stream-error, unblock after 60s (bug #17)
-  let watchdogTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-    if (!streamDone) push({ done: true, error: 'Stream timeout: no response from backend after 60s.' });
-  }, 60000);
 
   // Fire the Rust command (non-awaited — it streams back via events)
   invoke('proxy_stream_chat', {
