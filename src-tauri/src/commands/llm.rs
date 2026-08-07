@@ -12,13 +12,16 @@ struct ModelsResponse {
     data: Option<Vec<ModelInfo>>,
 }
 
-/// Build a reqwest client that trusts all TLS certs (useful for self-signed/home servers)
+/// Build a reqwest client compatible with both direct LAN connections and Cloudflare-proxied URLs.
+/// Key settings:
+///  - danger_accept_invalid_certs: handles self-signed certs on home servers
+///  - tcp_keepalive: keeps the connection alive through Cloudflare's idle timeout detection
+///  - No overall .timeout(): streaming responses are arbitrarily long; JS watchdog handles inactivity
 fn make_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .danger_accept_invalid_certs(true) // allow self-signed certs on home servers
-        .connect_timeout(std::time::Duration::from_secs(30)) // 30s to establish connection
-        // NOTE: No overall .timeout() here — streaming responses can be arbitrarily long.
-        // The JS watchdog in api.ts handles inactivity detection once streaming starts.
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .tcp_keepalive(std::time::Duration::from_secs(15)) // send keepalive every 15s — prevents Cloudflare from treating idle stream as dead
         .build()
         .expect("Failed to build HTTP client")
 }
@@ -31,6 +34,18 @@ fn make_headers(api_key: &str) -> reqwest::header::HeaderMap {
             headers.insert("Authorization", val);
         }
     }
+    headers
+}
+
+/// Headers specifically for SSE/streaming requests.
+/// X-Accel-Buffering: no  → tells Cloudflare and nginx NOT to buffer the response.
+///                          Without this, Cloudflare holds all SSE chunks and only flushes
+///                          when the connection closes — triggering a 524 for long responses.
+/// Cache-Control: no-cache → required by the SSE spec; also signals proxies not to buffer.
+fn make_stream_headers(api_key: &str) -> reqwest::header::HeaderMap {
+    let mut headers = make_headers(api_key);
+    headers.insert("X-Accel-Buffering", "no".parse().unwrap());
+    headers.insert("Cache-Control", "no-cache".parse().unwrap());
     headers
 }
 
@@ -58,11 +73,16 @@ pub async fn proxy_test_connection(
         let count = models_resp.data.as_ref().map(|d| d.len()).unwrap_or(0);
         Ok(format!("Connected — {} model{} available", count, if count != 1 { "s" } else { "" }))
     } else {
-        Err(format!(
-            "Server returned HTTP {} {}",
-            resp.status().as_u16(),
-            resp.status().canonical_reason().unwrap_or("")
-        ))
+        let status = resp.status().as_u16();
+        let err = match status {
+            524 => "HTTP 524: Cloudflare timeout — your URL is behind a Cloudflare proxy. Use the direct local IP instead (e.g. http://192.168.1.x:1234 or http://localhost:11434).".to_string(),
+            523 => "HTTP 523: Cloudflare cannot reach your LLM server. Make sure the server is running and the URL/tunnel is correct.".to_string(),
+            401 | 403 => format!("HTTP {}: Authentication failed — check your API key in Settings.", status),
+            404 => "HTTP 404: Endpoint not found — check your Base URL (e.g. http://localhost:1234 for LM Studio).".to_string(),
+            503 => "HTTP 503: LLM server is starting up or loading the model — wait a moment then try again.".to_string(),
+            _ => format!("HTTP {} {}", status, resp.status().canonical_reason().unwrap_or("")),
+        };
+        Err(err)
     }
 }
 
@@ -141,7 +161,7 @@ pub async fn proxy_stream_chat(
 
     let resp = client
         .post(&url)
-        .headers(make_headers(&api_key))
+        .headers(make_stream_headers(&api_key)) // includes X-Accel-Buffering: no for Cloudflare
         .body(payload)
         .send()
         .await
@@ -153,7 +173,36 @@ pub async fn proxy_stream_chat(
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        let msg = format!("HTTP {}: {}", status, body);
+
+        // Provide specific, actionable messages for common failure codes
+        let msg = match status {
+            524 => concat!(
+                "HTTP 524: Cloudflare connection timeout.\n\n",
+                "Your LLM server URL is behind a Cloudflare proxy, which cuts connections after ~100 seconds — ",
+                "before the model has time to respond.\n\n",
+                "Fix: In Settings, change your Base URL to the direct local IP of your LLM server ",
+                "(e.g. http://192.168.1.x:1234 for LM Studio, or http://localhost:11434 for Ollama). ",
+                "Avoid Cloudflare tunnel URLs for local model inference."
+            ).to_string(),
+            523 => format!(
+                "HTTP 523: Cloudflare cannot reach your LLM server (Origin Unreachable). \
+                Check that your LLM server is running and the tunnel/URL in Settings is correct. \
+                Body: {}", body
+            ),
+            401 | 403 => format!(
+                "HTTP {}: Authentication failed. Check that your API key in Settings is correct. Body: {}", status, body
+            ),
+            404 => format!(
+                "HTTP 404: Endpoint not found. Check your Base URL in Settings — make sure it points to \
+                the correct server and port (e.g. http://localhost:1234 for LM Studio). Body: {}", body
+            ),
+            503 => format!(
+                "HTTP 503: LLM server is not ready. The server is running but may still be loading the model. \
+                Wait a moment and try again. Body: {}", body
+            ),
+            _ => format!("HTTP {}: {}", status, if body.is_empty() { "no response body".to_string() } else { body }),
+        };
+
         let _ = app.emit("stream-error", serde_json::json!({ "id": stream_id, "error": msg }));
         return Err(msg);
     }
