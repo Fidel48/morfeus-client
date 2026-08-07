@@ -219,23 +219,32 @@ export async function* streamChat(
   }
 
   let streamDone = false;
+  let hasReceivedToken = false;
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
   const resetWatchdog = () => {
     if (watchdogTimer) clearTimeout(watchdogTimer);
     if (!streamDone) {
+      // Allow 300s (5 min) for initial prefill/prompt processing on slow local models; 180s (3 min) between tokens once streaming starts
+      const timeoutMs = hasReceivedToken ? 180000 : 300000;
       watchdogTimer = setTimeout(() => {
-        if (!streamDone) push({ done: true, error: 'Stream timeout: no response from backend after 120s of inactivity.' });
-      }, 120000);
+        if (!streamDone) {
+          const msg = hasReceivedToken
+            ? 'Stream timeout: no response from LLM backend after 180s of inactivity.'
+            : 'Stream timeout: LLM backend took longer than 5 minutes to process prompt/prefill. Please check if your local server (Ollama/LM Studio) is responsive.';
+          push({ done: true, error: msg });
+        }
+      }, timeoutMs);
     }
   };
 
-  // Initial watchdog setup
+  // Initial watchdog setup (5 minutes allowed for initial prompt prefill)
   resetWatchdog();
 
   // Subscribe to Tauri events from the Rust stream
   const unlistenToken = await listen<{ id: string; data: string }>('stream-token', (evt) => {
     if (evt.payload.id !== streamId) return;
+    hasReceivedToken = true;
     resetWatchdog();
     try {
       const chunk: StreamChunk = JSON.parse(evt.payload.data);

@@ -306,7 +306,10 @@ Guidelines:
 
           for await (const chunk of streamChat(settings, apiMessages, controller.signal, availableTools)) {
             if (controller.signal.aborted) break;
-            const delta = chunk.choices[0]?.delta;
+            if (!chunk || !Array.isArray(chunk.choices) || chunk.choices.length === 0) continue;
+
+            const choice = chunk.choices[0];
+            const delta = choice?.delta;
             if (!delta) continue;
 
             if (!firstToken && (delta.content || delta.tool_calls)) {
@@ -348,7 +351,7 @@ Guidelines:
               appendToolCallDelta(delta.tool_calls);
             }
 
-            if (chunk.choices[0]?.finish_reason === 'stop' || chunk.choices[0]?.finish_reason === 'tool_calls') {
+            if (choice?.finish_reason === 'stop' || choice?.finish_reason === 'tool_calls') {
               break;
             }
           }
