@@ -6,3 +6,4 @@ pub mod web;
 pub mod files;
 pub mod rules;
 pub mod youtube;
+pub mod shell;

@@ -68,6 +68,10 @@ pub fn run() {
             logger::append_system_log,
             logger::get_system_logs,
             logger::open_log_folder,
+            // Shell / Script execution
+            commands::shell::run_python_code,
+            commands::shell::run_python_file,
+            commands::shell::install_python_packages,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Morfeus");

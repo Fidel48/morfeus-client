@@ -1,6 +1,6 @@
 [package]
 name = "morfeus"
-version = "0.1.19"
+version = "0.1.20"
 description = "Morfeus — Local-First LLM Desktop Client"
 authors = ["Morfeus"]
 edition = "2021"
@@ -55,6 +55,8 @@ tokio-util = { version = "0.7.19", features = ["compat"] }
 yt-transcript-rs = "0.1.8"
 zip = { version = "8.6.0", features = ["deflate"] }
 quick-xml = "0.41.0"
+tempfile = "3"
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

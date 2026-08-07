@@ -204,6 +204,36 @@ Guidelines:
               : `Found ${found.length} result(s):\n${found.map(f => f.is_dir ? `📁 ${f.path}/` : `📄 ${f.path}`).join('\n')}`;
           } else if (name === 'read_local_file') {
             result = await tauriApi.parseLocalFile(args.path);
+          } else if (name === 'run_python') {
+            const pyResult = await tauriApi.runPythonCode(args.code);
+            const status = pyResult.success ? '✅ Success' : `❌ Failed (exit code ${pyResult.exit_code})`;
+            const out = pyResult.stdout.trim();
+            const err = pyResult.stderr.trim();
+            result = [
+              `${status}`,
+              out ? `\n**stdout:**\n\`\`\`\n${out}\n\`\`\`` : '',
+              err ? `\n**stderr:**\n\`\`\`\n${err}\n\`\`\`` : '',
+            ].filter(Boolean).join('\n');
+          } else if (name === 'run_python_file') {
+            const pyResult = await tauriApi.runPythonFile(args.path);
+            const status = pyResult.success ? '✅ Success' : `❌ Failed (exit code ${pyResult.exit_code})`;
+            const out = pyResult.stdout.trim();
+            const err = pyResult.stderr.trim();
+            result = [
+              `${status} — ran: ${args.path}`,
+              out ? `\n**stdout:**\n\`\`\`\n${out}\n\`\`\`` : '',
+              err ? `\n**stderr:**\n\`\`\`\n${err}\n\`\`\`` : '',
+            ].filter(Boolean).join('\n');
+          } else if (name === 'install_python_packages') {
+            const pipResult = await tauriApi.installPythonPackages(args.packages);
+            const status = pipResult.success ? '✅ Installed' : `❌ Install failed (exit code ${pipResult.exit_code})`;
+            const out = pipResult.stdout.trim();
+            const err = pipResult.stderr.trim();
+            result = [
+              `${status}: ${args.packages}`,
+              out ? `\n\`\`\`\n${out}\n\`\`\`` : '',
+              err ? `\n**stderr:**\n\`\`\`\n${err}\n\`\`\`` : '',
+            ].filter(Boolean).join('\n');
           } else if (name.startsWith('mcp__')) {
             const parts = name.split('__');
             if (parts.length >= 3) {

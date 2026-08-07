@@ -16,7 +16,9 @@ struct ModelsResponse {
 fn make_client() -> reqwest::Client {
     reqwest::Client::builder()
         .danger_accept_invalid_certs(true) // allow self-signed certs on home servers
-        .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout for slow models
+        .connect_timeout(std::time::Duration::from_secs(30)) // 30s to establish connection
+        // NOTE: No overall .timeout() here — streaming responses can be arbitrarily long.
+        // The JS watchdog in api.ts handles inactivity detection once streaming starts.
         .build()
         .expect("Failed to build HTTP client")
 }

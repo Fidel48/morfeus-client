@@ -139,6 +139,61 @@ export const WEB_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'run_python',
+      description: "Write and execute Python code directly on the user's local machine. Use this to: run data analysis, execute automation scripts, process files, call APIs, fetch data from URLs, or run any Python logic. Always show the code you're about to run before executing it. The output (stdout + stderr) will be returned so you can explain the results.",
+      parameters: {
+        type: 'object',
+        properties: {
+          code: {
+            type: 'string',
+            description: 'The complete Python code to execute. Must be valid Python 3 syntax.',
+          },
+          description: {
+            type: 'string',
+            description: 'A short one-line description of what this code does (shown to the user before execution).',
+          },
+        },
+        required: ['code', 'description'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_python_file',
+      description: "Run an existing .py script file on the user's local machine by its full file path. Use this when the user already has a Python script saved and wants to execute it. Use read_local_file first to inspect the script if needed.",
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: 'The absolute path to the .py script to run (e.g. /Users/admin/Documents/fetch_data.py).',
+          },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'install_python_packages',
+      description: "Install one or more Python packages using pip so they are available to run_python or run_python_file. Call this automatically when a run_python execution fails with a ModuleNotFoundError or ImportError. Pass all missing packages at once (space-separated).",
+      parameters: {
+        type: 'object',
+        properties: {
+          packages: {
+            type: 'string',
+            description: 'Space-separated list of pip package names to install. E.g. "requests pandas lxml" or "numpy matplotlib".',
+          },
+        },
+        required: ['packages'],
+      },
+    },
+  },
 ];
 
 // ─── Model list ──────────────────────────────────────────────────────────────
@@ -224,28 +279,29 @@ export async function* streamChat(
 
   const resetWatchdog = () => {
     if (watchdogTimer) clearTimeout(watchdogTimer);
-    if (!streamDone) {
-      // Allow 300s (5 min) for initial prefill/prompt processing on slow local models; 180s (3 min) between tokens once streaming starts
-      const timeoutMs = hasReceivedToken ? 180000 : 300000;
-      watchdogTimer = setTimeout(() => {
-        if (!streamDone) {
-          const msg = hasReceivedToken
-            ? 'Stream timeout: no response from LLM backend after 180s of inactivity.'
-            : 'Stream timeout: LLM backend took longer than 5 minutes to process prompt/prefill. Please check if your local server (Ollama/LM Studio) is responsive.';
-          push({ done: true, error: msg });
-        }
-      }, timeoutMs);
-    }
+    if (streamDone) return;
+    // Before the first token: give the LLM 10 minutes to cold-start and process the prompt.
+    // After first token starts arriving: reset to a 5-minute inactivity window between tokens.
+    const timeoutMs = hasReceivedToken ? 300000 : 600000;
+    watchdogTimer = setTimeout(() => {
+      if (!streamDone) {
+        push({
+          done: true,
+          error: hasReceivedToken
+            ? 'Stream paused: no new tokens received for 5 minutes. The LLM may have stalled — please try again.'
+            : 'Connection timeout: LLM server did not respond within 10 minutes. Check that your local server (Ollama/LM Studio) is running and the model is loaded.',
+        });
+      }
+    }, timeoutMs);
   };
 
-  // Initial watchdog setup (5 minutes allowed for initial prompt prefill)
-  resetWatchdog();
+  // Register all event listeners FIRST, then start the watchdog, then fire the request.
+  // This order prevents a race where backend events arrive before JS listeners are ready.
 
-  // Subscribe to Tauri events from the Rust stream
   const unlistenToken = await listen<{ id: string; data: string }>('stream-token', (evt) => {
     if (evt.payload.id !== streamId) return;
     hasReceivedToken = true;
-    resetWatchdog();
+    resetWatchdog(); // reset rolling inactivity window on every token
     try {
       const chunk: StreamChunk = JSON.parse(evt.payload.data);
       push({ chunk, done: false });
@@ -275,12 +331,16 @@ export async function* streamChat(
     if (watchdogTimer) clearTimeout(watchdogTimer);
   };
 
-  // Handle abort — store handler so it can be removed on cleanup (bug #1)
+  // Handle abort
   let abortHandler: (() => void) | null = null;
   if (signal) {
     abortHandler = () => { if (!streamDone) push({ done: true, error: 'Aborted' }); };
     signal.addEventListener('abort', abortHandler);
   }
+
+  // All listeners are ready. Start the watchdog NOW (before invoke) so the initial
+  // 10-minute timeout is running from this point, not from before listeners were set up.
+  resetWatchdog();
 
   // Fire the Rust command (non-awaited — it streams back via events)
   invoke('proxy_stream_chat', {
@@ -289,7 +349,7 @@ export async function* streamChat(
     payload: JSON.stringify(body),
     streamId,
   }).catch((e: unknown) => {
-    // Only push if stream not already terminated (bug #10)
+    // Only push if stream not already terminated
     if (!streamDone) push({ done: true, error: String(e) });
   });
 

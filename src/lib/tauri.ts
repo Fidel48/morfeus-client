@@ -226,6 +226,21 @@ export const tauriApi = {
     return tauriInvoke('mcp_call_tool', { id, toolName, arguments: argumentsObj });
   },
 
+  /** Run an inline Python code snippet. Returns stdout, stderr, exit_code, success. */
+  async runPythonCode(code: string): Promise<{ stdout: string; stderr: string; exit_code: number; success: boolean }> {
+    return tauriInvoke('run_python_code', { code });
+  },
+
+  /** Run a Python script at a given absolute file path. Returns stdout, stderr, exit_code, success. */
+  async runPythonFile(path: string): Promise<{ stdout: string; stderr: string; exit_code: number; success: boolean }> {
+    return tauriInvoke('run_python_file', { path });
+  },
+
+  /** Install Python packages via pip (space-separated: "requests pandas lxml"). */
+  async installPythonPackages(packages: string): Promise<{ stdout: string; stderr: string; exit_code: number; success: boolean }> {
+    return tauriInvoke('install_python_packages', { packages });
+  },
+
   /** Whether we're running inside the Tauri desktop app */
   isDesktopApp(): boolean {
     return isTauri;
