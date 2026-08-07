@@ -21,7 +21,8 @@ fn make_client() -> reqwest::Client {
     reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .connect_timeout(std::time::Duration::from_secs(30))
-        .tcp_keepalive(std::time::Duration::from_secs(15)) // send keepalive every 15s — prevents Cloudflare from treating idle stream as dead
+        .tcp_keepalive(std::time::Duration::from_secs(15)) // send TCP keepalive every 15s
+        .http2_keep_alive_interval(std::time::Duration::from_secs(15)) // send HTTP/2 keepalive PING every 15s to keep Cloudflare streams alive
         .build()
         .expect("Failed to build HTTP client")
 }
@@ -38,14 +39,16 @@ fn make_headers(api_key: &str) -> reqwest::header::HeaderMap {
 }
 
 /// Headers specifically for SSE/streaming requests.
-/// X-Accel-Buffering: no  → tells Cloudflare and nginx NOT to buffer the response.
-///                          Without this, Cloudflare holds all SSE chunks and only flushes
-///                          when the connection closes — triggering a 524 for long responses.
-/// Cache-Control: no-cache → required by the SSE spec; also signals proxies not to buffer.
+/// - Accept: text/event-stream → tells Cloudflare Proxy that this is an SSE stream, enabling instant chunk forwarding
+/// - X-Accel-Buffering: no    → tells Cloudflare and Nginx NOT to buffer response bytes
+/// - Cache-Control: no-cache   → prevents proxy caching and buffering
+/// - Connection: keep-alive    → keeps the HTTP connection open across chunks
 fn make_stream_headers(api_key: &str) -> reqwest::header::HeaderMap {
     let mut headers = make_headers(api_key);
+    headers.insert("Accept", "text/event-stream".parse().unwrap());
     headers.insert("X-Accel-Buffering", "no".parse().unwrap());
     headers.insert("Cache-Control", "no-cache".parse().unwrap());
+    headers.insert("Connection", "keep-alive".parse().unwrap());
     headers
 }
 
