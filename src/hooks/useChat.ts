@@ -265,7 +265,8 @@ Guidelines:
         };
 
         // ── Main streaming loop (recursive for tool calls) ──
-        const executeChatLoop = async (isInitialTurn: boolean, depth: number): Promise<void> => {
+        // disableTools: set after an empty-response auto-retry so we don't keep sending tools to models that ignore them
+        const executeChatLoop = async (isInitialTurn: boolean, depth: number, disableTools = false): Promise<void> => {
           if (controller.signal.aborted) return;
 
           const apiMessages = buildApiMessages(isInitialTurn);
@@ -347,7 +348,7 @@ Guidelines:
             return false;
           };
 
-          for await (const chunk of streamChat(settings, apiMessages, controller.signal, availableTools)) {
+          for await (const chunk of streamChat(settings, apiMessages, controller.signal, availableTools, disableTools)) {
             if (controller.signal.aborted) break;
             if (!chunk || !Array.isArray(chunk.choices) || chunk.choices.length === 0) continue;
 
@@ -406,7 +407,27 @@ Guidelines:
 
           const finalMessage = finalizeStreamMessage(convId!);
 
-          // ── Handle tool calls ──
+          // ── Auto-retry without tools if model returned an empty response ──
+          // This happens when GGUF/Ollama models don't support function calling:
+          // they receive the tools array, get confused, and return nothing.
+          // Retry once without the tools array so the model can respond normally.
+          const isEmptyResponse = !finalMessage.content
+            || finalMessage.content === '[empty response]'
+            || finalMessage.content.trim() === '';
+          const hasNoToolCalls = !finalMessage.tool_calls || finalMessage.tool_calls.length === 0;
+
+          if (isEmptyResponse && hasNoToolCalls && depth === 0 && !disableTools) {
+            console.warn('[Chat] Empty response received — model may not support function calling. Retrying without tools.');
+            tauriApi.appendSystemLog('warn', 'Empty response from model — retrying without tools array (model may not support function calling).');
+            // Remove the empty message we just finalized
+            useChatStore.setState((state) => ({
+              messages: state.messages.filter((m) => m.id !== finalMessage.id),
+            }));
+            clearStreamingContent();
+            await executeChatLoop(isInitialTurn, depth, true); // retry with tools disabled
+            return;
+          }
+
           const hasToolCalls = finalMessage.tool_calls && finalMessage.tool_calls.length > 0;
           const toolBudgetExhausted = totalToolCalls >= MAX_TOTAL_TOOLS;
 

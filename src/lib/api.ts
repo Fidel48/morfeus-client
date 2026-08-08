@@ -242,9 +242,12 @@ export async function* streamChat(
   settings: AppSettings,
   messages: ChatRequest['messages'],
   signal?: AbortSignal,
-  extraTools?: ToolDefinition[]
+  extraTools?: ToolDefinition[],
+  disableTools = false  // set true to omit the tools array (for models that don't support function calling)
 ): AsyncGenerator<StreamChunk, void, unknown> {
   const streamId = genStreamId();
+
+  const allTools = disableTools ? [] : (extraTools ? [...WEB_TOOLS, ...extraTools] : WEB_TOOLS);
 
   const body: ChatRequest & { num_ctx?: number; repetition_penalty?: number } = {
     model: settings.model_id,
@@ -253,9 +256,9 @@ export async function* streamChat(
     top_p: settings.top_p,
     max_tokens: settings.max_tokens,
     frequency_penalty: settings.frequency_penalty,
-    repetition_penalty: 1.1, // Ollama/vLLM/llama.cpp — penalizes any repeated tokens
+    repetition_penalty: 1.1,
     stream: true,
-    tools: extraTools ? [...WEB_TOOLS, ...extraTools] : WEB_TOOLS,
+    ...(allTools.length > 0 ? { tools: allTools } : {}), // omit tools key entirely when empty — some servers reject tools: []
     num_ctx: settings.context_length,
   };
 
