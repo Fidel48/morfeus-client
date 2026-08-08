@@ -118,13 +118,20 @@ export const useChatStore = create<ChatStore>()(
           toolCallsDelta.forEach((delta) => {
             const index = delta.index ?? 0;
             if (!current[index]) {
-              current[index] = { ...delta };
-              if (current[index].function) {
-                current[index].function = { ...delta.function };
-              }
+              current[index] = {
+                index,
+                id: delta.id || `call_${Date.now()}_${index}`,
+                type: delta.type || 'function',
+                function: {
+                  name: delta.function?.name || '',
+                  arguments: delta.function?.arguments || '',
+                },
+              };
             } else {
               if (delta.id) current[index].id = delta.id;
+              if (!current[index].id) current[index].id = `call_${Date.now()}_${index}`;
               if (delta.type) current[index].type = delta.type;
+              if (!current[index].type) current[index].type = 'function';
               if (delta.function) {
                 if (!current[index].function) {
                   current[index].function = { name: '', arguments: '' };

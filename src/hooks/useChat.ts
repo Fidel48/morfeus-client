@@ -144,12 +144,25 @@ Guidelines:
             let apiMsg: any;
             if (msg.role === 'assistant') {
               apiMsg = msg.tool_calls?.length
-                ? { role: 'assistant', content: msg.content ?? null, tool_calls: msg.tool_calls }
+                ? {
+                    role: 'assistant',
+                    content: msg.content ?? null,
+                    tool_calls: msg.tool_calls.map((tc, idx) => ({
+                      id: tc.id || `call_${Date.now()}_${idx}`,
+                      type: tc.type || 'function',
+                      function: {
+                        name: tc.function?.name || '',
+                        arguments: typeof tc.function?.arguments === 'string'
+                          ? tc.function.arguments
+                          : JSON.stringify(tc.function?.arguments || {}),
+                      },
+                    })),
+                  }
                 : { role: 'assistant', content: msg.content ?? '' };
             } else if (msg.role === 'tool') {
               apiMsg = {
                 role: 'tool',
-                tool_call_id: msg.tool_call_id ?? 'unknown',
+                tool_call_id: msg.tool_call_id || 'call_default',
                 content: msg.content ?? '',
               };
             } else {
@@ -473,7 +486,19 @@ Guidelines:
             if (controller.signal.aborted) return;
             setChatStatus('thinking');
             clearStreamingContent();
-            await executeChatLoop(false, depth + 1);
+            try {
+              await executeChatLoop(false, depth + 1);
+            } catch (err: unknown) {
+              const msg = err instanceof Error ? err.message : String(err);
+              console.error('[Stream error on turn 2]:', err);
+              addMessage({
+                id: generateId(),
+                conversation_id: convId!,
+                role: 'assistant',
+                content: `⚠️ Error during response generation: ${msg}`,
+                created_at: Date.now(),
+              });
+            }
             return; // Don't run TTS on intermediate steps
           } else if (hasToolCalls && (isMaxDepth || toolBudgetExhausted)) {
             // Model tried to call tools but budget is exhausted — inject a final-answer notice
