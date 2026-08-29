@@ -13,7 +13,8 @@ import { cn, bytesToBase64, isVisionModel } from '@/lib/utils';
 
 interface Attachment {
   name: string;
-  path: string;
+  path?: string;
+  file?: File;
 }
 
 interface StatusBadgeProps {
@@ -92,7 +93,15 @@ export const ChatWindow: React.FC = () => {
 
         if (isImage) {
           try {
-            const bytes = await tauriApi.readFileBytes(att.path);
+            let bytes: Uint8Array;
+            if (att.file) {
+              const arrayBuffer = await att.file.arrayBuffer();
+              bytes = new Uint8Array(arrayBuffer);
+            } else if (att.path) {
+              bytes = await tauriApi.readFileBytes(att.path);
+            } else {
+              throw new Error("No file or path provided");
+            }
             const b64 = bytesToBase64(bytes);
             
             const ext = att.name.split('.').pop()?.toLowerCase();
@@ -113,7 +122,15 @@ export const ChatWindow: React.FC = () => {
           }
         } else if (isPdf) {
           try {
-            const bytes = await tauriApi.readFileBytes(att.path);
+            let bytes: Uint8Array;
+            if (att.file) {
+              const arrayBuffer = await att.file.arrayBuffer();
+              bytes = new Uint8Array(arrayBuffer);
+            } else if (att.path) {
+              bytes = await tauriApi.readFileBytes(att.path);
+            } else {
+              throw new Error("No file or path provided");
+            }
 
             // First, try text extraction
             const text = await extractPdfText(bytes);
@@ -149,7 +166,12 @@ export const ChatWindow: React.FC = () => {
         } else {
           // Plain text/code file — use Rust backend
           try {
-            let content = await tauriApi.parseLocalFile(att.path);
+            let content = '';
+            if (att.file) {
+              content = await att.file.text();
+            } else if (att.path) {
+              content = await tauriApi.parseLocalFile(att.path);
+            }
             if (content.length > 12000) {
               content = content.slice(0, 12000) + '\n[...truncated...]';
             }
@@ -163,12 +185,15 @@ export const ChatWindow: React.FC = () => {
       let rulesContext = '';
       if (currentAttachments.length > 0) {
         try {
-          const rules = await tauriApi.findProjectRules(currentAttachments[0].path);
-          for (const rule of rules) {
-             rulesContext += `\n--- Project Rule (${rule.file_name}) ---\n${rule.content}\n---\n`;
-          }
-          if (rules.length > 0) {
-            console.log(`[context] Injected ${rules.length} project rule file(s).`);
+          const firstPathAtt = currentAttachments.find(a => a.path);
+          if (firstPathAtt && firstPathAtt.path) {
+            const rules = await tauriApi.findProjectRules(firstPathAtt.path);
+            for (const rule of rules) {
+               rulesContext += `\n--- Project Rule (${rule.file_name}) ---\n${rule.content}\n---\n`;
+            }
+            if (rules.length > 0) {
+              console.log(`[context] Injected ${rules.length} project rule file(s).`);
+            }
           }
         } catch (e) {
           console.error('Failed to load project rules', e);
@@ -264,6 +289,32 @@ export const ChatWindow: React.FC = () => {
       }
     } catch (e) {
       console.error('Failed to open image dialog:', e);
+    }
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    const newAttachments: Attachment[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (file) {
+          // generate a simple name if missing
+          const ext = file.type.split('/')[1] || 'bin';
+          const fileName = file.name === 'image.png' ? `pasted_image_${Date.now()}.${ext}` : (file.name || `Pasted file.${ext}`);
+          newAttachments.push({
+            name: fileName,
+            file: file
+          });
+        }
+      }
+    }
+
+    if (newAttachments.length > 0) {
+      setAttachments(prev => [...prev, ...newAttachments]);
     }
   };
 
@@ -407,6 +458,7 @@ export const ChatWindow: React.FC = () => {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               placeholder="Message Morfeus… (Enter to send, Shift+Enter for newline)"
               rows={1}
               className="flex-1 bg-transparent text-sm text-zinc-100 placeholder-zinc-600 resize-none outline-none py-2 px-1 max-h-48 leading-relaxed"
