@@ -98,3 +98,42 @@ export function isVisionModel(modelId: string | undefined): boolean {
          id.includes('claude-3') ||
          id.includes('gemini');
 }
+
+export async function resizeImage(fileOrBlob: File | Blob, maxWidth = 1024): Promise<{ bytes: Uint8Array; base64: string }> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(fileOrBlob);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width > maxWidth) {
+        height = Math.round((height * maxWidth) / width);
+        width = maxWidth;
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return reject(new Error('Canvas context null'));
+      ctx.drawImage(img, 0, 0, width, height);
+
+      const mime = fileOrBlob.type === 'image/png' ? 'image/png' : 'image/jpeg';
+      const dataUrl = canvas.toDataURL(mime, 0.9);
+      
+      const base64Data = dataUrl.split(',')[1];
+      const binaryString = atob(base64Data);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      resolve({ bytes, base64: base64Data });
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Failed to load image for resizing'));
+    };
+    img.src = url;
+  });
+}

@@ -9,12 +9,14 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { tauriApi } from '@/lib/tauri';
 import { extractPdfText, renderPdfToImages } from '@/lib/pdfParser';
 import { ContentPart, Message } from '@/types';
-import { cn, bytesToBase64, isVisionModel } from '@/lib/utils';
+import { cn, bytesToBase64, isVisionModel, resizeImage } from '@/lib/utils';
 
 interface Attachment {
   name: string;
   path?: string;
   file?: File;
+  previewUrl?: string;
+  base64?: string;
 }
 
 interface StatusBadgeProps {
@@ -93,16 +95,19 @@ export const ChatWindow: React.FC = () => {
 
         if (isImage) {
           try {
-            let bytes: Uint8Array;
-            if (att.file) {
-              const arrayBuffer = await att.file.arrayBuffer();
-              bytes = new Uint8Array(arrayBuffer);
-            } else if (att.path) {
-              bytes = await tauriApi.readFileBytes(att.path);
-            } else {
-              throw new Error("No file or path provided");
+            let b64 = att.base64;
+            if (!b64) {
+              let bytes: Uint8Array;
+              if (att.file) {
+                const arrayBuffer = await att.file.arrayBuffer();
+                bytes = new Uint8Array(arrayBuffer);
+              } else if (att.path) {
+                bytes = await tauriApi.readFileBytes(att.path);
+              } else {
+                throw new Error("No file or path provided");
+              }
+              b64 = bytesToBase64(bytes);
             }
-            const b64 = bytesToBase64(bytes);
             
             const ext = att.name.split('.').pop()?.toLowerCase();
             let mimeType = 'image/jpeg';
@@ -205,7 +210,18 @@ export const ChatWindow: React.FC = () => {
       const questionText = userText || 'Please analyze the attached file(s).';
       
       // Clean display text for the UI chat bubble
-      const displayContent = `📎 Attached: ${currentAttachments.map(a => a.name).join(', ')}\n\n${userText}`.trim();
+      const imageDisplays = currentAttachments
+        .filter(a => /\.(png|jpe?g|gif|webp)$/i.test(a.name) && (a.previewUrl || a.base64))
+        .map(a => `![${a.name}](${a.previewUrl || `data:image/jpeg;base64,${a.base64}`})`)
+        .join('\n\n');
+      
+      const fileNames = currentAttachments
+        .filter(a => !/\.(png|jpe?g|gif|webp)$/i.test(a.name))
+        .map(a => a.name)
+        .join(', ');
+
+      const attachText = fileNames ? `📎 Attached: ${fileNames}\n\n` : '';
+      const displayContent = `${attachText}${imageDisplays}\n\n${userText}`.trim();
 
       if (hasImages) {
         // Build a multimodal content array for vision-capable models
@@ -281,10 +297,18 @@ export const ChatWindow: React.FC = () => {
     try {
       const paths = await tauriApi.openImageDialog();
       if (paths) {
-        const newAttachments = paths.map(p => {
+        const newAttachments: Attachment[] = [];
+        for (const p of paths) {
           const name = p.split(/[/\\]/).pop() || 'Unknown image';
-          return { name, path: p };
-        });
+          try {
+            const bytes = await tauriApi.readFileBytes(p);
+            const blob = new Blob([bytes], { type: 'image/jpeg' });
+            const { base64 } = await resizeImage(blob, 1024);
+            newAttachments.push({ name, path: p, previewUrl: `data:image/jpeg;base64,${base64}`, base64 });
+          } catch(e) {
+            newAttachments.push({ name, path: p }); // fallback to just path
+          }
+        }
         setAttachments(prev => [...prev, ...newAttachments]);
       }
     } catch (e) {
@@ -292,7 +316,7 @@ export const ChatWindow: React.FC = () => {
     }
   };
 
-  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = e.clipboardData?.items;
     if (!items) return;
 
@@ -302,13 +326,24 @@ export const ChatWindow: React.FC = () => {
       if (item.kind === 'file') {
         const file = item.getAsFile();
         if (file) {
-          // generate a simple name if missing
           const ext = file.type.split('/')[1] || 'bin';
           const fileName = file.name === 'image.png' ? `pasted_image_${Date.now()}.${ext}` : (file.name || `Pasted file.${ext}`);
-          newAttachments.push({
-            name: fileName,
-            file: file
-          });
+          
+          if (file.type.startsWith('image/')) {
+            try {
+              const { base64 } = await resizeImage(file, 1024);
+              newAttachments.push({
+                name: fileName,
+                file: file,
+                previewUrl: `data:${file.type};base64,${base64}`,
+                base64
+              });
+            } catch(e) {
+              newAttachments.push({ name: fileName, file: file });
+            }
+          } else {
+            newAttachments.push({ name: fileName, file: file });
+          }
         }
       }
     }
@@ -402,16 +437,23 @@ export const ChatWindow: React.FC = () => {
       <div className="flex-shrink-0 px-4 pb-4">
         <div className="max-w-3xl mx-auto flex flex-col gap-2">
           
-          {/* Attachments Pills */}
+          {/* Attachments Pills & Previews */}
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2 px-1">
               {attachments.map((att, idx) => (
-                <div key={idx} className="flex items-center gap-1.5 bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 shadow-sm">
-                  <FileText size={12} className="text-violet-400" />
-                  <span className="text-xs text-zinc-300 truncate max-w-[150px]" title={att.name}>{att.name}</span>
+                <div key={idx} className="flex items-center gap-1.5 bg-zinc-800 border border-zinc-700 rounded-md shadow-sm relative group p-1">
+                  {att.previewUrl ? (
+                    <img src={att.previewUrl} alt={att.name} className="w-12 h-12 object-cover rounded" />
+                  ) : (
+                    <div className="flex items-center gap-1.5 px-2 py-1">
+                      <FileText size={12} className="text-violet-400" />
+                      <span className="text-xs text-zinc-300 truncate max-w-[150px]" title={att.name}>{att.name}</span>
+                    </div>
+                  )}
                   <button 
                     onClick={() => removeAttachment(idx)}
-                    className="p-0.5 text-zinc-500 hover:text-red-400 rounded-full transition-colors ml-1"
+                    className="absolute -top-2 -right-2 bg-zinc-800 hover:bg-red-500 border border-zinc-700 text-zinc-400 hover:text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-all shadow-md z-10"
+                    title="Remove attachment"
                   >
                     <X size={12} />
                   </button>
