@@ -194,6 +194,130 @@ export const WEB_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'run_terminal_command',
+      description: "Execute a raw terminal command on the user's machine (mac/linux sh, windows cmd). Use this to install packages, scaffold projects (npm create), compile code, or interact with git. WARNING: This has full system access.",
+      parameters: {
+        type: 'object',
+        properties: {
+          command: {
+            type: 'string',
+            description: 'The complete shell command to execute.',
+          },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'write_to_file',
+      description: "Create a new file or overwrite an existing file with the provided content. Parent directories are created automatically if they do not exist.",
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: 'The absolute path to the file to create or overwrite.',
+          },
+          content: {
+            type: 'string',
+            description: 'The exact string content to write to the file.',
+          },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_file',
+      description: "Permanently delete a file or directory at the specified absolute path. WARNING: This action is irreversible.",
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: 'The absolute path of the file or directory to delete.',
+          },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  // ── Vision & Control (Violoop Architecture) ──
+  {
+    type: 'function',
+    function: {
+      name: 'analyze_screen',
+      description: "Capture the user's primary monitor as a screenshot and return it as a Base64-encoded PNG string. Use this to 'see' what the user is working on, read error messages, or find UI elements to click.",
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mouse_move',
+      description: "Move the mouse cursor to absolute screen coordinates (x, y).",
+      parameters: {
+        type: 'object',
+        properties: {
+          x: { type: 'number', description: 'X coordinate' },
+          y: { type: 'number', description: 'Y coordinate' },
+        },
+        required: ['x', 'y'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mouse_click',
+      description: "Click the mouse at the current cursor position.",
+      parameters: {
+        type: 'object',
+        properties: {
+          button: { type: 'string', description: "The button to click: 'left', 'right', or 'middle'." },
+        },
+        required: ['button'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'type_text',
+      description: "Type a string of text at the current cursor location (simulates rapid keyboard input).",
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'The text to type.' },
+        },
+        required: ['text'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'press_key',
+      description: "Press and release a specific keyboard key (e.g., 'enter', 'tab', 'escape', 'space').",
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: "The key name to press." },
+        },
+        required: ['key'],
+      },
+    },
+  }
 ];
 
 // ─── Model list ──────────────────────────────────────────────────────────────

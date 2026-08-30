@@ -273,3 +273,39 @@ fn walk_dir(dir: &Path, query_words: &[String], matches: &mut Vec<SearchMatch>, 
         }
     }
 }
+
+// ─── File Mutating (Agent Workspace Tools) ──────────────────────────────────
+
+#[command]
+pub async fn write_to_file(path: String, content: String) -> Result<String, String> {
+    let p = Path::new(&path);
+    if let Some(parent) = p.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent directory: {}", e))?;
+        }
+    }
+
+    fs::write(p, content)
+        .map_err(|e| format!("Failed to write file: {}", e))?;
+
+    Ok(format!("Successfully wrote to {}", path))
+}
+
+#[command]
+pub async fn delete_file(path: String) -> Result<String, String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("File or directory does not exist: {}", path));
+    }
+
+    if p.is_dir() {
+        fs::remove_dir_all(p)
+            .map_err(|e| format!("Failed to delete directory: {}", e))?;
+    } else {
+        fs::remove_file(p)
+            .map_err(|e| format!("Failed to delete file: {}", e))?;
+    }
+
+    Ok(format!("Successfully deleted {}", path))
+}

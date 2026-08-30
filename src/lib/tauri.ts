@@ -241,6 +241,97 @@ export const tauriApi = {
     return tauriInvoke('install_python_packages', { packages });
   },
 
+  /** Run a raw terminal command (sh -c or cmd.exe /c). Returns stdout, stderr, exit_code, success. */
+  async runTerminalCommand(command: string): Promise<{ stdout: string; stderr: string; exit_code: number; success: boolean }> {
+    return tauriInvoke('run_terminal_command', { command });
+  },
+
+  /** Write content to an absolute file path. Creates directories if they don't exist. */
+  async writeToFile(path: string, content: string): Promise<string> {
+    return tauriInvoke('write_to_file', { path, content });
+  },
+
+  /** Delete a file at the given absolute path. */
+  async deleteFile(path: string): Promise<string> {
+    return tauriInvoke('delete_file', { path });
+  },
+
+  // ── Vision & Control (Violoop Architecture) ──
+
+  /** Capture the primary screen and return it as a Base64 PNG. */
+  async captureScreen(): Promise<string> {
+    const tempFile = '/tmp/morfeus_screen.png';
+    const res = await tauriInvoke<any>('run_terminal_command', { command: `screencapture -x ${tempFile}` });
+    if (!res.success) throw new Error("Failed to capture screen: " + res.stderr);
+    
+    const bytes = await this.readFileBytes(tempFile);
+    
+    // Convert Uint8Array to base64 properly
+    const chunk = 8192;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
+    }
+    const b64 = btoa(binary);
+    
+    // Delete temp file
+    await tauriInvoke('run_terminal_command', { command: `rm -f ${tempFile}` });
+    return `data:image/png;base64,${b64}`;
+  },
+
+  /** Move the mouse to absolute coordinates (x, y). */
+  async mouseMove(x: number, y: number): Promise<void> {
+    const pyCode = `import Quartz; Quartz.CGWarpMouseCursorPosition((${x}, ${y}))`;
+    await tauriInvoke('run_terminal_command', { command: `python3 -c "${pyCode}"` });
+  },
+
+  /** Click the mouse button ('left', 'right', 'middle'). */
+  async mouseClick(button: string): Promise<void> {
+    const pyCode = `
+import Quartz, time
+btn = Quartz.kCGMouseButtonLeft
+evt_down = Quartz.kCGEventLeftMouseDown
+evt_up = Quartz.kCGEventLeftMouseUp
+if '${button}' == 'right':
+    btn = Quartz.kCGMouseButtonRight
+    evt_down = Quartz.kCGEventRightMouseDown
+    evt_up = Quartz.kCGEventRightMouseUp
+e = Quartz.CGEventCreate(None)
+pos = Quartz.CGEventGetLocation(e)
+d = Quartz.CGEventCreateMouseEvent(None, evt_down, pos, btn)
+u = Quartz.CGEventCreateMouseEvent(None, evt_up, pos, btn)
+Quartz.CGEventPost(Quartz.kCGHIDEventTap, d)
+time.sleep(0.05)
+Quartz.CGEventPost(Quartz.kCGHIDEventTap, u)
+`.trim().replace(/\n/g, '\\n');
+    await tauriInvoke('run_terminal_command', { command: `python3 -c "${pyCode}"` });
+  },
+
+  /** Type the given text string. */
+  async typeText(text: string): Promise<void> {
+    // Escape quotes and backslashes for AppleScript
+    const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    await tauriInvoke('run_terminal_command', { command: `osascript -e 'tell application "System Events" to keystroke "${escaped}"'` });
+  },
+
+  /** Press a specific key (e.g., 'enter', 'tab', 'escape', 'a'). */
+  async pressKey(key: string): Promise<void> {
+    let script = '';
+    const k = key.toLowerCase();
+    if (k === 'enter' || k === 'return') script = 'key code 36';
+    else if (k === 'tab') script = 'key code 48';
+    else if (k === 'space') script = 'key code 49';
+    else if (k === 'escape' || k === 'esc') script = 'key code 53';
+    else if (k === 'backspace' || k === 'delete') script = 'key code 51';
+    else if (k === 'up') script = 'key code 126';
+    else if (k === 'down') script = 'key code 125';
+    else if (k === 'left') script = 'key code 123';
+    else if (k === 'right') script = 'key code 124';
+    else script = `keystroke "${k.charAt(0)}"`;
+    
+    await tauriInvoke('run_terminal_command', { command: `osascript -e 'tell application "System Events" to ${script}'` });
+  },
+
   /** Whether we're running inside the Tauri desktop app */
   isDesktopApp(): boolean {
     return isTauri;

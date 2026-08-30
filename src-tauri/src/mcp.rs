@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use tauri::{command, State};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
+use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex, oneshot};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

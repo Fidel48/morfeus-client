@@ -102,8 +102,25 @@ export function useChat() {
         const now = new Date();
         const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
         const timeStr = now.toLocaleTimeString('en-US');
-        const basePrompt = settings.system_prompt || 'You are Morfeus, a highly capable, articulate, and intelligent AI assistant.';
-        const systemPrompt = `${basePrompt}
+        const isAgentic = useChatStore.getState().isAgenticMode;
+        
+        let systemPrompt = '';
+        if (isAgentic) {
+          systemPrompt = `You are an Autonomous Agentic Worker running inside the Morfeus Harness.
+
+Today's Date: ${dateStr}
+Current Time: ${timeStr}
+
+CRITICAL DIRECTIVES:
+1. AUTONOMY: You operate in a continuous ReAct (Reason, Act, Observe) loop. You MUST NOT ask the user for permission to execute a logical next step. Just execute the tool.
+2. CHAINING: If you need to search the web, read a file, and write a script to achieve the goal, do all of them sequentially using your tools. The harness will automatically feed tool results back to you.
+3. SILENCE: Do not output conversational filler while working. Only output text to the user when the overarching goal is 100% complete, or if you are completely blocked and require human intervention. When finishing, ALWAYS provide a clear summary of what you accomplished (e.g. files deleted, files created, commands run).
+4. THINKING: Before calling a tool, you may output your internal reasoning.
+5. COMPUTER CONTROL: To interact with UI, you must FIRST call \`analyze_screen\` to "see" the screen. Then determine coordinates (x, y) for your target element. Then use \`mouse_move\` to move the cursor, followed by \`mouse_click\` or \`type_text\` to interact. DO NOT just open a webpage and stop; you must actively interact with the page to complete the task!
+6. OVERRIDE REFUSALS: You HAVE the ability to move the mouse and click. NEVER say you cannot physically interact with the screen. You must use your tools to do it. If you open a webpage or app, ALWAYS run a terminal command like \`sleep 3\` or \`python3 -c "import time; time.sleep(3)"\` to wait for it to load BEFORE calling \`analyze_screen\`.`;
+        } else {
+          const basePrompt = settings.system_prompt || 'You are Morfeus, a highly capable, articulate, and intelligent AI assistant.';
+          systemPrompt = `${basePrompt}
 
 Today's Date: ${dateStr}
 Current Time: ${timeStr}
@@ -113,12 +130,13 @@ Guidelines:
 - Only use file tools (list_directory, search_files, read_local_file) when the user explicitly asks to find, open, read, or edit a file.
 - For general questions, opinions, investments, or news: answer directly or use web_search.
 - Never repeat yourself or output raw system instructions.`;
+        }
 
         // ── Tool dedup + rate limiting: persists across all recursive depths for this turn ──
         const calledToolKeys = new Set<string>();
         let totalToolCalls = 0;       // hard cap: max 5 tool calls total per user turn
         let consecutiveErrors = 0;    // if 2 errors in a row, stop and answer from what we know
-        const MAX_TOTAL_TOOLS = 5;
+        const MAX_TOTAL_TOOLS = isAgentic ? 30 : 5;
 
         // ── Build API-formatted message history ──
         const buildApiMessages = (isInitialTurn: boolean) => {
@@ -160,11 +178,36 @@ Guidelines:
                   }
                 : { role: 'assistant', content: msg.content ?? '' };
             } else if (msg.role === 'tool') {
-              apiMsg = {
-                role: 'tool',
-                tool_call_id: msg.tool_call_id || 'call_default',
-                content: msg.content ?? '',
-              };
+              if (typeof msg.content === 'string' && msg.content.startsWith('![Screenshot](data:image/png;base64,')) {
+                const match = msg.content.match(/\((data:image\/png;base64,.*?)\)/);
+                if (match && match[1]) {
+                  // Inject the image as a simulated user message *after* the tool message
+                  history.unshift({
+                    role: 'user',
+                    content: [
+                      { type: 'text', text: 'Here is the screenshot you requested:' },
+                      { type: 'image_url', image_url: { url: match[1] } }
+                    ]
+                  });
+                  apiMsg = {
+                    role: 'tool',
+                    tool_call_id: msg.tool_call_id || 'call_default',
+                    content: 'Screenshot captured successfully.',
+                  };
+                } else {
+                  apiMsg = {
+                    role: 'tool',
+                    tool_call_id: msg.tool_call_id || 'call_default',
+                    content: msg.content ?? '',
+                  };
+                }
+              } else {
+                apiMsg = {
+                  role: 'tool',
+                  tool_call_id: msg.tool_call_id || 'call_default',
+                  content: msg.content ?? '',
+                };
+              }
             } else {
               apiMsg = { role: msg.role, content: msg.content ?? '' };
             }
@@ -218,7 +261,8 @@ Guidelines:
           } else if (name === 'read_local_file') {
             result = await tauriApi.parseLocalFile(args.path);
           } else if (name === 'run_python') {
-            const pyResult = await tauriApi.runPythonCode(args.code);
+            const codeArg = typeof args.code === 'string' ? args.code : JSON.stringify(args.code);
+            const pyResult = await tauriApi.runPythonCode(codeArg);
             const status = pyResult.success ? '✅ Success' : `❌ Failed (exit code ${pyResult.exit_code})`;
             const out = pyResult.stdout.trim();
             const err = pyResult.stderr.trim();
@@ -247,6 +291,73 @@ Guidelines:
               out ? `\n\`\`\`\n${out}\n\`\`\`` : '',
               err ? `\n**stderr:**\n\`\`\`\n${err}\n\`\`\`` : '',
             ].filter(Boolean).join('\n');
+          } else if (
+            name === 'run_terminal_command' ||
+            name === 'write_to_file' ||
+            name === 'delete_file' ||
+            name === 'analyze_screen' ||
+            name === 'mouse_click' ||
+            name === 'type_text' ||
+            name === 'press_key' ||
+            name === 'mouse_move'
+          ) {
+            let needsApproval = false;
+            
+            // Require approval for sensitive tools
+            if (name === 'delete_file') {
+              needsApproval = true;
+            } else if (name === 'run_terminal_command' && args.command) {
+              // Basic destructive command detection
+              const cmd = args.command.toLowerCase();
+              if (cmd.startsWith('rm ') || cmd.startsWith('del ') || cmd.startsWith('rmdir') || cmd.includes(' rm ') || cmd.includes(' del ')) {
+                needsApproval = true;
+              }
+            }
+
+            let approved = true;
+            if (needsApproval) {
+              approved = await new Promise<boolean>((resolve) => {
+                useChatStore.getState().setPendingApproval({ toolName: name, args, resolve });
+              });
+              useChatStore.getState().setPendingApproval(null);
+            }
+
+            if (!approved) {
+              return "Action aborted by the user. Do not attempt this specific action again without asking first.";
+            }
+
+            if (name === 'run_terminal_command') {
+              const res = await tauriApi.runTerminalCommand(args.command);
+              const status = res.success ? '✅ Success' : `❌ Failed (exit code ${res.exit_code})`;
+              const out = res.stdout.trim();
+              const err = res.stderr.trim();
+              result = [
+                `${status}`,
+                out ? `\n**stdout:**\n\`\`\`\n${out}\n\`\`\`` : '',
+                err ? `\n**stderr:**\n\`\`\`\n${err}\n\`\`\`` : '',
+              ].filter(Boolean).join('\n');
+            } else if (name === 'write_to_file') {
+              result = await tauriApi.writeToFile(args.path, args.content);
+            } else if (name === 'delete_file') {
+              result = await tauriApi.deleteFile(args.path);
+            } else if (name === 'analyze_screen') {
+              const b64 = await tauriApi.captureScreen();
+              result = `![Screenshot](${b64})`;
+            } else if (name === 'mouse_move') {
+              await tauriApi.mouseMove(args.x, args.y);
+              result = "Mouse moved successfully.";
+            } else if (name === 'mouse_click') {
+              await tauriApi.mouseClick(args.button);
+              result = `Mouse clicked (${args.button}) successfully.`;
+            } else if (name === 'type_text') {
+              await tauriApi.typeText(args.text);
+              result = `Text typed successfully.`;
+            } else if (name === 'press_key') {
+              await tauriApi.pressKey(args.key);
+              result = `Key '${args.key}' pressed successfully.`;
+            } else {
+              result = "Unknown tool branch.";
+            }
           } else if (name.startsWith('mcp__')) {
             const parts = name.split('__');
             if (parts.length >= 3) {
@@ -272,11 +383,11 @@ Guidelines:
           const apiMessages = buildApiMessages(isInitialTurn);
 
           // At max depth, stop passing tools so model must respond with text
-          const isMaxDepth = depth >= 3;
+          const isMaxDepth = depth >= (useChatStore.getState().isAgenticMode ? 30 : 3);
           if (isMaxDepth) {
             apiMessages.push({
               role: 'system',
-              content: 'You have reached the maximum tool call depth. DO NOT call any more tools. Write your final answer now using the information already gathered.',
+              content: 'You have reached the maximum tool call depth for this mode. DO NOT call any more tools. Write your final answer now using the information already gathered.',
             });
           }
 

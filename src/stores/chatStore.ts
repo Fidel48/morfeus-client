@@ -4,6 +4,12 @@ import { LazyStore } from '@tauri-apps/plugin-store';
 import { Conversation, Message, ChatStatus, ToolCall, ToolCallDelta } from '@/types';
 import { generateId } from '@/lib/utils';
 
+export interface PendingToolApproval {
+  toolName: string;
+  args: any;
+  resolve: (approved: boolean) => void;
+}
+
 // Initialize filesystem store to bypass the 5MB localStorage limit
 const tauriStore = new LazyStore('chat-storage.json');
 
@@ -43,6 +49,8 @@ interface ChatStore {
   abortController: AbortController | null;
   rightPanelOpen: boolean;
   activeMcpServers: string[];
+  isAgenticMode: boolean;
+  pendingApproval: PendingToolApproval | null;
 
   // Actions
   setConversations: (conversations: Conversation[]) => void;
@@ -63,6 +71,8 @@ interface ChatStore {
   newConversation: () => Conversation;
   toggleRightPanel: () => void;
   addMcpServer: (id: string) => void;
+  setIsAgenticMode: (isAgentic: boolean) => void;
+  setPendingApproval: (approval: PendingToolApproval | null) => void;
 }
 
 export const useChatStore = create<ChatStore>()(
@@ -78,6 +88,8 @@ export const useChatStore = create<ChatStore>()(
       abortController: null,
       rightPanelOpen: false,
       activeMcpServers: [],
+      isAgenticMode: false,
+      pendingApproval: null,
 
       setConversations: (conversations) => set({ conversations }),
       
@@ -210,16 +222,25 @@ export const useChatStore = create<ChatStore>()(
       },
 
       toggleRightPanel: () => set((state) => ({ rightPanelOpen: !state.rightPanelOpen })),
-      addMcpServer: (id) => set((state) => ({ 
-        activeMcpServers: state.activeMcpServers.includes(id) ? state.activeMcpServers : [...state.activeMcpServers, id] 
-      })),
+      addMcpServer: (id) =>
+        set((state) => ({
+          activeMcpServers: [...new Set([...state.activeMcpServers, id])],
+        })),
+
+      setIsAgenticMode: (isAgenticMode) => set({ isAgenticMode }),
+      setPendingApproval: (pendingApproval) => set({ pendingApproval }),
     }),
     {
       name: 'morfeus-chat-storage',
       storage: createJSONStorage(() => tauriStorage),
       partialize: (state) => ({
         conversations: state.conversations,
-        messages: state.messages,
+        messages: state.messages.map(m => {
+          if (m.role === 'tool' && m.content && m.content.startsWith('![Screenshot](data:image/png;base64,')) {
+            return { ...m, content: '![Screenshot](image_removed_from_storage)' };
+          }
+          return m;
+        }),
         activeConversationId: state.activeConversationId,
         rightPanelOpen: state.rightPanelOpen,
       }),

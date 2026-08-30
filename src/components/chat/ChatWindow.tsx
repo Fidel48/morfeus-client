@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback, KeyboardEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Send, Square, PanelRight, Loader2, Wrench, Paperclip, X, FileText, Image as ImageIcon } from 'lucide-react';
+import { Send, Square, PanelRight, Loader2, Wrench, Paperclip, X, FileText, Image as ImageIcon, Sparkles, MessageSquare, AlertTriangle, Check } from 'lucide-react';
 import { MessageBubble, StreamingMessage } from './MessageBubble';
 import { VoiceButton } from '@/components/voice/VoiceButton';
 import { useChat } from '@/hooks/useChat';
@@ -49,7 +49,7 @@ const StatusBadge: React.FC<StatusBadgeProps> = ({ status }) => {
 
 export const ChatWindow: React.FC = () => {
   const { messages, isStreaming, streamingContent, chatStatus, sendMessage, stopStreaming } = useChat();
-  const { rightPanelOpen, toggleRightPanel } = useChatStore();
+  const { rightPanelOpen, toggleRightPanel, isAgenticMode, setIsAgenticMode, pendingApproval } = useChatStore();
   const { settings } = useSettingsStore();
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -71,6 +71,24 @@ export const ChatWindow: React.FC = () => {
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
     }
   }, [input]);
+
+  // Tab/Enter to Act, Escape to Deny
+  useEffect(() => {
+    if (!pendingApproval) return;
+
+    const handleKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Tab' || e.key === 'Enter') {
+        e.preventDefault();
+        pendingApproval.resolve(true);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        pendingApproval.resolve(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [pendingApproval]);
 
   const handleSend = useCallback(async () => {
     const userText = input.trim();
@@ -398,6 +416,35 @@ export const ChatWindow: React.FC = () => {
             {chatStatus !== 'idle' && <StatusBadge status={chatStatus} />}
           </AnimatePresence>
         </div>
+
+        {/* Mode Toggle (Center) */}
+        <div className="absolute left-1/2 -translate-x-1/2 flex items-center bg-zinc-900/80 border border-white/10 rounded-full p-1 backdrop-blur-sm shadow-sm">
+          <button
+            onClick={() => setIsAgenticMode(false)}
+            className={cn(
+              'flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-200',
+              !isAgenticMode
+                ? 'bg-zinc-800 text-white shadow-sm'
+                : 'text-zinc-500 hover:text-zinc-300'
+            )}
+          >
+            <MessageSquare size={14} />
+            <span>Assistant</span>
+          </button>
+          <button
+            onClick={() => setIsAgenticMode(true)}
+            className={cn(
+              'flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-200',
+              isAgenticMode
+                ? 'bg-indigo-600/20 text-indigo-400 shadow-sm border border-indigo-500/30'
+                : 'text-zinc-500 hover:text-zinc-300'
+            )}
+          >
+            <Sparkles size={14} className={cn(isAgenticMode && 'animate-pulse')} />
+            <span>Agentic</span>
+          </button>
+        </div>
+
         <button
           onClick={toggleRightPanel}
           className={cn(
@@ -462,7 +509,12 @@ export const ChatWindow: React.FC = () => {
             </div>
           )}
 
-          <div className="relative flex items-end gap-2 bg-zinc-900/80 border border-white/10 rounded-2xl p-2 shadow-lg shadow-black/20 backdrop-blur-sm focus-within:border-violet-500/50 transition-colors">
+          <div className={cn(
+            "relative flex items-end gap-2 bg-zinc-900/80 border rounded-2xl p-2 shadow-lg shadow-black/20 backdrop-blur-sm transition-all duration-300",
+            isAgenticMode 
+              ? "border-indigo-500/30 focus-within:border-indigo-500/60 focus-within:shadow-[0_0_15px_rgba(99,102,241,0.15)]" 
+              : "border-white/10 focus-within:border-violet-500/50"
+          )}>
             
             {/* Image Button (always enabled for local flexibility) */}
             <motion.button
@@ -501,7 +553,7 @@ export const ChatWindow: React.FC = () => {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder="Message Morfeus… (Enter to send, Shift+Enter for newline)"
+              placeholder={isAgenticMode ? "Define an autonomous goal for the harness..." : "Message Morfeus… (Enter to send, Shift+Enter for newline)"}
               rows={1}
               className="flex-1 bg-transparent text-sm text-zinc-100 placeholder-zinc-600 resize-none outline-none py-2 px-1 max-h-48 leading-relaxed"
               disabled={isStreaming}
@@ -528,14 +580,16 @@ export const ChatWindow: React.FC = () => {
                 onClick={handleSend}
                 disabled={!input.trim()}
                 className={cn(
-                  'self-end mb-0.5 p-2.5 rounded-xl transition-all duration-150',
-                  input.trim()
-                    ? 'bg-violet-600 text-white hover:bg-violet-500 shadow-[0_0_16px_rgba(124,58,237,0.4)]'
-                    : 'text-zinc-600 cursor-not-allowed'
+                  'self-end mb-0.5 p-2.5 rounded-xl transition-all duration-300',
+                  !input.trim()
+                    ? 'text-zinc-600 cursor-not-allowed'
+                    : isAgenticMode
+                      ? 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-[0_0_16px_rgba(99,102,241,0.4)]'
+                      : 'bg-violet-600 text-white hover:bg-violet-500 shadow-[0_0_16px_rgba(124,58,237,0.4)]'
                 )}
                 title="Send message (Enter)"
               >
-                <Send size={16} />
+                {isAgenticMode ? <Sparkles size={16} /> : <Send size={16} />}
               </motion.button>
             )}
           </div>
@@ -544,6 +598,55 @@ export const ChatWindow: React.FC = () => {
           </p>
         </div>
       </div>
+
+      {/* Tool Approval Modal */}
+      <AnimatePresence>
+        {pendingApproval && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 max-w-md w-full shadow-2xl flex flex-col gap-4"
+            >
+              <div className="flex items-center gap-3 text-amber-400">
+                <AlertTriangle size={24} />
+                <h3 className="text-lg font-medium text-white">Action Requires Approval</h3>
+              </div>
+              
+              <p className="text-sm text-zinc-300">
+                Morfeus is attempting to execute a potentially destructive action. Do you approve?
+              </p>
+
+              <div className="bg-black/50 border border-white/5 rounded-lg p-3 overflow-x-auto text-xs font-mono text-zinc-300">
+                <div className="text-violet-400 mb-1">{pendingApproval.toolName}</div>
+                <pre>{JSON.stringify(pendingApproval.args, null, 2)}</pre>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 mt-2">
+                <button
+                  onClick={() => pendingApproval.resolve(false)}
+                  className="px-4 py-2 rounded-lg text-sm font-medium text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
+                >
+                  Deny
+                </button>
+                <button
+                  onClick={() => pendingApproval.resolve(true)}
+                  className="px-4 py-2 rounded-lg text-sm font-medium bg-amber-500/20 text-amber-400 border border-amber-500/30 hover:bg-amber-500/30 transition-colors flex items-center gap-2"
+                >
+                  <Check size={16} />
+                  Approve Execution
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

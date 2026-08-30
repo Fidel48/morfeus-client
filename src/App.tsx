@@ -4,6 +4,7 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { ChatWindow } from '@/components/chat/ChatWindow';
 import { RightPanel } from '@/components/layout/RightPanel';
 import { SettingsModal } from '@/components/settings/SettingsModal';
+import { FloatingWidget } from '@/components/chat/FloatingWidget';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { tauriApi } from '@/lib/tauri';
@@ -99,6 +100,9 @@ const AppContent: React.FC = () => {
 
       {/* Settings Modal */}
       <SettingsModal />
+
+      {/* Floating Agentic UI */}
+      <FloatingWidget />
     </div>
   );
 };

@@ -101,3 +101,33 @@ async fn run_python_file_inner(python: &str, path: &str) -> Result<RunResult, St
         success,
     })
 }
+
+/// Execute a raw terminal command.
+/// Uses `sh -c` on Unix and `cmd.exe /c` on Windows.
+#[tauri::command]
+pub async fn run_terminal_command(command: String) -> Result<RunResult, String> {
+    #[cfg(target_os = "windows")]
+    let mut cmd = Command::new("cmd");
+    #[cfg(target_os = "windows")]
+    cmd.arg("/C").arg(&command);
+
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = Command::new("sh");
+    #[cfg(not(target_os = "windows"))]
+    cmd.arg("-c").arg(&command);
+
+    let output = cmd.output()
+        .map_err(|e| format!("Failed to execute command: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+    let success = output.status.success();
+
+    Ok(RunResult {
+        stdout,
+        stderr,
+        exit_code,
+        success,
+    })
+}
