@@ -84,17 +84,8 @@ morfeus/
 ### Recent Completed Milestones
 - **v0.1.25**: Support for pasting images directly from the OS clipboard into chat.
 - **v0.1.26**: Visual image attachment thumbnails in chat input and rendering inside user message bubbles.
-- **Commit `76530ca`**: Agentic UI overlay and vision/control using terminal fallback to prevent macOS TCC deadlock.
-
-### Active Work-in-Progress (Uncommitted Changes)
-1. **Local Kokoro TTS Integration**:
-   - Local FastAPI server (`src-tauri/kokoro_server.py`) auto-spawned by Tauri async runtime on `http://127.0.0.1:8880`.
-   - Native audio playback via macOS `afplay` in `src-tauri/src/commands/voice.rs`.
-   - High-fidelity voice selection settings UI with live previews for 22 voices (`af_heart` default).
-2. **Dual Chat Modes (Fast Chat vs. Agent Coder)**:
-   - Replaced Away Mode with a modern segmented header pill: `[⚡ Fast Chat | 🤖 Agent Coder]`.
-   - **⚡ Fast Chat Mode**: Minimal tool overhead (only 6 lightweight read-only tools: `web_search`, `read_webpage`, `get_special_dirs`, `search_files`, `list_directory`, `read_local_file`) and lean system prompt for lightning-fast response times matching Ollama CLI speeds.
-   - **🤖 Agent Coder Mode**: Full IDE developer harness with access to all built-in tools (Python runners, terminal commands, file write/delete, screen vision, keyboard/mouse automation) and dynamic MCP servers.
+- **v0.1.27**: Dual Fast Chat / Agent Coder modes, local Kokoro neural TTS, hands-free Continuous voice with voice toggle relocation, MCP server manager, and multiplatform CI matrix (Windows, macOS, Ubuntu Linux).
+- **v0.1.28**: In-place floating model selector popover on bottom toolbar with instant switching, search filter, and unrestricted model selection across Fast Chat and Agent Coder.
 
 ---
 
