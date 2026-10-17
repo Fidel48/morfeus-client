@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback, KeyboardEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Send, Square, PanelRight, Loader2, Wrench, Paperclip, X, FileText, Image as ImageIcon, Sparkles, AlertTriangle, Check, Zap, Code2, Volume2, VolumeX, Atom } from 'lucide-react';
+import { Send, Square, PanelRight, Loader2, Wrench, Paperclip, X, FileText, Image as ImageIcon, Sparkles, AlertTriangle, Check, Zap, Code2, Volume2, VolumeX, Atom, ChevronUp, RefreshCw, Settings, Search } from 'lucide-react';
 import { MessageBubble, StreamingMessage } from './MessageBubble';
 import { VoiceButton } from '@/components/voice/VoiceButton';
 import { useChat } from '@/hooks/useChat';
@@ -50,13 +50,23 @@ const StatusBadge: React.FC<StatusBadgeProps> = ({ status }) => {
 export const ChatWindow: React.FC = () => {
   const { messages, isStreaming, streamingContent, streamingReasoning, chatStatus, sendMessage, stopStreaming } = useChat();
   const { rightPanelOpen, toggleRightPanel, chatMode, setChatMode, pendingApproval } = useChatStore();
-  const { settings, updateSettings, openSettings } = useSettingsStore();
+  const {
+    settings,
+    updateSettings,
+    openSettings,
+    availableModels,
+    isLoadingModels,
+    fetchAvailableModels,
+  } = useSettingsStore();
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isParsing, setIsParsing] = useState(false);
+  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
+  const [modelSearchQuery, setModelSearchQuery] = useState('');
+  const modelMenuRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const handleSendRef = useRef<(overrideText?: string) => Promise<void> | void>(() => {});
+  const handleSendRef = useRef<(overrideText?: string | React.MouseEvent) => Promise<void> | void>(() => {});
 
   const isDeepSeekR1 = useCallback((id?: string) => {
     if (!id) return false;
@@ -65,17 +75,58 @@ export const ChatWindow: React.FC = () => {
   }, []);
 
   const isFastMode = chatMode === 'fast';
-  let activeModelName = isFastMode
+  const activeModelName = isFastMode
     ? (settings.fast_chat_model_id || settings.model_id)
     : (settings.agent_coder_model_id || settings.model_id);
 
-  if (isFastMode && isDeepSeekR1(activeModelName)) {
-    activeModelName = (settings.fast_chat_model_id && !isDeepSeekR1(settings.fast_chat_model_id))
-      ? settings.fast_chat_model_id
-      : settings.model_id;
-  }
-
   const activeModelShortName = activeModelName.split('/').pop() || activeModelName || 'Select Model';
+
+  const filteredModels = availableModels.filter(m =>
+    m.id.toLowerCase().includes(modelSearchQuery.toLowerCase().trim())
+  );
+
+  // Pre-fetch models on mount if empty
+  useEffect(() => {
+    if (availableModels.length === 0 && settings.base_url) {
+      fetchAvailableModels().catch(() => {});
+    }
+  }, [availableModels.length, settings.base_url, fetchAvailableModels]);
+
+  // Close model menu when clicking outside
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
+        setIsModelMenuOpen(false);
+      }
+    };
+    if (isModelMenuOpen) {
+      document.addEventListener('mousedown', handleOutsideClick);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+    };
+  }, [isModelMenuOpen]);
+
+  const handleToggleModelMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsModelMenuOpen((prev) => {
+      const next = !prev;
+      if (next && availableModels.length === 0) {
+        fetchAvailableModels().catch(() => {});
+      }
+      return next;
+    });
+  };
+
+  const handleSelectModel = (modelId: string) => {
+    if (isFastMode) {
+      updateSettings({ fast_chat_model_id: modelId, model_id: modelId });
+    } else {
+      updateSettings({ agent_coder_model_id: modelId, model_id: modelId });
+    }
+    setIsModelMenuOpen(false);
+  };
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -636,16 +687,148 @@ export const ChatWindow: React.FC = () => {
                   <span>{settings.tts_enabled ? 'Voice On' : 'Voice Off'}</span>
                 </motion.button>
 
-                {/* Active Model Indicator Pill */}
-                <button
-                  type="button"
-                  onClick={openSettings}
-                  className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/5 hover:bg-white/10 border border-white/8 text-[11px] text-zinc-400 hover:text-zinc-200 font-mono transition-colors max-w-[200px]"
-                  title={`Click to configure models in Settings. Active: ${activeModelName}`}
-                >
-                  <span className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0', isFastMode ? 'bg-emerald-400' : 'bg-indigo-400')} />
-                  <span className="truncate">{activeModelShortName}</span>
-                </button>
+                {/* Active Model Indicator Pill with in-place Dropdown */}
+                <div className="relative" ref={modelMenuRef}>
+                  <motion.button
+                    type="button"
+                    whileTap={{ scale: 0.94 }}
+                    onClick={handleToggleModelMenu}
+                    className={cn(
+                      'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-mono transition-all max-w-[200px] select-none',
+                      isModelMenuOpen
+                        ? 'bg-white/15 text-white border-white/20 shadow-md'
+                        : 'bg-white/5 hover:bg-white/10 border-white/8 text-zinc-400 hover:text-zinc-200'
+                    )}
+                    title={`Click to switch model for ${isFastMode ? 'Fast Chat' : 'Agent Coder'}. Active: ${activeModelName}`}
+                  >
+                    <span className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0', isFastMode ? 'bg-emerald-400' : 'bg-indigo-400')} />
+                    <span className="truncate">{activeModelShortName}</span>
+                    <ChevronUp size={12} className={cn('transition-transform duration-200 text-zinc-500', isModelMenuOpen ? 'rotate-180' : '')} />
+                  </motion.button>
+
+                  {/* Floating Model Selection Popover */}
+                  <AnimatePresence>
+                    {isModelMenuOpen && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 8, scale: 0.96 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 8, scale: 0.96 }}
+                        transition={{ duration: 0.15 }}
+                        className="absolute bottom-full mb-2 left-0 w-72 sm:w-80 bg-zinc-950/95 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl p-2.5 z-50 overflow-hidden flex flex-col gap-2"
+                      >
+                        {/* Header */}
+                        <div className="flex items-center justify-between px-2 pt-1 pb-1 border-b border-white/5">
+                          <div className="flex items-center gap-1.5">
+                            {isFastMode ? (
+                              <Zap size={14} className="text-emerald-400" />
+                            ) : (
+                              <Code2 size={14} className="text-indigo-400" />
+                            )}
+                            <span className="text-xs font-semibold text-zinc-200">
+                              {isFastMode ? 'Fast Chat Model' : 'Agent Coder Model'}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => fetchAvailableModels()}
+                              className="p-1 rounded-md text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
+                              title="Refresh models from server"
+                            >
+                              <RefreshCw size={12} className={cn(isLoadingModels && 'animate-spin text-violet-400')} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIsModelMenuOpen(false);
+                                openSettings();
+                              }}
+                              className="p-1 rounded-md text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
+                              title="Open full Settings"
+                            >
+                              <Settings size={12} />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Search bar if > 4 models */}
+                        {availableModels.length > 4 && (
+                          <div className="relative px-1">
+                            <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                            <input
+                              type="text"
+                              value={modelSearchQuery}
+                              onChange={(e) => setModelSearchQuery(e.target.value)}
+                              placeholder="Search models..."
+                              className="w-full pl-7 pr-2 py-1 text-xs bg-white/5 border border-white/8 rounded-lg text-zinc-200 placeholder-zinc-500 outline-none focus:border-violet-500/50"
+                              autoFocus
+                            />
+                          </div>
+                        )}
+
+                        {/* Model list */}
+                        <div className="max-h-60 overflow-y-auto space-y-1 pr-0.5 custom-scrollbar">
+                          {isLoadingModels && availableModels.length === 0 ? (
+                            <div className="py-6 flex flex-col items-center justify-center text-xs text-zinc-500 gap-1.5">
+                              <Loader2 size={16} className="animate-spin text-violet-400" />
+                              <span>Fetching models from {settings.base_url.split('/')[2] || 'server'}…</span>
+                            </div>
+                          ) : filteredModels.length === 0 ? (
+                            <div className="py-6 px-3 text-center text-xs text-zinc-500 flex flex-col items-center gap-2">
+                              <span>{availableModels.length === 0 ? 'No models loaded on server.' : 'No matching models.'}</span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsModelMenuOpen(false);
+                                  openSettings();
+                                }}
+                                className="px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 text-[11px] text-zinc-300 transition-colors border border-white/10"
+                              >
+                                Configure Server in Settings
+                              </button>
+                            </div>
+                          ) : (
+                            filteredModels.map((m) => {
+                              const isSelected = m.id === activeModelName;
+                              const isR1 = isDeepSeekR1(m.id);
+                              return (
+                                <button
+                                  key={m.id}
+                                  type="button"
+                                  onClick={() => handleSelectModel(m.id)}
+                                  className={cn(
+                                    'w-full flex items-center justify-between px-2.5 py-2 rounded-xl text-left text-xs transition-all group select-none',
+                                    isSelected
+                                      ? isFastMode
+                                        ? 'bg-emerald-500/15 text-emerald-200 border border-emerald-500/30 shadow-sm'
+                                        : 'bg-indigo-500/15 text-indigo-200 border border-indigo-500/30 shadow-sm'
+                                      : 'text-zinc-300 hover:text-white hover:bg-white/8 border border-transparent'
+                                  )}
+                                >
+                                  <div className="flex items-center gap-2 min-w-0 pr-2">
+                                    <span className={cn(
+                                      'w-1.5 h-1.5 rounded-full flex-shrink-0',
+                                      isSelected ? (isFastMode ? 'bg-emerald-400' : 'bg-indigo-400') : 'bg-zinc-600'
+                                    )} />
+                                    <span className="font-mono truncate">{m.id}</span>
+                                    {isR1 && (
+                                      <span className="px-1.5 py-0.2 rounded text-[9px] bg-violet-500/20 text-violet-300 font-sans border border-violet-500/30 flex-shrink-0">
+                                        Reasoning
+                                      </span>
+                                    )}
+                                  </div>
+                                  {isSelected && (
+                                    <Check size={13} className={cn('flex-shrink-0', isFastMode ? 'text-emerald-400' : 'text-indigo-400')} />
+                                  )}
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
               </div>
 
               {/* Right: Send / Stop button */}

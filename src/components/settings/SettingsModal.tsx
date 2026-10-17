@@ -338,9 +338,7 @@ const ConnectionTab: React.FC<{
                   value={settings.fast_chat_model_id || settings.model_id}
                   onChange={(e) => {
                     const val = e.target.value;
-                    if (!isDeepSeekR1Model(val)) {
-                      updateSettings({ fast_chat_model_id: val, model_id: val });
-                    }
+                    updateSettings({ fast_chat_model_id: val, model_id: val });
                   }}
                   className="w-full px-3 py-2 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-300 outline-none focus:border-violet-500/50 appearance-none cursor-pointer"
                 >
@@ -351,10 +349,9 @@ const ConnectionTab: React.FC<{
                       <option
                         key={m.id}
                         value={m.id}
-                        disabled={isR1}
-                        className={cn(isR1 ? 'text-zinc-600 bg-zinc-950 italic' : 'bg-zinc-900 text-zinc-200')}
+                        className="bg-zinc-900 text-zinc-200"
                       >
-                        {isR1 ? `⛔ ${m.id} (Agent Coder Only)` : `⚡ ${m.id}`}
+                        {isR1 ? `🧠 ${m.id} (Reasoning)` : `⚡ ${m.id}`}
                       </option>
                     );
                   })}
@@ -366,9 +363,7 @@ const ConnectionTab: React.FC<{
                 type="text"
                 value={settings.fast_chat_model_id || settings.model_id}
                 onChange={(e) => {
-                  if (!isDeepSeekR1Model(e.target.value)) {
-                    updateSettings({ fast_chat_model_id: e.target.value, model_id: e.target.value });
-                  }
+                  updateSettings({ fast_chat_model_id: e.target.value, model_id: e.target.value });
                 }}
                 placeholder="e.g. llama3, mistral, gemma, etc."
               />

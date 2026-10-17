@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { AppSettings } from '@/types';
+import { AppSettings, Model } from '@/types';
 import { tauriApi } from '@/lib/tauri';
+import { fetchModels } from '@/lib/api';
 
 const DEFAULT_SETTINGS: AppSettings = {
   base_url: 'http://localhost:1234/v1',
@@ -30,11 +31,15 @@ interface SettingsStore {
   settings: AppSettings;
   isLoaded: boolean;
   isSettingsOpen: boolean;
+  availableModels: Model[];
+  isLoadingModels: boolean;
   updateSettings: (partial: Partial<AppSettings>) => void;
   loadFromBackend: () => Promise<void>;
   saveToBackend: () => Promise<void>;
   openSettings: () => void;
   closeSettings: () => void;
+  setAvailableModels: (models: Model[]) => void;
+  fetchAvailableModels: () => Promise<Model[]>;
 }
 
 export const useSettingsStore = create<SettingsStore>()(
@@ -43,6 +48,8 @@ export const useSettingsStore = create<SettingsStore>()(
       settings: DEFAULT_SETTINGS,
       isLoaded: false,
       isSettingsOpen: false,
+      availableModels: [],
+      isLoadingModels: false,
 
       updateSettings: (partial) => {
         set((state) => ({
@@ -50,12 +57,32 @@ export const useSettingsStore = create<SettingsStore>()(
         }));
       },
 
+      setAvailableModels: (models) => set({ availableModels: models }),
+
+      fetchAvailableModels: async () => {
+        const { settings } = get();
+        if (!settings.base_url) return [];
+        set({ isLoadingModels: true });
+        try {
+          const models = await fetchModels(settings.base_url, settings.api_key);
+          set({ availableModels: models, isLoadingModels: false });
+          return models;
+        } catch (e) {
+          console.warn('[SettingsStore] Failed to fetch models:', e);
+          set({ isLoadingModels: false });
+          return [];
+        }
+      },
+
       loadFromBackend: async () => {
         try {
           const settings = await tauriApi.getSettings();
           set({ settings, isLoaded: true });
+          // Pre-fetch models on settings load
+          get().fetchAvailableModels().catch(() => {});
         } catch {
           set({ isLoaded: true });
+          get().fetchAvailableModels().catch(() => {});
         }
       },
 
@@ -63,6 +90,7 @@ export const useSettingsStore = create<SettingsStore>()(
         const { settings } = get();
         try {
           await tauriApi.saveSettings(settings);
+          get().fetchAvailableModels().catch(() => {});
         } catch (e) {
           console.error('Failed to save settings:', e);
         }

@@ -125,19 +125,10 @@ export function useChat() {
           return s.includes('deepseek-r1') || s.includes('deepseek_r1') || (s.includes('deepseek') && s.includes('r1'));
         };
 
-        // Model resolution & DeepSeek-R1 rule: DeepSeek-R1 will ONLY be used in Agent Coder, never in Fast Chat (normal chat)
-        let resolvedModelId = isFastMode
+        // Model resolution: use configured model for the active mode
+        const resolvedModelId = isFastMode
           ? (currentSettings.fast_chat_model_id || currentSettings.model_id)
           : (currentSettings.agent_coder_model_id || currentSettings.model_id);
-
-        if (isFastMode && isDeepSeekR1(resolvedModelId)) {
-          // If DeepSeek-R1 is selected/configured, fallback to non-DeepSeek model for Fast Chat if available
-          if (currentSettings.fast_chat_model_id && !isDeepSeekR1(currentSettings.fast_chat_model_id)) {
-            resolvedModelId = currentSettings.fast_chat_model_id;
-          } else if (currentSettings.model_id && !isDeepSeekR1(currentSettings.model_id)) {
-            resolvedModelId = currentSettings.model_id;
-          }
-        }
 
         const effectiveSettings: AppSettings = {
           ...currentSettings,
