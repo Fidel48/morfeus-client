@@ -1,4 +1,6 @@
-# Morfeus Client — Permanent Workspace Rules
+# Morfeus Client — Permanent Workspace Rules & Agent Guide
+
+> **Note**: For the complete project architectural map, directory structure, active work-in-progress, and the **Developer Harness Roadmap & Live Execution Tracker**, see the root [AGENTS.md](file:///Users/admin/Documents/projects/morfeus/AGENTS.md) and artifact [`morfeus_developer_harness_plan.md`](file:///Users/admin/.gemini/antigravity-ide/brain/e672562e-bf6d-4af3-aaef-117a2837b809/morfeus_developer_harness_plan.md).
 
 ## Web Search & Real-Time Query Directives (PERMANENT RULE)
 1. **Single Web Search Badge**: Always render ONLY ONE single `web_search` badge per user turn in the chat UI. Duplicate intermediate `web_search` badges in the same turn must be suppressed from the chat timeline.
@@ -7,5 +9,5 @@
 4. **No Code Reversions**: DO NOT remove, overwrite, or simplify the multi-stage DuckDuckGo search engine (`html.duckduckgo.com` -> `lite.duckduckgo.com` -> `api.duckduckgo.com`) or the tool depth limit (max 5 turns) unless explicitly instructed by the user.
 5. **Windows 11 Push-to-Talk Preservation**: DO NOT break or alter Push-to-Talk functionality on Windows 11. Maintain `latestText` preservation across interim and final speech events, and construct `latestText` directly from `event.results[0..N]` to prevent duplicate speech output (e.g. "hi. hi").
 6. **Git Push Rule**: NEVER execute `git push` or push tags to GitHub without explicit, separate user authorization for that specific push.
-7. **macOS Native Voice Architecture**: On macOS, NEVER use browser `webkitSpeechRecognition` or JS `getUserMedia()` calls inside WKWebView — doing so causes a hard TCC process SIGABRT crash. ALWAYS capture audio natively via Rust CoreAudio (`cpal`), invoke Objective-C `[AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio]` (`mac_audio.m`), and transcribe using Apple's built-in `SFSpeechRecognizer` (`mac_speech.swift`). On Windows 11, preserve `webkitSpeechRecognition`.
+7. **macOS Native Voice Architecture**: On macOS, NEVER use browser `webkitSpeechRecognition` or JS `getUserMedia()` inside WKWebView — doing so causes a hard TCC process `SIGABRT` crash. ALWAYS capture audio natively via Rust CoreAudio (`cpal`), invoke Objective-C `[AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio]` (`mac_audio.m`), and transcribe using Apple's built-in `SFSpeechRecognizer` (`mac_speech.swift`). On Windows 11, preserve `webkitSpeechRecognition`.
 8. **Windows 11 Compatibility**: The application is highly stable on Windows 11. DO NOT automatically rewrite, simplify, or modify any code that affects the Windows 11 side (such as `.cmd` resolutions, SAPI voices, or Gatekeeper permissions) unless explicitly instructed by the user. Treat Windows 11 stability as a top priority.

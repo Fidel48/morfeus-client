@@ -317,8 +317,99 @@ export const WEB_TOOLS: ToolDefinition[] = [
         required: ['key'],
       },
     },
+  },
+  // ── MCP (Model Context Protocol) Extensibility Tools ──
+  {
+    type: 'function',
+    function: {
+      name: 'list_mcp_servers',
+      description: 'List all configured Model Context Protocol (MCP) servers in Morfeus, including their live connection status, command details, and discovered tools.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'connect_mcp_server',
+      description: 'Register and connect to a Model Context Protocol (MCP) server. Once connected, its tools become dynamically available in Morfeus. Supports stdio (command + args) or SSE (url). Use this when the user asks to connect or integrate with an MCP server (e.g. FreeCAD MCP, GitHub, SQLite, Postgres, or custom local tools).',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: 'Unique slug/identifier for the server (e.g. "freecad", "github", "sqlite").',
+          },
+          name: {
+            type: 'string',
+            description: 'Human-friendly display name (e.g. "FreeCAD MCP", "GitHub Assistant").',
+          },
+          transport: {
+            type: 'string',
+            enum: ['stdio', 'sse'],
+            description: 'Connection transport: "stdio" for local process or "sse" for remote URL. Defaults to "stdio".',
+          },
+          command: {
+            type: 'string',
+            description: 'Command or executable for stdio transport (e.g. "npx", "python", "uvx", "docker"). Required if transport is stdio.',
+          },
+          args: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Command line arguments for the server (e.g. ["-y", "@modelcontextprotocol/server-filesystem", "/Users/admin/Documents"]).',
+          },
+          env: {
+            type: 'object',
+            additionalProperties: { type: 'string' },
+            description: 'Optional environment variables needed by the server (e.g. {"GITHUB_PERSONAL_ACCESS_TOKEN": "..."}).',
+          },
+          url: {
+            type: 'string',
+            description: 'URL for SSE transport (e.g. "http://localhost:8000/sse"). Required if transport is sse.',
+          },
+        },
+        required: ['id', 'name', 'transport'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remove_mcp_server',
+      description: 'Disconnect and remove a configured MCP server by its unique ID.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: 'The ID of the MCP server to disconnect and remove.',
+          },
+        },
+        required: ['id'],
+      },
+    },
   }
 ];
+
+/**
+ * Fast Chat Toolset:
+ * Minimal, lightweight read-only tools designed for lightning-fast response times
+ * without heavy tool grammar prefill overhead. Allows web search and looking for/summarizing PC files.
+ */
+export const FAST_CHAT_TOOL_NAMES = new Set([
+  'web_search',
+  'read_webpage',
+  'get_special_dirs',
+  'search_files',
+  'list_directory',
+  'read_local_file',
+]);
+
+export const FAST_CHAT_TOOLS: ToolDefinition[] = WEB_TOOLS.filter((t) =>
+  FAST_CHAT_TOOL_NAMES.has(t.function.name)
+);
 
 // ─── Model list ──────────────────────────────────────────────────────────────
 
@@ -371,9 +462,11 @@ export async function* streamChat(
 ): AsyncGenerator<StreamChunk, void, unknown> {
   const streamId = genStreamId();
 
-  const allTools = disableTools ? [] : (extraTools ? [...WEB_TOOLS, ...extraTools] : WEB_TOOLS);
+  const allTools = disableTools ? [] : (extraTools !== undefined ? extraTools : WEB_TOOLS);
 
-  const body: ChatRequest & { num_ctx?: number; repetition_penalty?: number } = {
+  const isThink = settings.think_enabled ?? true;
+
+  const body: any = {
     model: settings.model_id,
     messages,
     temperature: settings.temperature,
@@ -382,6 +475,10 @@ export async function* streamChat(
     frequency_penalty: settings.frequency_penalty,
     repetition_penalty: 1.1,
     stream: true,
+    think: isThink,
+    reasoning_effort: isThink ? 'medium' : 'low',
+    include_reasoning: isThink,
+    chat_template_kwargs: { think: isThink },
     ...(allTools.length > 0 ? { tools: allTools } : {}), // omit tools key entirely when empty — some servers reject tools: []
     num_ctx: settings.context_length,
   };

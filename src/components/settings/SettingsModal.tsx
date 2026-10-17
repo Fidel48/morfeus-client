@@ -3,15 +3,24 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   X, Server, Mic, Volume2, Check, AlertCircle,
   Loader2, RefreshCw, ChevronDown, Zap, Bug, FolderOpen, Terminal, Copy, FileText,
+  Plug, Plus, Trash2, PlugZap, ChevronRight, WifiOff, Play, Square, Atom,
 } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { useMcpStore } from '@/stores/mcpStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { testConnection, fetchModels } from '@/lib/api';
 import { tauriApi } from '@/lib/tauri';
 import { cn } from '@/lib/utils';
-import { Model, AppSettings } from '@/types';
+import { KOKORO_VOICES, DEFAULT_KOKORO_VOICE, kokoroSpeak, kokoroPreview, kokoroStop, getEngineState } from '@/lib/kokoroTts';
+import { Model, AppSettings, McpServerConfig } from '@/types';
 
-type SettingsTab = 'connection' | 'parameters' | 'voice' | 'developer';
+type SettingsTab = 'connection' | 'parameters' | 'voice' | 'developer' | 'mcp';
+
+const isDeepSeekR1Model = (id?: string) => {
+  if (!id) return false;
+  const s = id.toLowerCase();
+  return s.includes('deepseek-r1') || s.includes('deepseek_r1') || (s.includes('deepseek') && s.includes('r1'));
+};
 
 export const SettingsModal: React.FC = () => {
   const { settings, isSettingsOpen, updateSettings, saveToBackend, closeSettings } = useSettingsStore();
@@ -60,9 +69,22 @@ export const SettingsModal: React.FC = () => {
       setModels(m);
       setTestMessage(`Connected — ${m.length} model${m.length !== 1 ? 's' : ''} available`);
 
-      // Auto-select first model if none is set
+      // Auto-select models for Fast Chat and Agent Coder
+      const firstNonR1 = m.find((item) => !isDeepSeekR1Model(item.id));
+      const firstR1 = m.find((item) => isDeepSeekR1Model(item.id));
+      const updates: Partial<AppSettings> = {};
+
       if (!settings.model_id && m.length > 0) {
-        updateSettings({ model_id: m[0].id });
+        updates.model_id = firstNonR1?.id || m[0].id;
+      }
+      if (!settings.fast_chat_model_id && firstNonR1) {
+        updates.fast_chat_model_id = firstNonR1.id;
+      }
+      if (!settings.agent_coder_model_id) {
+        updates.agent_coder_model_id = firstR1?.id || m[0].id;
+      }
+      if (Object.keys(updates).length > 0) {
+        updateSettings(updates);
       }
     } catch (e) {
       setTestStatus('error');
@@ -70,7 +92,7 @@ export const SettingsModal: React.FC = () => {
     } finally {
       setLoadingModels(false);
     }
-  }, [settings.base_url, settings.api_key, settings.model_id, updateSettings]);
+  }, [settings.base_url, settings.api_key, settings.model_id, settings.fast_chat_model_id, settings.agent_coder_model_id, updateSettings]);
 
   const handleSave = async () => {
     await saveToBackend();
@@ -112,11 +134,12 @@ export const SettingsModal: React.FC = () => {
               </div>
 
               {/* Tabs */}
-              <div className="flex gap-1 px-5 pt-3">
+              <div className="flex gap-1 px-5 pt-3 flex-wrap">
                 <TabBtn icon={<Server size={13} />} label="Connection" active={tab === 'connection'} onClick={() => setTab('connection')} />
                 <TabBtn icon={<Zap size={13} />} label="Parameters" active={tab === 'parameters'} onClick={() => setTab('parameters')} />
                 <TabBtn icon={<Mic size={13} />} label="Voice" active={tab === 'voice'} onClick={() => setTab('voice')} />
                 <TabBtn icon={<Bug size={13} />} label="Developer" active={tab === 'developer'} onClick={() => setTab('developer')} />
+                <TabBtn icon={<Plug size={13} />} label="MCP Servers" active={tab === 'mcp'} onClick={() => setTab('mcp')} />
               </div>
 
               {/* Content */}
@@ -152,6 +175,7 @@ export const SettingsModal: React.FC = () => {
                     onOpenLogsModal={() => setShowLogsModal(true)}
                   />
                 )}
+                {tab === 'mcp' && <McpTab />}
               </div>
 
               {/* Footer */}
@@ -293,53 +317,115 @@ const ConnectionTab: React.FC<{
         />
       </Field>
 
-      {/* Model selection */}
-      <Field label="Model">
-        <div className="space-y-2">
-          {/* Text input — always editable, works even without dropdown */}
-          <div className="relative">
-            <Input
-              type="text"
-              value={settings.model_id}
-              onChange={(e) => updateSettings({ model_id: e.target.value })}
-              placeholder={
-                models.length > 0
-                  ? 'Select below or type a model ID…'
-                  : 'Connect to server first, then select a model'
-              }
-            />
+      {/* ── Mode-Specific Model Configuration ── */}
+      <div className="pt-2 border-t border-white/8 space-y-4">
+        <div>
+          <h4 className="text-xs font-semibold text-zinc-200 mb-0.5">Model Configuration by Mode</h4>
+          <p className="text-[11px] text-zinc-500">
+            Set dedicated models for Fast Chat and Agent Coder. DeepSeek-R1 is strictly reserved for Agent Coder.
+          </p>
+        </div>
+
+        {/* ⚡ Fast Chat Model */}
+        <Field
+          label="⚡ Fast Chat Model (Normal Chat)"
+          hint="Model for daily conversations, web searches, and file summarization."
+        >
+          <div className="space-y-1.5">
+            {models.length > 0 ? (
+              <div className="relative">
+                <select
+                  value={settings.fast_chat_model_id || settings.model_id}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (!isDeepSeekR1Model(val)) {
+                      updateSettings({ fast_chat_model_id: val, model_id: val });
+                    }
+                  }}
+                  className="w-full px-3 py-2 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-300 outline-none focus:border-violet-500/50 appearance-none cursor-pointer"
+                >
+                  <option value="" className="bg-zinc-900">— select fast chat model —</option>
+                  {models.map((m) => {
+                    const isR1 = isDeepSeekR1Model(m.id);
+                    return (
+                      <option
+                        key={m.id}
+                        value={m.id}
+                        disabled={isR1}
+                        className={cn(isR1 ? 'text-zinc-600 bg-zinc-950 italic' : 'bg-zinc-900 text-zinc-200')}
+                      >
+                        {isR1 ? `⛔ ${m.id} (Agent Coder Only)` : `⚡ ${m.id}`}
+                      </option>
+                    );
+                  })}
+                </select>
+                <ChevronDown size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600 pointer-events-none" />
+              </div>
+            ) : (
+              <Input
+                type="text"
+                value={settings.fast_chat_model_id || settings.model_id}
+                onChange={(e) => {
+                  if (!isDeepSeekR1Model(e.target.value)) {
+                    updateSettings({ fast_chat_model_id: e.target.value, model_id: e.target.value });
+                  }
+                }}
+                placeholder="e.g. llama3, mistral, gemma, etc."
+              />
+            )}
           </div>
+        </Field>
 
-          {/* Dropdown populated from server */}
-          {models.length > 0 && (
-            <div className="relative">
-              <select
-                value={settings.model_id}
-                onChange={(e) => updateSettings({ model_id: e.target.value })}
-                className="w-full px-3 py-2 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-300 outline-none focus:border-violet-500/50 appearance-none cursor-pointer"
-              >
-                <option value="" className="bg-zinc-900">— pick from {models.length} loaded model{models.length !== 1 ? 's' : ''} —</option>
-                {models.map((m) => (
-                  <option key={m.id} value={m.id} className="bg-zinc-900 text-sm">{m.id}</option>
-                ))}
-              </select>
-              <ChevronDown size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600 pointer-events-none" />
-            </div>
-          )}
+        {/* 🤖 Agent Coder Model */}
+        <Field
+          label="🤖 Agent Coder Model (IDE Developer Mode)"
+          hint="Heavy-duty coding model for terminal execution, autonomous coding loops, and MCP tools."
+        >
+          <div className="space-y-1.5">
+            {models.length > 0 ? (
+              <div className="relative">
+                <select
+                  value={settings.agent_coder_model_id || settings.model_id}
+                  onChange={(e) => updateSettings({ agent_coder_model_id: e.target.value })}
+                  className="w-full px-3 py-2 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-300 outline-none focus:border-violet-500/50 appearance-none cursor-pointer"
+                >
+                  <option value="" className="bg-zinc-900">— select agent coder model —</option>
+                  {models.map((m) => {
+                    const isR1 = isDeepSeekR1Model(m.id);
+                    return (
+                      <option key={m.id} value={m.id} className="bg-zinc-900 text-zinc-200">
+                        {isR1 ? `🧠 ${m.id} (Reasoning Model)` : `💻 ${m.id}`}
+                      </option>
+                    );
+                  })}
+                </select>
+                <ChevronDown size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600 pointer-events-none" />
+              </div>
+            ) : (
+              <Input
+                type="text"
+                value={settings.agent_coder_model_id || settings.model_id}
+                onChange={(e) => updateSettings({ agent_coder_model_id: e.target.value })}
+                placeholder="e.g. deepseek-r1, qwen-coder, etc."
+              />
+            )}
+          </div>
+        </Field>
 
-          {/* Reload models button */}
-          {isConnected && (
+        {/* Reload models button */}
+        {isConnected && (
+          <div className="flex items-center justify-between pt-1">
             <button
               onClick={onConnectAndLoad}
               disabled={loadingModels}
               className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
             >
               <RefreshCw size={11} className={cn(loadingModels && 'animate-spin')} />
-              Reload model list
+              Reload model list ({models.length} loaded)
             </button>
-          )}
-        </div>
-      </Field>
+          </div>
+        )}
+      </div>
 
       {/* Helpful tips */}
       {testStatus === 'idle' && (
@@ -383,18 +469,43 @@ const ParametersTab: React.FC<{
       />
     </div>
 
-    <Field label="Context Window Length" hint="Max tokens allocated for history + new prompt. High values require more RAM.">
-      <Input
-        type="number"
-        value={settings.context_length || ''}
-        onChange={(e) => updateSettings({ context_length: parseInt(e.target.value) || 0 })}
-        placeholder="8192"
-        onBlur={(e) => {
-          if (!settings.context_length || settings.context_length < 1024) {
-            updateSettings({ context_length: 8192 });
-          }
-        }}
-      />
+    <Field label="Context Window Length" hint="Max tokens allocated for history + new prompt. Lower values (4K-8K) respond faster and use far less VRAM/RAM.">
+      <div className="space-y-2">
+        <Input
+          type="number"
+          value={settings.context_length || ''}
+          onChange={(e) => updateSettings({ context_length: parseInt(e.target.value) || 0 })}
+          placeholder="8192"
+          onBlur={(e) => {
+            if (!settings.context_length || settings.context_length < 1024) {
+              updateSettings({ context_length: 8192 });
+            }
+          }}
+        />
+        {/* Quick Context Presets */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {[
+            { label: '4K (Fastest)', value: 4096 },
+            { label: '8K (Balanced)', value: 8192 },
+            { label: '16K (Long Context)', value: 16384 },
+            { label: '32K (Deep Coding)', value: 32768 },
+          ].map((preset) => (
+            <button
+              key={preset.value}
+              type="button"
+              onClick={() => updateSettings({ context_length: preset.value })}
+              className={cn(
+                'px-2.5 py-1 text-[11px] rounded-md transition-all cursor-pointer border',
+                settings.context_length === preset.value
+                  ? 'bg-violet-600/25 text-violet-300 border-violet-500/40 font-medium'
+                  : 'bg-white/5 text-zinc-400 hover:text-zinc-200 border-white/8 hover:bg-white/8'
+              )}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+      </div>
     </Field>
 
     <Field label="Max Output Tokens" hint="Maximum tokens the model is allowed to generate per response.">
@@ -410,6 +521,34 @@ const ParametersTab: React.FC<{
         }}
       />
     </Field>
+
+    {/* Thinking Mode Toggle */}
+    <div className="flex items-center justify-between p-3 bg-white/5 border border-white/8 rounded-xl">
+      <div className="space-y-0.5 pr-4">
+        <div className="flex items-center gap-2">
+          <Atom size={14} className="text-violet-400" />
+          <span className="text-xs text-zinc-200 font-medium">Thinking / Reasoning Mode</span>
+        </div>
+        <p className="text-[10px] text-zinc-500 leading-relaxed">
+          Show internal reasoning scratchpad (<code className="text-zinc-400">&lt;think&gt;</code> tokens). Turn OFF to eliminate response delays and reduce token consumption across all models.
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={() => updateSettings({ think_enabled: !(settings.think_enabled ?? true) })}
+        className={cn(
+          'w-11 h-6 rounded-full transition-colors relative flex items-center px-0.5 flex-shrink-0 cursor-pointer',
+          (settings.think_enabled ?? true) ? 'bg-violet-600' : 'bg-zinc-800'
+        )}
+      >
+        <span
+          className={cn(
+            'w-5 h-5 rounded-full bg-white transition-transform shadow-md',
+            (settings.think_enabled ?? true) ? 'translate-x-5' : 'translate-x-0'
+          )}
+        />
+      </button>
+    </div>
   </div>
 );
 
@@ -417,98 +556,235 @@ const VoiceTab: React.FC<{
   settings: AppSettings;
   updateSettings: (p: Partial<AppSettings>) => void;
   availableVoices: string[];
-}> = ({ settings, updateSettings, availableVoices }) => (
-  <div className="space-y-4">
-    {/* TTS Toggle */}
-    <div className="flex items-center justify-between p-3 bg-white/3 rounded-xl border border-white/8">
-      <div>
-        <p className="text-xs text-zinc-300 font-medium">Text-to-Speech</p>
-        <p className="text-[10px] text-zinc-600">Auto-read AI responses aloud</p>
-      </div>
-      <button
-        onClick={() => updateSettings({ tts_enabled: !settings.tts_enabled })}
-        className={cn(
-          'w-10 h-6 rounded-full transition-all relative flex-shrink-0',
-          settings.tts_enabled ? 'bg-violet-600' : 'bg-zinc-800 border border-white/10'
-        )}
-      >
-        <div className={cn(
-          'absolute top-1 w-4 h-4 rounded-full bg-white transition-all shadow',
-          settings.tts_enabled ? 'left-5' : 'left-1'
-        )} />
-      </button>
-    </div>
+}> = ({ settings, updateSettings }) => {
+  const [previewingId, setPreviewingId] = useState<string | null>(null);
+  const [engineStatus, setEngineStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>(
+    getEngineState().state
+  );
 
-    <Field label="Voice">
-      <div className="relative">
-        <select
-          value={settings.tts_voice}
-          onChange={(e) => updateSettings({ tts_voice: e.target.value })}
-          className="w-full px-3 py-2 text-sm bg-white/5 border border-white/10 rounded-lg text-zinc-200 outline-none focus:border-violet-500/50 appearance-none cursor-pointer"
-        >
-          <option value="" className="bg-zinc-900">System default</option>
-          {availableVoices.map((v) => (
-            <option key={v} value={v} className="bg-zinc-900">{v}</option>
-          ))}
-        </select>
-        <ChevronDown size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600 pointer-events-none" />
-      </div>
-    </Field>
+  useEffect(() => {
+    tauriApi.isKokoroRunning().then((running) => {
+      if (running) {
+        setEngineStatus('ready');
+      } else {
+        setEngineStatus('loading');
+        tauriApi.startKokoroServer().then((ok) => {
+          setEngineStatus(ok ? 'ready' : 'error');
+        }).catch(() => setEngineStatus('error'));
+      }
+    });
+  }, []);
 
-    <div>
-      <div className="flex items-center justify-between mb-1.5">
-        <label className="text-xs text-zinc-400 font-medium flex items-center gap-1.5">
-          <Volume2 size={12} />
-          Speaking Rate
-        </label>
-        <span className="text-xs text-zinc-500 font-mono">{settings.tts_rate.toFixed(1)}x</span>
-      </div>
-      <input
-        type="range"
-        min={0.5}
-        max={2}
-        step={0.1}
-        value={settings.tts_rate}
-        onChange={(e) => updateSettings({ tts_rate: parseFloat(e.target.value) })}
-        className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer accent-violet-500"
-      />
-    </div>
+  const activeVoice = settings.tts_voice || DEFAULT_KOKORO_VOICE;
 
-    <div className="border-t border-white/8 pt-4">
-      <p className="text-[10px] font-semibold text-zinc-600 uppercase tracking-wider mb-3">Speech-to-Text (STT)</p>
-      <Field
-        label="Whisper Model Path"
-        hint="Optional: path to a GGML Whisper model file for local, offline transcription."
-      >
-        <Input
-          type="text"
-          value={settings.stt_model_path}
-          onChange={(e) => updateSettings({ stt_model_path: e.target.value })}
-          placeholder="C:\models\ggml-base.bin  (leave empty to disable)"
-        />
-      </Field>
+  const handlePreview = async (voiceId: string) => {
+    if (previewingId) {
+      kokoroStop();
+      setPreviewingId(null);
+      return;
+    }
+    setPreviewingId(voiceId);
+    try {
+      await kokoroPreview(voiceId, settings.tts_rate);
+    } finally {
+      setPreviewingId(null);
+    }
+  };
 
-      <div className="flex items-center justify-between mt-3 p-3 bg-white/3 rounded-xl border border-white/8">
+  return (
+    <div className="space-y-4">
+      {/* TTS Enable Toggle */}
+      <div className="flex items-center justify-between p-3 bg-white/3 rounded-xl border border-white/8">
         <div>
-          <p className="text-xs text-zinc-300 font-medium">Push-to-Talk Mode</p>
-          <p className="text-[10px] text-zinc-600">Hold mic button to record</p>
+          <p className="text-xs text-zinc-300 font-medium">Text-to-Speech</p>
+          <p className="text-[10px] text-zinc-600">AI reads responses aloud using Kokoro neural voices</p>
         </div>
         <button
-          onClick={() => updateSettings({ ptt_mode: !settings.ptt_mode })}
+          onClick={() => updateSettings({ tts_enabled: !settings.tts_enabled })}
           className={cn(
             'w-10 h-6 rounded-full transition-all relative flex-shrink-0',
-            settings.ptt_mode ? 'bg-violet-600' : 'bg-zinc-800 border border-white/10'
+            settings.tts_enabled ? 'bg-violet-600' : 'bg-zinc-800 border border-white/10'
           )}
         >
           <div className={cn(
             'absolute top-1 w-4 h-4 rounded-full bg-white transition-all shadow',
-            settings.ptt_mode ? 'left-5' : 'left-1'
+            settings.tts_enabled ? 'left-5' : 'left-1'
           )} />
         </button>
       </div>
+
+      {/* Kokoro Engine Card */}
+      <div className="rounded-xl border border-white/10 bg-white/3 overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center gap-3 p-3 border-b border-white/8">
+          <div className="w-9 h-9 rounded-full bg-violet-600/20 border border-violet-500/30 flex items-center justify-center text-lg flex-shrink-0">
+            🔊
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-white">Kokoro</p>
+            <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wide">Best Quality</p>
+            <p className="text-[10px] text-zinc-500 mt-0.5">22 voices · 330 MB · ~650 MB RAM</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {engineStatus === 'loading' && (
+              <div className="flex items-center gap-1.5 text-[10px] text-amber-400">
+                <Loader2 size={10} className="animate-spin" />
+                Loading…
+              </div>
+            )}
+            {engineStatus === 'ready' && (
+              <div className="flex items-center gap-1 text-[10px] text-emerald-400">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                Ready
+              </div>
+            )}
+            {engineStatus === 'error' && (
+              <div className="flex items-center gap-1 text-[10px] text-red-400">
+                <AlertCircle size={10} />
+                Error
+              </div>
+            )}
+          </div>
+        </div>
+
+        <p className="text-[10px] text-zinc-600 px-3 pt-2 pb-1">Some voices may not work on all devices.</p>
+
+        {/* Voice List */}
+        <div className="divide-y divide-white/5">
+          {KOKORO_VOICES.map((voice) => {
+            const isActive = activeVoice === voice.id;
+            const isPreviewing = previewingId === voice.id;
+            return (
+              <div
+                key={voice.id}
+                onClick={() => updateSettings({ tts_voice: voice.id })}
+                className={cn(
+                  'flex items-center gap-3 px-3 py-2.5 cursor-pointer transition-colors',
+                  isActive ? 'bg-violet-600/10' : 'hover:bg-white/4'
+                )}
+              >
+                {/* Radio */}
+                <div className={cn(
+                  'w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors',
+                  isActive ? 'border-violet-500 bg-violet-500' : 'border-zinc-600'
+                )}>
+                  {isActive && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                </div>
+
+                {/* Label */}
+                <span className={cn(
+                  'flex-1 text-sm font-medium',
+                  isActive ? 'text-white' : 'text-zinc-400'
+                )}>
+                  {voice.label}
+                  {voice.accent === 'British' && (
+                    <span className="ml-1.5 text-[9px] text-zinc-600 font-normal">🇬🇧</span>
+                  )}
+                  {voice.gender === 'male' && (
+                    <span className="ml-1.5 text-[9px] text-zinc-600 font-normal">♂</span>
+                  )}
+                </span>
+
+                {/* Preview Play Button */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); handlePreview(voice.id); }}
+                  className={cn(
+                    'w-6 h-6 rounded-full flex items-center justify-center transition-all flex-shrink-0',
+                    isPreviewing
+                      ? 'bg-violet-500 text-white'
+                      : 'text-zinc-600 hover:text-violet-400 hover:bg-violet-500/10'
+                  )}
+                  title={isPreviewing ? 'Stop preview' : 'Preview voice'}
+                >
+                  {isPreviewing
+                    ? <Square size={9} fill="currentColor" />
+                    : <Play size={9} fill="currentColor" />}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Speaking Rate */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <label className="text-xs text-zinc-400 font-medium flex items-center gap-1.5">
+            <Volume2 size={12} />
+            Speaking Rate
+          </label>
+          <span className="text-xs text-zinc-500 font-mono">{settings.tts_rate.toFixed(1)}x</span>
+        </div>
+        <input
+          type="range"
+          min={0.5}
+          max={2}
+          step={0.1}
+          value={settings.tts_rate}
+          onChange={(e) => updateSettings({ tts_rate: parseFloat(e.target.value) })}
+          className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer accent-violet-500"
+        />
+      </div>
+
+      {/* STT Section */}
+      <div className="border-t border-white/8 pt-4">
+        <p className="text-[10px] font-semibold text-zinc-600 uppercase tracking-wider mb-3">Speech-to-Text (STT)</p>
+        <Field
+          label="Whisper Model Path"
+          hint="Optional: path to a GGML Whisper model file for local, offline transcription."
+        >
+          <Input
+            type="text"
+            value={settings.stt_model_path}
+            onChange={(e) => updateSettings({ stt_model_path: e.target.value })}
+            placeholder="C:\models\ggml-base.bin  (leave empty to disable)"
+          />
+        </Field>
+
+        {/* Continuous Conversation (Hands-Free) */}
+        <div className="flex items-center justify-between mt-3 p-3 bg-white/3 rounded-xl border border-white/8">
+          <div>
+            <p className="text-xs text-zinc-300 font-medium">Continuous Conversation (Hands-Free)</p>
+            <p className="text-[10px] text-zinc-500">Automatically re-opens mic after AI speaks for continuous back-and-forth</p>
+          </div>
+          <button
+            onClick={() => updateSettings({ continuous_voice: !(settings.continuous_voice ?? true) })}
+            className={cn(
+              'w-10 h-6 rounded-full transition-all relative flex-shrink-0',
+              (settings.continuous_voice ?? true) ? 'bg-emerald-600' : 'bg-zinc-800 border border-white/10'
+            )}
+          >
+            <div className={cn(
+              'absolute top-1 w-4 h-4 rounded-full bg-white transition-all shadow',
+              (settings.continuous_voice ?? true) ? 'left-5' : 'left-1'
+            )} />
+          </button>
+        </div>
+
+        {/* Push-to-Talk Mode */}
+        <div className="flex items-center justify-between mt-3 p-3 bg-white/3 rounded-xl border border-white/8">
+          <div>
+            <p className="text-xs text-zinc-300 font-medium">Push-to-Talk Mode</p>
+            <p className="text-[10px] text-zinc-500">Hold mic button to record (off = click to toggle on/off)</p>
+          </div>
+          <button
+            onClick={() => updateSettings({ ptt_mode: !settings.ptt_mode })}
+            className={cn(
+              'w-10 h-6 rounded-full transition-all relative flex-shrink-0',
+              settings.ptt_mode ? 'bg-violet-600' : 'bg-zinc-800 border border-white/10'
+            )}
+          >
+            <div className={cn(
+              'absolute top-1 w-4 h-4 rounded-full bg-white transition-all shadow',
+              settings.ptt_mode ? 'left-5' : 'left-1'
+            )} />
+          </button>
+        </div>
+      </div>
     </div>
-  </div>
-);
+  );
+};
+
 
 const DeveloperTab: React.FC<{
   settings: AppSettings;
@@ -625,6 +901,325 @@ const LogViewerModal: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ is
           )}
         </div>
       </div>
+    </div>
+  );
+};
+
+// ─── MCP Server Manager Tab ──────────────────────────────────────────────────
+
+const STATUS_STYLES: Record<string, string> = {
+  connected: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/25',
+  connecting: 'bg-amber-500/15 text-amber-400 border-amber-500/25',
+  error: 'bg-red-500/15 text-red-400 border-red-500/25',
+  disabled: 'bg-zinc-800/60 text-zinc-500 border-zinc-700/40',
+};
+
+const StatusDot: React.FC<{ status?: string }> = ({ status = 'disabled' }) => (
+  <span className={cn(
+    'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border capitalize',
+    STATUS_STYLES[status] ?? STATUS_STYLES.disabled
+  )}>
+    {status === 'connecting' && <Loader2 size={9} className="animate-spin" />}
+    {status === 'connected' && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />}
+    {status === 'error' && <span className="w-1.5 h-1.5 rounded-full bg-red-400" />}
+    {status === 'disabled' && <WifiOff size={9} />}
+    {status}
+  </span>
+);
+
+const McpTab: React.FC = () => {
+  const { servers, addServer, removeServer, setEnabled, connectServer, disconnectServer, refreshServerTools } = useMcpStore();
+
+  const [showAdd, setShowAdd] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // ── Add-server form state ──
+  const [form, setForm] = useState({
+    name: '',
+    id: '',
+    command: '',
+    args: '',     // space-separated
+    envRaw: '',   // KEY=VALUE,KEY2=VALUE2
+  });
+  const [addError, setAddError] = useState('');
+
+  const handleAdd = () => {
+    setAddError('');
+    const id = form.id.trim() || form.name.trim().toLowerCase().replace(/\s+/g, '-');
+    if (!id || !form.command.trim()) {
+      setAddError('Name and Command are required.');
+      return;
+    }
+    if (servers.find((s) => s.id === id)) {
+      setAddError(`A server with ID "${id}" already exists.`);
+      return;
+    }
+
+    const args = form.args.trim() ? form.args.trim().split(/\s+/) : [];
+    const env: Record<string, string> = {};
+    for (const pair of form.envRaw.split(',')) {
+      const [k, ...vs] = pair.split('=');
+      if (k?.trim()) env[k.trim()] = vs.join('=').trim();
+    }
+
+    addServer({ id, name: form.name.trim() || id, command: form.command.trim(), args, env, enabled: true });
+    setForm({ name: '', id: '', command: '', args: '', envRaw: '' });
+    setShowAdd(false);
+  };
+
+  return (
+    <div className="space-y-3">
+      {/* Header row */}
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-xs font-semibold text-zinc-200">MCP Server Manager</p>
+          <p className="text-[10px] text-zinc-600 mt-0.5">
+            {servers.filter((s) => s.status === 'connected').length} of {servers.length} servers connected
+          </p>
+        </div>
+        <button
+          onClick={() => setShowAdd(!showAdd)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-violet-600/20 text-violet-300 border border-violet-500/30 hover:bg-violet-600/30 transition-colors"
+        >
+          <Plus size={12} />
+          Add Server
+        </button>
+      </div>
+
+      {/* Add-server form */}
+      <AnimatePresence>
+        {showAdd && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="space-y-2 p-3 bg-white/3 rounded-xl border border-white/8">
+              <p className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">New MCP Server</p>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] text-zinc-500 mb-1">Display Name *</label>
+                  <input
+                    value={form.name}
+                    onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                    placeholder="FreeCAD MCP"
+                    className="w-full px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-zinc-500 mb-1">ID (auto from name)</label>
+                  <input
+                    value={form.id}
+                    onChange={(e) => setForm((f) => ({ ...f, id: e.target.value }))}
+                    placeholder="freecad"
+                    className="w-full px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] text-zinc-500 mb-1">Command *</label>
+                <input
+                  value={form.command}
+                  onChange={(e) => setForm((f) => ({ ...f, command: e.target.value }))}
+                  placeholder="python  or  npx  or  node"
+                  className="w-full px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] text-zinc-500 mb-1">Arguments (space-separated)</label>
+                <input
+                  value={form.args}
+                  onChange={(e) => setForm((f) => ({ ...f, args: e.target.value }))}
+                  placeholder="-m freecad_mcp  or  -y @modelcontextprotocol/server-github"
+                  className="w-full px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] text-zinc-500 mb-1">Env Variables (KEY=VALUE, comma-separated)</label>
+                <input
+                  value={form.envRaw}
+                  onChange={(e) => setForm((f) => ({ ...f, envRaw: e.target.value }))}
+                  placeholder="GITHUB_TOKEN=ghp_xxx, API_KEY=..."
+                  className="w-full px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
+                />
+              </div>
+
+              {addError && (
+                <p className="text-[10px] text-red-400 flex items-center gap-1">
+                  <AlertCircle size={10} /> {addError}
+                </p>
+              )}
+
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={handleAdd}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-violet-600 hover:bg-violet-500 text-white rounded-lg transition-colors font-medium"
+                >
+                  <PlugZap size={12} />
+                  Connect & Save
+                </button>
+                <button
+                  onClick={() => { setShowAdd(false); setAddError(''); }}
+                  className="px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Server list */}
+      {servers.length === 0 ? (
+        <div className="text-center py-8 text-zinc-600">
+          <Plug size={28} className="mx-auto mb-2 opacity-40" />
+          <p className="text-xs">No MCP servers configured.</p>
+          <p className="text-[10px] mt-1">Click "Add Server" to connect your first MCP.</p>
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {servers.map((srv) => (
+            <div key={srv.id} className="bg-white/3 border border-white/8 rounded-xl overflow-hidden">
+              {/* Server row */}
+              <div className="flex items-center gap-3 px-3 py-2.5">
+                {/* Expand toggle */}
+                <button
+                  onClick={() => setExpandedId(expandedId === srv.id ? null : srv.id)}
+                  className="text-zinc-600 hover:text-zinc-300 transition-colors flex-shrink-0"
+                >
+                  <ChevronRight size={13} className={cn('transition-transform', expandedId === srv.id && 'rotate-90')} />
+                </button>
+
+                {/* Name + status */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-zinc-200 font-medium truncate">{srv.name}</span>
+                    <StatusDot status={srv.status} />
+                  </div>
+                  <p className="text-[10px] text-zinc-600 font-mono truncate mt-0.5">
+                    {srv.command} {srv.args.join(' ')}
+                  </p>
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  {/* Enable/disable toggle */}
+                  <button
+                    onClick={() => setEnabled(srv.id, !srv.enabled)}
+                    title={srv.enabled ? 'Disable' : 'Enable'}
+                    className={cn(
+                      'w-8 h-4.5 rounded-full transition-all relative flex-shrink-0',
+                      srv.enabled ? 'bg-violet-600' : 'bg-zinc-800 border border-white/10'
+                    )}
+                    style={{ height: '18px', width: '30px' }}
+                  >
+                    <div className={cn(
+                      'absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white transition-all shadow',
+                      srv.enabled ? 'left-3.5' : 'left-0.5'
+                    )} />
+                  </button>
+
+                  {/* Reconnect */}
+                  {srv.enabled && (
+                    <button
+                      onClick={() => connectServer(srv.id)}
+                      title="Reconnect"
+                      className="p-1 rounded text-zinc-600 hover:text-violet-300 transition-colors"
+                    >
+                      <RefreshCw size={11} className={cn(srv.status === 'connecting' && 'animate-spin')} />
+                    </button>
+                  )}
+
+                  {/* Remove */}
+                  <button
+                    onClick={() => removeServer(srv.id)}
+                    title="Remove"
+                    className="p-1 rounded text-zinc-700 hover:text-red-400 transition-colors"
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Expanded tool inspector */}
+              <AnimatePresence>
+                {expandedId === srv.id && (
+                  <motion.div
+                    initial={{ height: 0 }}
+                    animate={{ height: 'auto' }}
+                    exit={{ height: 0 }}
+                    className="overflow-hidden border-t border-white/6"
+                  >
+                    <div className="px-3 py-2.5 space-y-2">
+                      {/* Error */}
+                      {srv.errorMessage && (
+                        <div className="flex items-start gap-1.5 text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-2 py-1.5">
+                          <AlertCircle size={11} className="mt-0.5 flex-shrink-0" />
+                          <span className="break-all">{srv.errorMessage}</span>
+                        </div>
+                      )}
+
+                      {/* Tool list */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <p className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">
+                            {srv.tools?.length ?? 0} tool{(srv.tools?.length ?? 0) !== 1 ? 's' : ''} available
+                          </p>
+                          {srv.status === 'connected' && (
+                            <button
+                              onClick={() => refreshServerTools(srv.id)}
+                              className="text-[10px] text-zinc-600 hover:text-violet-300 flex items-center gap-1"
+                            >
+                              <RefreshCw size={9} /> Refresh
+                            </button>
+                          )}
+                        </div>
+                        {srv.tools && srv.tools.length > 0 ? (
+                          <div className="space-y-1">
+                            {srv.tools.map((tool) => (
+                              <div key={tool.name} className="flex items-start gap-2 px-2 py-1.5 bg-black/30 rounded-lg">
+                                <Zap size={10} className="text-violet-400 mt-0.5 flex-shrink-0" />
+                                <div className="min-w-0">
+                                  <p className="text-[10px] font-mono text-violet-300 truncate">{tool.name}</p>
+                                  {tool.description && (
+                                    <p className="text-[10px] text-zinc-600 leading-relaxed line-clamp-2">{tool.description}</p>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-[10px] text-zinc-700 italic">
+                            {srv.status === 'connected' ? 'No tools reported.' : 'Connect server to inspect tools.'}
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Config summary */}
+                      <div className="pt-1 border-t border-white/6">
+                        <p className="text-[10px] font-mono text-zinc-700 break-all">
+                          {srv.command} {srv.args.join(' ')}
+                        </p>
+                        {Object.keys(srv.env ?? {}).length > 0 && (
+                          <p className="text-[10px] text-zinc-700 mt-0.5">
+                            ENV: {Object.keys(srv.env).join(', ')}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

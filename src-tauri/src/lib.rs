@@ -27,13 +27,25 @@ pub fn run() {
                 .build(),
         )
         .manage(RecordingBuffer::default())
-        .manage(lsp::LspState::default())
-        .manage(mcp::McpState::default())
+        .setup(|_app| {
+            // Auto-start Kokoro neural TTS server on app boot
+            tauri::async_runtime::spawn(async {
+                let _ = commands::voice::start_kokoro_server().await;
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            // Kokoro Neural TTS
+            commands::voice::is_kokoro_running,
+            commands::voice::start_kokoro_server,
+            commands::voice::kokoro_speak_native,
+            commands::voice::kokoro_preview_native,
             // MCP
             mcp::mcp_start_server,
             mcp::mcp_list_tools,
             mcp::mcp_call_tool,
+            mcp::mcp_stop_server,
+            mcp::mcp_list_active_servers,
             // LSP
             lsp::lsp_start_server,
             lsp::lsp_goto_definition,
@@ -61,6 +73,8 @@ pub fn run() {
             commands::files::list_directory,
             commands::files::get_special_dirs,
             commands::files::search_files,
+            commands::files::write_to_file,
+            commands::files::delete_file,
             commands::rules::find_project_rules,
             // YouTube
             commands::youtube::read_youtube_transcript,
@@ -72,6 +86,7 @@ pub fn run() {
             commands::shell::run_python_code,
             commands::shell::run_python_file,
             commands::shell::install_python_packages,
+            commands::shell::run_terminal_command,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Morfeus");

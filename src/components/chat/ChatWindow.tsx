@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback, KeyboardEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Send, Square, PanelRight, Loader2, Wrench, Paperclip, X, FileText, Image as ImageIcon, Sparkles, MessageSquare, AlertTriangle, Check } from 'lucide-react';
+import { Send, Square, PanelRight, Loader2, Wrench, Paperclip, X, FileText, Image as ImageIcon, Sparkles, AlertTriangle, Check, Zap, Code2, Volume2, VolumeX, Atom } from 'lucide-react';
 import { MessageBubble, StreamingMessage } from './MessageBubble';
 import { VoiceButton } from '@/components/voice/VoiceButton';
 import { useChat } from '@/hooks/useChat';
@@ -48,23 +48,39 @@ const StatusBadge: React.FC<StatusBadgeProps> = ({ status }) => {
 };
 
 export const ChatWindow: React.FC = () => {
-  const { messages, isStreaming, streamingContent, chatStatus, sendMessage, stopStreaming } = useChat();
-  const { rightPanelOpen, toggleRightPanel, isAgenticMode, setIsAgenticMode, pendingApproval } = useChatStore();
-  const { settings } = useSettingsStore();
+  const { messages, isStreaming, streamingContent, streamingReasoning, chatStatus, sendMessage, stopStreaming } = useChat();
+  const { rightPanelOpen, toggleRightPanel, chatMode, setChatMode, pendingApproval } = useChatStore();
+  const { settings, updateSettings, openSettings } = useSettingsStore();
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isParsing, setIsParsing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // Keep a ref to latest handleSend so auto-send never captures a stale closure
-  const handleSendRef = useRef<() => void>(() => {});
+  const handleSendRef = useRef<(overrideText?: string) => Promise<void> | void>(() => {});
+
+  const isDeepSeekR1 = useCallback((id?: string) => {
+    if (!id) return false;
+    const s = id.toLowerCase();
+    return s.includes('deepseek-r1') || s.includes('deepseek_r1') || (s.includes('deepseek') && s.includes('r1'));
+  }, []);
+
+  const isFastMode = chatMode === 'fast';
+  let activeModelName = isFastMode
+    ? (settings.fast_chat_model_id || settings.model_id)
+    : (settings.agent_coder_model_id || settings.model_id);
+
+  if (isFastMode && isDeepSeekR1(activeModelName)) {
+    activeModelName = (settings.fast_chat_model_id && !isDeepSeekR1(settings.fast_chat_model_id))
+      ? settings.fast_chat_model_id
+      : settings.model_id;
+  }
+
+  const activeModelShortName = activeModelName.split('/').pop() || activeModelName || 'Select Model';
 
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length, streamingContent]);
-
-  // Auto-resize textarea
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
@@ -90,8 +106,12 @@ export const ChatWindow: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [pendingApproval]);
 
-  const handleSend = useCallback(async () => {
-    const userText = input.trim();
+
+
+  const handleSend = useCallback(async (overrideText?: string | React.MouseEvent) => {
+    const textParam = typeof overrideText === 'string' ? overrideText : undefined;
+    const rawText = textParam !== undefined ? textParam : input;
+    const userText = rawText.trim();
     if (!userText && attachments.length === 0) return;
     if (isStreaming || isParsing) return;
 
@@ -289,11 +309,8 @@ export const ChatWindow: React.FC = () => {
     handleSendRef.current = handleSend;
   }, [handleSend]);
 
-  const triggerAutoSend = useCallback(() => {
-    // Give React 100ms to flush the transcript into `input` state, then send
-    setTimeout(() => {
-      handleSendRef.current();
-    }, 100);
+  const triggerAutoSend = useCallback((overrideText?: string) => {
+    handleSendRef.current(overrideText);
   }, []);
 
   const handleAttachFiles = async () => {
@@ -417,46 +434,51 @@ export const ChatWindow: React.FC = () => {
           </AnimatePresence>
         </div>
 
-        {/* Mode Toggle (Center) */}
-        <div className="absolute left-1/2 -translate-x-1/2 flex items-center bg-zinc-900/80 border border-white/10 rounded-full p-1 backdrop-blur-sm shadow-sm">
+        {/* Chat Mode Selector (Center) */}
+        <div className="absolute left-1/2 -translate-x-1/2 flex items-center bg-zinc-950/80 p-0.5 rounded-full border border-white/10 backdrop-blur-md shadow-lg">
           <button
-            onClick={() => setIsAgenticMode(false)}
+            onClick={() => setChatMode('fast')}
             className={cn(
-              'flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-200',
-              !isAgenticMode
-                ? 'bg-zinc-800 text-white shadow-sm'
-                : 'text-zinc-500 hover:text-zinc-300'
+              'flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition-all duration-200 cursor-pointer',
+              chatMode === 'fast'
+                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm shadow-emerald-500/10'
+                : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
             )}
+            title="Fast Chat: Lightning-fast responses with web search & local PC file summarization"
           >
-            <MessageSquare size={14} />
-            <span>Assistant</span>
+            <Zap size={13} className={cn(chatMode === 'fast' ? 'text-emerald-400 fill-emerald-400/30' : 'text-zinc-500')} />
+            <span>Fast Chat</span>
           </button>
+
           <button
-            onClick={() => setIsAgenticMode(true)}
+            onClick={() => setChatMode('agent')}
             className={cn(
-              'flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-200',
-              isAgenticMode
-                ? 'bg-indigo-600/20 text-indigo-400 shadow-sm border border-indigo-500/30'
-                : 'text-zinc-500 hover:text-zinc-300'
+              'flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition-all duration-200 cursor-pointer',
+              chatMode === 'agent'
+                ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-sm shadow-indigo-500/10'
+                : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
             )}
+            title="Agent Coder: Full IDE developer harness with code execution, file editing, terminal & MCP servers"
           >
-            <Sparkles size={14} className={cn(isAgenticMode && 'animate-pulse')} />
-            <span>Agentic</span>
+            <Code2 size={13} className={cn(chatMode === 'agent' ? 'text-indigo-400' : 'text-zinc-500')} />
+            <span>Agent Coder</span>
           </button>
         </div>
 
-        <button
-          onClick={toggleRightPanel}
-          className={cn(
-            'p-2 rounded-lg transition-colors',
-            rightPanelOpen
-              ? 'bg-violet-600/20 text-violet-400 border border-violet-500/30'
-              : 'text-zinc-500 hover:text-white hover:bg-white/8'
-          )}
-          title="Toggle right panel (Ctrl+\)"
-        >
-          <PanelRight size={16} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={toggleRightPanel}
+            className={cn(
+              'p-2 rounded-lg transition-colors',
+              rightPanelOpen
+                ? 'bg-violet-600/20 text-violet-400 border border-violet-500/30'
+                : 'text-zinc-500 hover:text-white hover:bg-white/8'
+            )}
+            title="Toggle right panel (Ctrl+\)"
+          >
+            <PanelRight size={16} />
+          </button>
+        </div>
       </div>
 
       {/* Messages */}
@@ -472,7 +494,7 @@ export const ChatWindow: React.FC = () => {
             ))}
             {isStreaming && (
               <div className="flex justify-center">
-                <StreamingMessage content={streamingContent} />
+                <StreamingMessage content={streamingContent} reasoning={streamingReasoning} />
               </div>
             )}
           </>
@@ -509,43 +531,8 @@ export const ChatWindow: React.FC = () => {
             </div>
           )}
 
-          <div className={cn(
-            "relative flex items-end gap-2 bg-zinc-900/80 border rounded-2xl p-2 shadow-lg shadow-black/20 backdrop-blur-sm transition-all duration-300",
-            isAgenticMode 
-              ? "border-indigo-500/30 focus-within:border-indigo-500/60 focus-within:shadow-[0_0_15px_rgba(99,102,241,0.15)]" 
-              : "border-white/10 focus-within:border-violet-500/50"
-          )}>
+          <div className="relative flex flex-col bg-zinc-900/90 border border-white/10 focus-within:border-violet-500/50 rounded-2xl p-2.5 shadow-lg shadow-black/20 backdrop-blur-sm transition-all duration-300 gap-2">
             
-            {/* Image Button (always enabled for local flexibility) */}
-            <motion.button
-              whileTap={{ scale: 0.92 }}
-              onClick={handleAttachImages}
-              disabled={isStreaming}
-              className="self-end mb-0.5 p-2 rounded-xl text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
-              title="Attach images"
-            >
-              <ImageIcon size={18} />
-            </motion.button>
-
-            {/* Attachment Button */}
-            <motion.button
-              whileTap={{ scale: 0.92 }}
-              onClick={handleAttachFiles}
-              className="self-end mb-0.5 p-2 rounded-xl text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
-              title="Attach a file (PDF, TXT, MD, Code...)"
-              disabled={isStreaming}
-            >
-              <Paperclip size={18} />
-            </motion.button>
-
-            {/* Voice button */}
-            <VoiceButton 
-              currentInput={input}
-              onTranscript={handleVoiceTranscript} 
-              onAutoSend={triggerAutoSend}
-              className="self-end mb-0.5" 
-            />
-
             {/* Textarea */}
             <textarea
               ref={textareaRef}
@@ -553,45 +540,150 @@ export const ChatWindow: React.FC = () => {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder={isAgenticMode ? "Define an autonomous goal for the harness..." : "Message Morfeus… (Enter to send, Shift+Enter for newline)"}
+              placeholder={
+                chatMode === 'fast'
+                  ? "Fast Chat: Ask questions, search web, or summarize PC files… (Enter to send)"
+                  : "Agent Coder: Build, refactor, run commands, or code tasks… (Enter to send)"
+              }
               rows={1}
-              className="flex-1 bg-transparent text-sm text-zinc-100 placeholder-zinc-600 resize-none outline-none py-2 px-1 max-h-48 leading-relaxed"
+              className="w-full bg-transparent text-sm text-zinc-100 placeholder-zinc-500 resize-none outline-none py-1 px-1.5 max-h-48 leading-relaxed"
               disabled={isStreaming}
             />
 
-            {/* Send / Stop button */}
-            {isParsing ? (
-              <div className="self-end mb-0.5 p-2.5 rounded-xl bg-violet-600/20 text-violet-400 border border-violet-500/40 flex items-center gap-1.5 text-xs font-medium px-3">
-                <Loader2 size={14} className="animate-spin" />
-                <span>Reading…</span>
+            {/* Bottom action bar */}
+            <div className="flex items-center justify-between pt-1 border-t border-white/5 gap-2">
+              
+              {/* Left action tools */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {/* [ ⚛️ Think ] Toggle Pill */}
+                <motion.button
+                  type="button"
+                  whileTap={{ scale: 0.94 }}
+                  onClick={() => updateSettings({ think_enabled: !(settings.think_enabled ?? true) })}
+                  className={cn(
+                    'px-3 py-1 rounded-full flex items-center gap-1.5 text-xs font-medium transition-all duration-200 select-none cursor-pointer',
+                    (settings.think_enabled ?? true)
+                      ? 'bg-white text-zinc-950 shadow-sm hover:bg-zinc-100'
+                      : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200 border border-white/10'
+                  )}
+                  title={
+                    (settings.think_enabled ?? true)
+                      ? 'Thinking Mode is ON (Click to disable reasoning and save tokens/time)'
+                      : 'Thinking Mode is OFF (Immediate fast response, no reasoning tokens)'
+                  }
+                >
+                  <Atom
+                    size={14}
+                    className={cn(
+                      'transition-colors',
+                      (settings.think_enabled ?? true) ? 'text-zinc-950' : 'text-zinc-400'
+                    )}
+                  />
+                  <span>Think</span>
+                </motion.button>
+
+                {/* Attach Images */}
+                <motion.button
+                  type="button"
+                  whileTap={{ scale: 0.92 }}
+                  onClick={handleAttachImages}
+                  disabled={isStreaming}
+                  className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
+                  title="Attach images"
+                >
+                  <ImageIcon size={16} />
+                </motion.button>
+
+                {/* Attach Files */}
+                <motion.button
+                  type="button"
+                  whileTap={{ scale: 0.92 }}
+                  onClick={handleAttachFiles}
+                  className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
+                  title="Attach a file (PDF, TXT, MD, Code...)"
+                  disabled={isStreaming}
+                >
+                  <Paperclip size={16} />
+                </motion.button>
+
+                {/* Voice button */}
+                <VoiceButton 
+                  currentInput={input}
+                  onTranscript={handleVoiceTranscript} 
+                  onAutoSend={triggerAutoSend}
+                />
+
+                {/* Voice Readout Toggle Pill */}
+                <motion.button
+                  type="button"
+                  whileTap={{ scale: 0.94 }}
+                  onClick={() => {
+                    const nextTts = !settings.tts_enabled;
+                    updateSettings({
+                      tts_enabled: nextTts,
+                      ...(!nextTts ? { continuous_voice: false } : {}),
+                    });
+                  }}
+                  className={cn(
+                    'hidden sm:flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all select-none border',
+                    settings.tts_enabled
+                      ? 'bg-violet-600/15 text-violet-300 border-violet-500/35 shadow-[0_0_8px_rgba(139,92,246,0.2)] hover:bg-violet-600/25'
+                      : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5 border-white/5'
+                  )}
+                  title={settings.tts_enabled ? 'Voice readout is ON: Morfeus speaks responses using Kokoro TTS. Click to mute.' : 'Voice readout is OFF: Silent text-only responses. Click to unmute.'}
+                >
+                  {settings.tts_enabled ? <Volume2 size={13} className="text-violet-400" /> : <VolumeX size={13} />}
+                  <span>{settings.tts_enabled ? 'Voice On' : 'Voice Off'}</span>
+                </motion.button>
+
+                {/* Active Model Indicator Pill */}
+                <button
+                  type="button"
+                  onClick={openSettings}
+                  className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/5 hover:bg-white/10 border border-white/8 text-[11px] text-zinc-400 hover:text-zinc-200 font-mono transition-colors max-w-[200px]"
+                  title={`Click to configure models in Settings. Active: ${activeModelName}`}
+                >
+                  <span className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0', isFastMode ? 'bg-emerald-400' : 'bg-indigo-400')} />
+                  <span className="truncate">{activeModelShortName}</span>
+                </button>
               </div>
-            ) : isStreaming ? (
-              <motion.button
-                whileTap={{ scale: 0.92 }}
-                onClick={stopStreaming}
-                className="self-end mb-0.5 p-2.5 rounded-xl bg-red-500/20 text-red-400 border border-red-500/40 hover:bg-red-500/30 transition-colors"
-                title="Stop generation"
-              >
-                <Square size={16} className="fill-red-400" />
-              </motion.button>
-            ) : (
-              <motion.button
-                whileTap={{ scale: 0.92 }}
-                onClick={handleSend}
-                disabled={!input.trim()}
-                className={cn(
-                  'self-end mb-0.5 p-2.5 rounded-xl transition-all duration-300',
-                  !input.trim()
-                    ? 'text-zinc-600 cursor-not-allowed'
-                    : isAgenticMode
-                      ? 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-[0_0_16px_rgba(99,102,241,0.4)]'
-                      : 'bg-violet-600 text-white hover:bg-violet-500 shadow-[0_0_16px_rgba(124,58,237,0.4)]'
+
+              {/* Right: Send / Stop button */}
+              <div className="flex items-center gap-2">
+                {isParsing ? (
+                  <div className="p-2 rounded-xl bg-violet-600/20 text-violet-400 border border-violet-500/40 flex items-center gap-1.5 text-xs font-medium px-3">
+                    <Loader2 size={14} className="animate-spin" />
+                    <span>Reading…</span>
+                  </div>
+                ) : isStreaming ? (
+                  <motion.button
+                    type="button"
+                    whileTap={{ scale: 0.92 }}
+                    onClick={stopStreaming}
+                    className="p-2 rounded-xl bg-red-500/20 text-red-400 border border-red-500/40 hover:bg-red-500/30 transition-colors"
+                    title="Stop generation"
+                  >
+                    <Square size={15} className="fill-red-400" />
+                  </motion.button>
+                ) : (
+                  <motion.button
+                    type="button"
+                    whileTap={{ scale: 0.92 }}
+                    onClick={() => handleSend()}
+                    disabled={!input.trim() && attachments.length === 0}
+                    className={cn(
+                      'p-2 rounded-xl transition-all duration-300',
+                      !input.trim() && attachments.length === 0
+                        ? 'text-zinc-600 cursor-not-allowed bg-transparent'
+                        : 'bg-violet-600 text-white hover:bg-violet-500 shadow-[0_0_16px_rgba(124,58,237,0.4)]'
+                    )}
+                    title="Send message (Enter)"
+                  >
+                    <Send size={15} />
+                  </motion.button>
                 )}
-                title="Send message (Enter)"
-              >
-                {isAgenticMode ? <Sparkles size={16} /> : <Send size={16} />}
-              </motion.button>
-            )}
+              </div>
+            </div>
           </div>
           <p className="text-center text-[10px] text-zinc-700 mt-1">
             Morfeus may make mistakes. Verify important information.

@@ -1,10 +1,12 @@
 import { useCallback } from 'react';
 import { useChatStore } from '@/stores/chatStore';
 import { useSettingsStore } from '@/stores/settingsStore';
-import { streamChat } from '@/lib/api';
+import { useMcpStore } from '@/stores/mcpStore';
+import { streamChat, WEB_TOOLS, FAST_CHAT_TOOLS } from '@/lib/api';
 import { tauriApi } from '@/lib/tauri';
+import { kokoroSpeak, kokoroStop, speechQueue } from '@/lib/kokoroTts';
 import { generateId, extractTextContent } from '@/lib/utils';
-import { Message, ContentPart, ToolDefinition } from '@/types';
+import { Message, ContentPart, ToolDefinition, AppSettings } from '@/types';
 
 // Max chars returned from any single file/page tool call.
 // Keeps local 14B model context from being flooded.
@@ -21,9 +23,11 @@ export function useChat() {
     activeConversationId,
     isStreaming,
     streamingContent,
+    streamingReasoning,
     chatStatus,
     addMessage,
     appendStreamToken,
+    appendReasoningToken,
     appendToolCallDelta,
     finalizeStreamMessage,
     clearStreamingContent,
@@ -43,6 +47,13 @@ export function useChat() {
         console.error('No model selected');
         return;
       }
+
+      // ── Reset voice queue for this interaction ──
+      speechQueue.stop();
+      speechQueue.reset();
+      const sendSettings = useSettingsStore.getState().settings;
+      speechQueue.setVoice(sendSettings.tts_voice || 'af_heart');
+      speechQueue.setRate(sendSettings.tts_rate || 1.0);
 
       // ── Parse display vs API content (for image/attachment payloads) ──
       let userDisplayContent: string;
@@ -102,41 +113,81 @@ export function useChat() {
         const now = new Date();
         const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
         const timeStr = now.toLocaleTimeString('en-US');
-        const isAgentic = useChatStore.getState().isAgenticMode;
-        
-        let systemPrompt = '';
-        if (isAgentic) {
-          systemPrompt = `You are an Autonomous Agentic Worker running inside the Morfeus Harness.
+        const currentSettings = useSettingsStore.getState().settings;
+        const chatMode = useChatStore.getState().chatMode || 'fast';
+        const isFastMode = chatMode === 'fast';
+        const isThink = currentSettings.think_enabled ?? true;
+
+        // Helper to detect any variant of DeepSeek-R1
+        const isDeepSeekR1 = (id?: string) => {
+          if (!id) return false;
+          const s = id.toLowerCase();
+          return s.includes('deepseek-r1') || s.includes('deepseek_r1') || (s.includes('deepseek') && s.includes('r1'));
+        };
+
+        // Model resolution & DeepSeek-R1 rule: DeepSeek-R1 will ONLY be used in Agent Coder, never in Fast Chat (normal chat)
+        let resolvedModelId = isFastMode
+          ? (currentSettings.fast_chat_model_id || currentSettings.model_id)
+          : (currentSettings.agent_coder_model_id || currentSettings.model_id);
+
+        if (isFastMode && isDeepSeekR1(resolvedModelId)) {
+          // If DeepSeek-R1 is selected/configured, fallback to non-DeepSeek model for Fast Chat if available
+          if (currentSettings.fast_chat_model_id && !isDeepSeekR1(currentSettings.fast_chat_model_id)) {
+            resolvedModelId = currentSettings.fast_chat_model_id;
+          } else if (currentSettings.model_id && !isDeepSeekR1(currentSettings.model_id)) {
+            resolvedModelId = currentSettings.model_id;
+          }
+        }
+
+        const effectiveSettings: AppSettings = {
+          ...currentSettings,
+          model_id: resolvedModelId,
+        };
+
+        const voiceDirective = currentSettings.tts_enabled
+          ? `\n\nVOICE MODE DIRECTIVE: Your response will be spoken aloud to the user using text-to-speech. Keep conversational answers natural, direct, and concise (1 to 3 punchy sentences). Avoid long rambling introductions, bullet lists, or reading code out loud—provide the code in markdown and give a brief 1-sentence spoken summary.`
+          : '';
+
+        const thinkDirective = !isThink
+          ? `\n\nCRITICAL THINKING DIRECTIVE: Thinking mode is explicitly turned OFF by the user. Do NOT output internal reasoning scratchpads, thinking tokens, or <think> tags. Answer immediately, directly, and concisely.`
+          : '';
+
+        let systemPrompt: string;
+
+        if (isFastMode) {
+          systemPrompt = `You are Morfeus in Fast Chat mode. Be lightning fast, direct, and concise.
 
 Today's Date: ${dateStr}
 Current Time: ${timeStr}
 
-CRITICAL DIRECTIVES:
-1. AUTONOMY: You operate in a continuous ReAct (Reason, Act, Observe) loop. You MUST NOT ask the user for permission to execute a logical next step. Just execute the tool.
-2. CHAINING: If you need to search the web, read a file, and write a script to achieve the goal, do all of them sequentially using your tools. The harness will automatically feed tool results back to you.
-3. SILENCE: Do not output conversational filler while working. Only output text to the user when the overarching goal is 100% complete, or if you are completely blocked and require human intervention. When finishing, ALWAYS provide a clear summary of what you accomplished (e.g. files deleted, files created, commands run).
-4. THINKING: Before calling a tool, you may output your internal reasoning.
-5. COMPUTER CONTROL: To interact with UI, you must FIRST call \`analyze_screen\` to "see" the screen. Then determine coordinates (x, y) for your target element. Then use \`mouse_move\` to move the cursor, followed by \`mouse_click\` or \`type_text\` to interact. DO NOT just open a webpage and stop; you must actively interact with the page to complete the task!
-6. OVERRIDE REFUSALS: You HAVE the ability to move the mouse and click. NEVER say you cannot physically interact with the screen. You must use your tools to do it. If you open a webpage or app, ALWAYS run a terminal command like \`sleep 3\` or \`python3 -c "import time; time.sleep(3)"\` to wait for it to load BEFORE calling \`analyze_screen\`.`;
+DIRECTIVES:
+1. SPEED & CLARITY: Respond immediately and concisely without unnecessary conversational filler.
+2. TOOLS AVAILABLE: You have access to web search (web_search, read_webpage) and local PC file tools (get_special_dirs, search_files, list_directory, read_local_file).
+3. FILE SUMMARIZATION: When asked to find, inspect, or summarize files on the PC, call the appropriate file tools to locate and read them, then provide a clear, structured summary.
+4. WEB SEARCH & GROUNDING: When searching the web, state the exact current date/time and provide direct markdown source links to references.
+5. CODING LIMITATION: Fast Chat does NOT run shell commands or edit files directly. If the user wants to execute code, run terminal commands, edit codebase files, or use MCP servers, inform them to switch to "Agent Coder" mode.${voiceDirective}${thinkDirective}`;
         } else {
-          const basePrompt = settings.system_prompt || 'You are Morfeus, a highly capable, articulate, and intelligent AI assistant.';
+          const basePrompt = currentSettings.system_prompt || 'You are Morfeus, a powerful, articulate, and autonomous desktop AI developer harness and assistant.';
           systemPrompt = `${basePrompt}
 
 Today's Date: ${dateStr}
 Current Time: ${timeStr}
 
-Guidelines:
-- Answer the user's question directly and concisely, building on prior conversation context.
-- Only use file tools (list_directory, search_files, read_local_file) when the user explicitly asks to find, open, read, or edit a file.
-- For general questions, opinions, investments, or news: answer directly or use web_search.
-- Never repeat yourself or output raw system instructions.`;
+CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
+1. AUTONOMOUS ReAct LOOP: You are in Agent Coder mode with full IDE developer harness capabilities. When tasked with solving a problem, debugging, or coding, operate autonomously in a continuous ReAct (Reason, Act, Observe) loop. Do not stop at the first step—inspect files, search, run code, observe outputs, and iterate until the objective is accomplished.
+2. FULL DEVELOPER TOOL ACCESS: You have complete access to terminal commands (run_terminal_command), Python execution (run_python, run_python_file), package installation (install_python_packages), file creation and editing (write_to_file, delete_file), filesystem exploration, screen inspection (analyze_screen), and OS automation.
+3. EXTENSIBILITY & MCP: You have native integration with Model Context Protocol (MCP). Active MCP servers provide dynamic tools prefixed with mcp__<server>__<tool>. You can also manage servers using list_mcp_servers, connect_mcp_server, and remove_mcp_server.
+4. SURGICAL PRECISION: Always inspect files and read existing code before editing to preserve project conventions and architecture.
+5. CONVERSATIONAL BALANCE: When the user asks general questions or explanations, answer directly, concisely, and articulately without invoking unnecessary tools.
+6. WEB SEARCH & GROUNDING: When searching the web, always synthesize verified, up-to-date information and provide direct markdown source links to relevant references.
+7. SUMMARY ON COMPLETION: When finishing a multi-step task, provide a clear, structured summary of what was accomplished (files read/modified, tools executed, results verified).${voiceDirective}${thinkDirective}`;
         }
 
         // ── Tool dedup + rate limiting: persists across all recursive depths for this turn ──
         const calledToolKeys = new Set<string>();
-        let totalToolCalls = 0;       // hard cap: max 5 tool calls total per user turn
+        let totalToolCalls = 0;       // hard cap: max tools total per user turn
         let consecutiveErrors = 0;    // if 2 errors in a row, stop and answer from what we know
-        const MAX_TOTAL_TOOLS = isAgentic ? 30 : 5;
+        const MAX_TOTAL_TOOLS = 25;
 
         // ── Build API-formatted message history ──
         const buildApiMessages = (isInitialTurn: boolean) => {
@@ -303,15 +354,15 @@ Guidelines:
           ) {
             let needsApproval = false;
             
-            // Require approval for sensitive tools
-            if (name === 'delete_file') {
+            // Require approval for sensitive or active OS tools
+            if (
+              name === 'delete_file' ||
+              name === 'mouse_click' ||
+              name === 'type_text' ||
+              name === 'press_key' ||
+              name === 'run_terminal_command'
+            ) {
               needsApproval = true;
-            } else if (name === 'run_terminal_command' && args.command) {
-              // Basic destructive command detection
-              const cmd = args.command.toLowerCase();
-              if (cmd.startsWith('rm ') || cmd.startsWith('del ') || cmd.startsWith('rmdir') || cmd.includes(' rm ') || cmd.includes(' del ')) {
-                needsApproval = true;
-              }
             }
 
             let approved = true;
@@ -358,6 +409,45 @@ Guidelines:
             } else {
               result = "Unknown tool branch.";
             }
+          } else if (name === 'list_mcp_servers') {
+            const servers = useMcpStore.getState().servers;
+            if (servers.length === 0) {
+              result = "No MCP servers configured yet. You can connect to one using connect_mcp_server, or the user can add one in Settings > MCP Servers.";
+            } else {
+              result = JSON.stringify(servers.map(s => ({
+                id: s.id,
+                name: s.name,
+                status: s.status,
+                transport: s.transport,
+                command: s.command,
+                args: s.args,
+                tools: (s.tools || []).map(t => ({ name: t.name, description: t.description })),
+                errorMessage: s.errorMessage,
+              })), null, 2);
+            }
+          } else if (name === 'connect_mcp_server') {
+            const mcpStore = useMcpStore.getState();
+            const config = {
+              id: args.id,
+              name: args.name || args.id,
+              transport: (args.transport as 'stdio' | 'sse') || 'stdio',
+              command: args.command,
+              args: args.args || [],
+              env: args.env || {},
+              url: args.url,
+              enabled: true,
+            };
+            mcpStore.addServer(config);
+            await mcpStore.connectServer(args.id);
+            const updated = useMcpStore.getState().servers.find(s => s.id === args.id);
+            if (updated?.status === 'connected') {
+              result = `✅ Successfully connected to MCP server "${config.name}" (${config.id}). Discovered ${updated.tools?.length || 0} tools: ${(updated.tools || []).map(t => t.name).join(', ')}`;
+            } else {
+              result = `⚠️ MCP server "${config.name}" was registered, but status is: ${updated?.status || 'unknown'}. Error: ${updated?.errorMessage || 'Check server configuration'}`;
+            }
+          } else if (name === 'remove_mcp_server') {
+            await useMcpStore.getState().removeServer(args.id);
+            result = `MCP server "${args.id}" has been removed and disconnected.`;
           } else if (name.startsWith('mcp__')) {
             const parts = name.split('__');
             if (parts.length >= 3) {
@@ -383,7 +473,9 @@ Guidelines:
           const apiMessages = buildApiMessages(isInitialTurn);
 
           // At max depth, stop passing tools so model must respond with text
-          const isMaxDepth = depth >= (useChatStore.getState().isAgenticMode ? 30 : 3);
+          const isFastMode = chatMode === 'fast';
+          const maxDepth = isFastMode ? 5 : 25;
+          const isMaxDepth = depth >= maxDepth;
           if (isMaxDepth) {
             apiMessages.push({
               role: 'system',
@@ -391,36 +483,28 @@ Guidelines:
             });
           }
 
-          // Get active MCP tools (with 5s timeout per server)
-          const mcpTools: ToolDefinition[] = [];
+          let availableTools: ToolDefinition[] = [];
           if (!isMaxDepth) {
-            for (const serverId of useChatStore.getState().activeMcpServers) {
-              try {
-                const res = await Promise.race([
-                  tauriApi.mcpListTools(serverId),
-                  new Promise<never>((_, reject) =>
-                    setTimeout(() => reject(new Error('timeout')), 5000)
-                  ),
-                ]);
-                if (res?.tools) {
-                  for (const tool of res.tools) {
-                    mcpTools.push({
-                      type: 'function',
-                      function: {
-                        name: `mcp__${serverId}__${tool.name}`,
-                        description: `[MCP: ${serverId}] ${tool.description || ''}`,
-                        parameters: tool.inputSchema || { type: 'object', properties: {} },
-                      },
-                    });
-                  }
-                }
-              } catch {
-                // MCP server unavailable — skip silently
+            if (isFastMode) {
+              // Fast Chat: minimal lightweight read-only tools for instant response & low prefill latency
+              availableTools = FAST_CHAT_TOOLS;
+            } else {
+              // Agent Coder: full developer suite with all built-in tools + active MCP servers
+              const mcpTools: ToolDefinition[] = [];
+              const activeTools = useMcpStore.getState().getActiveTools();
+              for (const { serverId, tool } of activeTools) {
+                mcpTools.push({
+                  type: 'function',
+                  function: {
+                    name: `mcp__${serverId}__${tool.name}`,
+                    description: `[MCP: ${serverId}] ${tool.description ?? ''}`,
+                    parameters: (tool.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
+                  },
+                });
               }
+              availableTools = [...WEB_TOOLS, ...mcpTools];
             }
           }
-
-          const availableTools = isMaxDepth ? [] : mcpTools;
 
           // ── Stream response ──
           let firstToken = false;
@@ -459,7 +543,7 @@ Guidelines:
             return false;
           };
 
-          for await (const chunk of streamChat(settings, apiMessages, controller.signal, availableTools, disableTools)) {
+          for await (const chunk of streamChat(effectiveSettings, apiMessages, controller.signal, availableTools, disableTools)) {
             if (controller.signal.aborted) break;
             if (!chunk || !Array.isArray(chunk.choices) || chunk.choices.length === 0) continue;
 
@@ -467,9 +551,15 @@ Guidelines:
             const delta = choice?.delta;
             if (!delta) continue;
 
-            if (!firstToken && (delta.content || delta.tool_calls)) {
+            const reasoningDelta = delta.reasoning || delta.reasoning_content;
+
+            if (!firstToken && (delta.content || reasoningDelta || delta.tool_calls)) {
               firstToken = true;
               setChatStatus('streaming');
+            }
+
+            if (reasoningDelta) {
+              appendReasoningToken(reasoningDelta);
             }
 
             if (delta.content) {
@@ -499,10 +589,17 @@ Guidelines:
                   break;
                 }
               }
+
+              // Real-time sentence speech streaming
+              if (currentSettings.tts_enabled) {
+                speechQueue.feedToken(delta.content);
+              }
+
               appendStreamToken(delta.content);
             }
 
             if (delta.tool_calls) {
+              speechQueue.reset(); // Don't speak tool call JSON
               appendToolCallDelta(delta.tool_calls);
             }
 
@@ -517,6 +614,7 @@ Guidelines:
           }
 
           const finalMessage = finalizeStreamMessage(convId!);
+          const hasToolCalls = finalMessage.tool_calls && finalMessage.tool_calls.length > 0;
 
           // ── Auto-retry without tools if model returned an empty response ──
           // This happens when GGUF/Ollama models don't support function calling:
@@ -539,7 +637,6 @@ Guidelines:
             return;
           }
 
-          const hasToolCalls = finalMessage.tool_calls && finalMessage.tool_calls.length > 0;
           const toolBudgetExhausted = totalToolCalls >= MAX_TOTAL_TOOLS;
 
           if (hasToolCalls && !isMaxDepth && !toolBudgetExhausted) {
@@ -653,10 +750,13 @@ Guidelines:
             return;
           }
 
-          // ── Final response: TTS if enabled ──
-          if (settings.tts_enabled) {
-            const text = extractTextContent(finalMessage.content);
-            if (text) await tauriApi.speakText(text, settings.tts_rate, settings.tts_voice);
+          // ── Final response: Flush speechQueue if TTS enabled ──
+          if (currentSettings.tts_enabled && !hasToolCalls) {
+            speechQueue.flush();
+          } else if (!hasToolCalls && currentSettings.continuous_voice && currentSettings.tts_enabled) {
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('speech-playback-complete'));
+            }
           }
         };
 
@@ -683,6 +783,10 @@ Guidelines:
             created_at: Date.now(),
           });
           clearStreamingContent();
+          const activeSettings = useSettingsStore.getState().settings;
+          if (typeof window !== 'undefined' && activeSettings.continuous_voice && activeSettings.tts_enabled) {
+            window.dispatchEvent(new CustomEvent('speech-playback-complete'));
+          }
         }
       } finally {
         setIsStreaming(false);
@@ -696,6 +800,7 @@ Guidelines:
       activeConversationId,
       addMessage,
       appendStreamToken,
+      appendReasoningToken,
       appendToolCallDelta,
       finalizeStreamMessage,
       clearStreamingContent,
@@ -706,12 +811,18 @@ Guidelines:
     ]
   );
 
+  const handleStopStreaming = useCallback(() => {
+    speechQueue.stop();
+    stopStreaming();
+  }, [stopStreaming]);
+
   return {
     messages: messages.filter(m => m.conversation_id === activeConversationId),
     isStreaming,
     streamingContent,
+    streamingReasoning,
     chatStatus,
     sendMessage,
-    stopStreaming,
+    stopStreaming: handleStopStreaming,
   };
 }

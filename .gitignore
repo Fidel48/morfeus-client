@@ -26,3 +26,8 @@ dist-ssr
 # Tauri and Rust
 src-tauri/target/
 src-tauri/.cargo/
+
+# Local models and large binaries
+models/
+*.onnx
+*.bin

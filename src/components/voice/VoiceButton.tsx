@@ -1,6 +1,7 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Mic, MicOff, Square } from 'lucide-react';
+import { Mic, MicOff, Square, Infinity as InfinityIcon } from 'lucide-react';
+import { listen } from '@tauri-apps/api/event';
 import { cn } from '@/lib/utils';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -9,7 +10,7 @@ import { tauriApi } from '@/lib/tauri';
 interface VoiceButtonProps {
   currentInput?: string;
   onTranscript: (text: string) => void;
-  onAutoSend?: () => void;
+  onAutoSend?: (text?: string) => void;
   className?: string;
 }
 
@@ -41,7 +42,10 @@ const getSpeechRecognition = () => {
 
 export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onTranscript, onAutoSend, className }) => {
   const { status, setStatus, micAvailable, setMicAvailable, waveformData, updateWaveform } = useVoiceStore();
-  const { settings } = useSettingsStore();
+  const { settings, updateSettings } = useSettingsStore();
+
+  const isContinuousActive = Boolean(settings.continuous_voice);
+  const isPttMode = settings.ptt_mode && !isContinuousActive;
 
   const isRecording = status === 'recording';
   const isTranscribing = status === 'transcribing';
@@ -58,16 +62,16 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
 
   const onTranscriptRef = useRef(onTranscript);
   const onAutoSendRef = useRef(onAutoSend);
-  React.useEffect(() => { currentInputRef.current = currentInput; }, [currentInput]);
-  React.useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
-  React.useEffect(() => { onAutoSendRef.current = onAutoSend; }, [onAutoSend]);
+  useEffect(() => { currentInputRef.current = currentInput; }, [currentInput]);
+  useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
+  useEffect(() => { onAutoSendRef.current = onAutoSend; }, [onAutoSend]);
 
-  React.useEffect(() => {
+  useEffect(() => {
     setMicAvailable(true);
   }, [setMicAvailable]);
 
   // Cleanup on unmount
-  React.useEffect(() => {
+  useEffect(() => {
     return () => {
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
@@ -93,9 +97,6 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
   }, [updateWaveform]);
 
   // ─── macOS Path: Native Rust CoreAudio + Apple SFSpeechRecognizer ────────
-  // On macOS WKWebView, browser webkitSpeechRecognition crashes WKWebView.
-  // Instead, we capture audio natively via Rust (cpal) and transcribe it using
-  // Apple's built-in macOS SFSpeechRecognizer Swift engine. 100% native, zero crash.
   const startMacRecording = useCallback(async () => {
     if (isStartingRef.current || status === 'recording' || status === 'transcribing') return;
     isStartingRef.current = true;
@@ -124,12 +125,23 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
       const base64Wav = await tauriApi.stopRecording();
       if (base64Wav) {
         const text = await tauriApi.transcribeNative(base64Wav);
-        if (text && text.trim()) {
-          onTranscriptRef.current(text.trim());
+        const trimmed = text ? text.trim() : '';
+        if (trimmed) {
+          onTranscriptRef.current(trimmed);
+          onAutoSendRef.current?.(trimmed);
+        } else if (isContinuousActiveRef.current) {
           setTimeout(() => {
-            onAutoSendRef.current?.();
-          }, 100);
+            if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+              startRecordingRef.current();
+            }
+          }, 400);
         }
+      } else if (isContinuousActiveRef.current) {
+        setTimeout(() => {
+          if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+            startRecordingRef.current();
+          }
+        }, 400);
       }
     } catch (err: any) {
       console.error('[VoiceButton/Mac] Native STT error:', err);
@@ -158,7 +170,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
         if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
         silenceTimerRef.current = setTimeout(() => {
           if (recognitionRef.current) recognitionRef.current.stop();
-        }, 3500);
+        }, 1800);
       };
 
       rec.onstart = () => {
@@ -206,9 +218,13 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
         const textToSend = latestText.trim();
         if (textToSend) {
           onTranscriptRef.current(textToSend);
+          onAutoSendRef.current?.(textToSend);
+        } else if (isContinuousActiveRef.current) {
           setTimeout(() => {
-            onAutoSendRef.current?.();
-          }, 100);
+            if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+              startRecordingRef.current();
+            }
+          }, 400);
         }
       };
 
@@ -306,10 +322,64 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
     }
   }, [status, stopMacRecording, stopNativeRecording, stopBrowserRecording]);
 
+  // ─── Refs for event listeners ─────────────────────────────────────────────
+  const startRecordingRef = useRef(startRecording);
+  const stopRecordingRef = useRef(stopRecording);
+  const statusRef = useRef(status);
+  const isContinuousActiveRef = useRef(isContinuousActive);
+
+  useEffect(() => { startRecordingRef.current = startRecording; }, [startRecording]);
+  useEffect(() => { stopRecordingRef.current = stopRecording; }, [stopRecording]);
+  useEffect(() => { statusRef.current = status; }, [status]);
+  useEffect(() => { isContinuousActiveRef.current = isContinuousActive; }, [isContinuousActive]);
+
+  // ─── Listen for hardware silence detection from Rust CPAL (macOS) ─────────
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen('voice-silence-detected', () => {
+      if (statusRef.current === 'recording') {
+        stopRecordingRef.current();
+      }
+    }).then((fn) => { unlisten = fn; }).catch(() => {});
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // ─── Listen for AI speech playback complete for Continuous Hands-Free ──────
+  useEffect(() => {
+    const handlePlaybackComplete = () => {
+      if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+        // Natural conversational pause (400ms) before re-opening mic
+        setTimeout(() => {
+          if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+            startRecordingRef.current();
+          }
+        }, 400);
+      }
+    };
+
+    window.addEventListener('speech-playback-complete', handlePlaybackComplete);
+    return () => {
+      window.removeEventListener('speech-playback-complete', handlePlaybackComplete);
+    };
+  }, []);
+
+  // ─── If voice readout is turned off, disengage Continuous Mode and stop mic ─
+  useEffect(() => {
+    if (!settings.tts_enabled && isContinuousActive) {
+      updateSettings({ continuous_voice: false });
+      if (statusRef.current === 'recording') {
+        stopRecordingRef.current();
+      }
+    }
+  }, [settings.tts_enabled, isContinuousActive, updateSettings]);
+
   // ─── Interaction Handlers ─────────────────────────────────────────────────
 
   const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
-    if (!settings.ptt_mode) return;
+    if (!isPttMode) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
 
@@ -321,14 +391,14 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
-    if (!settings.ptt_mode) return;
+    if (!isPttMode) return;
     e.preventDefault();
     e.currentTarget.releasePointerCapture(e.pointerId);
     stopRecording();
   };
 
   const handleClick = (e: React.MouseEvent) => {
-    if (settings.ptt_mode) return;
+    if (isPttMode) return;
     e.preventDefault();
 
     if (isHandlingClick.current) return;
@@ -339,6 +409,28 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
       stopRecording();
     } else {
       startRecording();
+    }
+  };
+
+  const handleToggleContinuous = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const nextVal = !isContinuousActive;
+    updateSettings({
+      continuous_voice: nextVal,
+      ...(nextVal ? { tts_enabled: true } : {})
+    });
+
+    if (nextVal) {
+      if (status === 'idle') {
+        setTimeout(() => {
+          startRecording();
+        }, 100);
+      }
+    } else {
+      if (status === 'recording') {
+        stopRecording();
+      }
     }
   };
 
@@ -355,14 +447,14 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
   }
 
   return (
-    <div className={cn('relative flex items-center', className)}>
+    <div className={cn('relative flex items-center gap-1.5', className)}>
       <AnimatePresence>
         {isRecording && (
           <motion.div
             initial={{ opacity: 0, width: 0 }}
             animate={{ opacity: 1, width: 'auto' }}
             exit={{ opacity: 0, width: 0 }}
-            className="flex items-center gap-0.5 mr-2 overflow-hidden"
+            className="flex items-center gap-0.5 mr-1 overflow-hidden"
           >
             {waveformData.slice(0, 12).map((val, i) => (
               <motion.div
@@ -377,34 +469,61 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
         )}
       </AnimatePresence>
 
+      {/* Main Mic Toggle Button */}
       <motion.button
+        type="button"
         onPointerDown={handlePointerDown}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
         onClick={handleClick}
         whileTap={{ scale: 0.92 }}
         className={cn(
-          'p-2.5 rounded-xl transition-all duration-150',
+          'p-2 rounded-xl transition-all duration-150',
           isRecording
-            ? 'bg-red-500/20 text-red-400 border border-red-500/40 shadow-[0_0_12px_rgba(239,68,68,0.3)]'
+            ? 'bg-red-500/20 text-red-400 border border-red-500/40 shadow-[0_0_12px_rgba(239,68,68,0.3)] animate-pulse'
             : isTranscribing
             ? 'bg-violet-500/20 text-violet-400 border border-violet-500/40 animate-pulse-slow'
+            : isContinuousActive
+            ? 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/30'
             : 'text-zinc-400 hover:text-white hover:bg-white/8 border border-transparent'
         )}
         title={
           isRecording
-            ? (settings.ptt_mode ? 'Release to send' : 'Click to stop & send')
+            ? (isPttMode ? 'Release to send' : 'Listening... Click to finish speaking & send')
             : isTranscribing
-            ? 'Transcribing with Apple Speech…'
-            : (settings.ptt_mode ? 'Hold to record (PTT)' : 'Click to start recording')
+            ? 'Transcribing speech…'
+            : isContinuousActive
+            ? 'Continuous Voice ON: Click to talk / Click to stop'
+            : (isPttMode ? 'Hold to record (PTT)' : 'Click to start recording')
         }
       >
         {isRecording
-          ? <Square size={18} className="fill-red-400" />
+          ? <Square size={17} className="fill-red-400" />
           : isTranscribing
-          ? <Mic size={18} className="animate-pulse text-violet-400" />
-          : <Mic size={18} />
+          ? <Mic size={17} className="animate-pulse text-violet-400" />
+          : <Mic size={17} />
         }
+      </motion.button>
+
+      {/* Continuous Hands-Free Conversation Toggle Pill */}
+      <motion.button
+        type="button"
+        whileTap={{ scale: 0.94 }}
+        onClick={handleToggleContinuous}
+        className={cn(
+          'hidden sm:flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all select-none',
+          isContinuousActive
+            ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/35 shadow-[0_0_8px_rgba(16,185,129,0.2)] hover:bg-emerald-500/20'
+            : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5 border border-white/5'
+        )}
+        title={
+          isContinuousActive
+            ? 'Continuous Hands-Free Mode is ACTIVE: Morfeus automatically re-arms the microphone after speaking so you can reply without clicking. Click to turn off.'
+            : 'Click to enable Continuous Hands-Free Conversation (AI waits for your response)'
+        }
+      >
+        <InfinityIcon size={13} className={cn(isContinuousActive && 'text-emerald-400 animate-pulse')} />
+        <span>Continuous</span>
       </motion.button>
     </div>
   );

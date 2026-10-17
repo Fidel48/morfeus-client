@@ -56,10 +56,16 @@ pub async fn start_recording(
     let samples_ref = Arc::clone(&state.samples);
     let is_recording_ref = Arc::clone(&state.is_recording);
     let sample_rate_ref = Arc::clone(&state.sample_rate);
+    let app_handle = app.clone();
 
     let _ = app.emit("recording-started", ());
 
     std::thread::spawn(move || {
+        let speech_detected = Arc::new(Mutex::new(false));
+        let last_speech_time = Arc::new(Mutex::new(None::<std::time::Instant>));
+        let speech_detected_cb = Arc::clone(&speech_detected);
+        let last_speech_cb = Arc::clone(&last_speech_time);
+
         let host = cpal::default_host();
         let mut device_opt = host.default_input_device();
         
@@ -113,6 +119,18 @@ pub async fn start_recording(
                         }
                     }
                 }
+
+                // Voice Activity Detection (RMS energy)
+                let sum_sq: f32 = data.iter().map(|&x| x * x).sum();
+                let rms = (sum_sq / data.len().max(1) as f32).sqrt();
+                if rms > 0.010 {
+                    if let Ok(mut sd) = speech_detected_cb.lock() {
+                        *sd = true;
+                    }
+                    if let Ok(mut lst) = last_speech_cb.lock() {
+                        *lst = Some(std::time::Instant::now());
+                    }
+                }
             },
             |err| eprintln!("[morfeus] Stream error: {}", err),
             None,
@@ -132,10 +150,31 @@ pub async fn start_recording(
             return;
         }
 
+        let start_time = std::time::Instant::now();
+        let mut silence_emitted = false;
+
         loop {
             std::thread::sleep(std::time::Duration::from_millis(50));
             if let Ok(rec) = is_recording_ref.lock() {
                 if !*rec { break; }
+            }
+
+            // Check if speech was detected followed by 1600ms of silence
+            let has_spoken = speech_detected.lock().map(|g| *g).unwrap_or(false);
+            if has_spoken && !silence_emitted {
+                let last_time = last_speech_time.lock().map(|g| *g).unwrap_or(None);
+                if let Some(t) = last_time {
+                    if t.elapsed() >= std::time::Duration::from_millis(1600) {
+                        silence_emitted = true;
+                        let _ = app_handle.emit("voice-silence-detected", ());
+                    }
+                }
+            }
+
+            // Idle safety timeout: if mic stays open with no speech for 14s, auto-stop
+            if !has_spoken && !silence_emitted && start_time.elapsed() >= std::time::Duration::from_secs(14) {
+                silence_emitted = true;
+                let _ = app_handle.emit("voice-silence-detected", ());
             }
         }
     });
@@ -373,10 +412,227 @@ pub async fn stop_speaking() -> Result<(), String> {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn stop_speaking() -> Result<(), String> {
-    tokio::process::Command::new("killall")
-        .arg("say")
-        .spawn()
+    let _ = tokio::process::Command::new("killall").arg("afplay").output().await;
+    let _ = tokio::process::Command::new("killall").arg("say").output().await;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[tauri::command]
+pub async fn speak_text(text: String, _rate: Option<f64>, _voice_id: Option<String>) -> Result<(), String> {
+    let _ = tokio::process::Command::new("spd-say")
+        .arg(&text)
+        .spawn();
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[tauri::command]
+pub async fn get_voices() -> Result<Vec<String>, String> {
+    Ok(vec!["default".to_string()])
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[tauri::command]
+pub async fn stop_speaking() -> Result<(), String> {
+    let _ = tokio::process::Command::new("killall").arg("aplay").output().await;
+    let _ = tokio::process::Command::new("spd-say").arg("-S").output().await;
+    Ok(())
+}
+
+// ─── Kokoro Neural TTS Server & Playback ──────────────────────────────────────
+
+#[tauri::command]
+pub async fn is_kokoro_running() -> bool {
+    reqwest::Client::new()
+        .get("http://127.0.0.1:8880/health")
+        .timeout(std::time::Duration::from_millis(500))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn start_kokoro_server() -> Result<bool, String> {
+    if is_kokoro_running().await {
+        return Ok(true);
+    }
+
+    let uv_path = if std::path::Path::new("/opt/homebrew/bin/uv").exists() {
+        "/opt/homebrew/bin/uv"
+    } else {
+        "uv"
+    };
+
+    let script_candidates = [
+        "src-tauri/kokoro_server.py",
+        "kokoro_server.py",
+        "../src-tauri/kokoro_server.py",
+    ];
+
+    let mut script_path = None;
+    for candidate in &script_candidates {
+        if std::path::Path::new(candidate).exists() {
+            script_path = Some(candidate.to_string());
+            break;
+        }
+    }
+
+    let script = match script_path {
+        Some(s) => s,
+        None => return Err("kokoro_server.py not found".to_string()),
+    };
+
+    let mut cmd = tokio::process::Command::new(uv_path);
+    cmd.args([
+        "run",
+        "--with", "kokoro-onnx",
+        "--with", "soundfile",
+        "--with", "fastapi",
+        "--with", "uvicorn",
+        "python3",
+        &script,
+    ]);
+
+    cmd.spawn().map_err(|e| format!("Failed to spawn Kokoro server: {}", e))?;
+
+    // Wait up to 6 seconds for server to be healthy
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if is_kokoro_running().await {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+#[tauri::command]
+pub async fn kokoro_speak_native(
+    text: String,
+    voice: Option<String>,
+    speed: Option<f64>,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let payload = serde_json::json!({
+        "input": text,
+        "voice": voice.unwrap_or_else(|| "af_heart".to_string()),
+        "speed": speed.unwrap_or(1.0)
+    });
+
+    let resp = client
+        .post("http://127.0.0.1:8880/v1/audio/speech")
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("Kokoro request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Kokoro returned status {}", resp.status()));
+    }
+
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+
+    let temp_file_name = format!("morfeus_tts_{}.wav", uuid::Uuid::new_v4());
+    let temp_path = std::env::temp_dir().join(temp_file_name);
+    tokio::fs::write(&temp_path, &bytes)
+        .await
         .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = tokio::process::Command::new("afplay")
+            .arg(&temp_path)
+            .status()
+            .await;
+        let _ = tokio::fs::remove_file(&temp_path).await;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let script = format!(
+            r#"(New-Object Media.SoundPlayer '{}').PlaySync()"#,
+            temp_path.to_string_lossy().replace('\'', "''")
+        );
+        let _ = tokio::process::Command::new("powershell")
+            .args(["-WindowStyle", "Hidden", "-Command", &script])
+            .status()
+            .await;
+        let _ = tokio::fs::remove_file(&temp_path).await;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = tokio::process::Command::new("aplay")
+            .arg(&temp_path)
+            .status()
+            .await;
+        let _ = tokio::fs::remove_file(&temp_path).await;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn kokoro_preview_native(
+    voice: String,
+    speed: Option<f64>,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let payload = serde_json::json!({
+        "voice": voice,
+        "speed": speed.unwrap_or(1.0)
+    });
+
+    let resp = client
+        .post("http://127.0.0.1:8880/preview")
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Kokoro preview failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Kokoro returned status {}", resp.status()));
+    }
+
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+
+    let temp_path = std::env::temp_dir().join("morfeus_preview.wav");
+    tokio::fs::write(&temp_path, &bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = tokio::process::Command::new("killall").arg("afplay").output().await;
+        tokio::process::Command::new("afplay")
+            .arg(&temp_path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let script = format!(
+            r#"(New-Object Media.SoundPlayer '{}').Play()"#,
+            temp_path.to_string_lossy().replace('\'', "''")
+        );
+        let _ = tokio::process::Command::new("powershell")
+            .args(["-WindowStyle", "Hidden", "-Command", &script])
+            .spawn();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = tokio::process::Command::new("killall").arg("aplay").output().await;
+        let _ = tokio::process::Command::new("aplay")
+            .arg(&temp_path)
+            .spawn();
+    }
+
     Ok(())
 }
 

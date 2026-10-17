@@ -227,3 +227,24 @@ pub async fn mcp_call_tool(
         Err(format!("No active MCP server for id: {}", id))
     }
 }
+
+#[command]
+pub async fn mcp_stop_server(
+    id: String,
+    state: State<'_, McpState>,
+) -> Result<(), String> {
+    let mut clients = state.clients.lock().await;
+    if clients.remove(&id).is_some() {
+        Ok(())
+    } else {
+        Err(format!("No active MCP server for id: {}", id))
+    }
+}
+
+#[command]
+pub async fn mcp_list_active_servers(
+    state: State<'_, McpState>,
+) -> Result<Vec<String>, String> {
+    let clients = state.clients.lock().await;
+    Ok(clients.keys().cloned().collect())
+}

@@ -12,6 +12,7 @@ export interface Message {
   conversation_id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
   content?: string;
+  reasoning?: string;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   created_at: number;
@@ -47,6 +48,8 @@ export interface AppSettings {
   base_url: string;
   api_key: string;
   model_id: string;
+  fast_chat_model_id?: string;
+  agent_coder_model_id?: string;
   temperature: number;
   top_p: number;
   max_tokens: number;
@@ -59,7 +62,40 @@ export interface AppSettings {
   tts_volume: number;
   stt_model_path: string;
   ptt_mode: boolean;
+  continuous_voice?: boolean;
+  think_enabled?: boolean;
   debug_mode?: boolean;
+}
+
+// ── MCP Server Management ─────────────────────────────────────────────────────
+
+/** Runtime connection status of an MCP server. */
+export type McpServerStatus = 'connected' | 'connecting' | 'error' | 'disabled';
+
+/** A discovered tool schema returned by an MCP server. */
+export interface McpToolInfo {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+}
+
+/**
+ * Persistent configuration for one MCP server.
+ * Stored in settingsStore and persisted via @tauri-apps/plugin-store.
+ */
+export interface McpServerConfig {
+  id: string;                        // Unique slug, e.g. "freecad", "github"
+  name: string;                      // Display name, e.g. "FreeCAD MCP"
+  transport?: 'stdio' | 'sse';       // Transport type (default stdio)
+  command: string;                   // Process executable, e.g. "python" or "npx"
+  args: string[];                    // CLI arguments, e.g. ["-m", "freecad_mcp"]
+  env: Record<string, string>;       // Optional environment variables
+  url?: string;                      // SSE URL if transport is sse
+  enabled: boolean;                  // Toggle on/off
+  // ── Runtime state (NOT persisted) ──
+  status?: McpServerStatus;
+  tools?: McpToolInfo[];
+  errorMessage?: string;
 }
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
@@ -74,6 +110,8 @@ export interface StreamChunk {
     delta: {
       role?: string;
       content?: string;
+      reasoning?: string;
+      reasoning_content?: string;
       tool_calls?: ToolCallDelta[];
     };
     finish_reason: string | null;
@@ -116,3 +154,4 @@ export interface ToolDefinition {
 
 export type VoiceStatus = 'idle' | 'recording' | 'transcribing' | 'speaking';
 export type ChatStatus = 'idle' | 'thinking' | 'streaming' | 'calling-tool' | 'tool-result';
+export type ChatMode = 'fast' | 'agent';

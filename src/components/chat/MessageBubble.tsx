@@ -3,9 +3,39 @@ import { motion } from 'framer-motion';
 import { Message } from '@/types';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { cn } from '@/lib/utils';
-import { Bot, User, Wrench, Globe, FileText, Search, Folder, Video, Terminal, Copy, VolumeX } from 'lucide-react';
+import { Bot, User, Wrench, Globe, FileText, Search, Folder, Video, Terminal, Copy, VolumeX, Sparkles, ChevronDown } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { tauriApi } from '@/lib/tauri';
+
+const ReasoningBlock: React.FC<{ reasoning: string; isLive?: boolean }> = ({ reasoning, isLive }) => {
+  const [isOpen, setIsOpen] = React.useState(Boolean(isLive));
+
+  React.useEffect(() => {
+    if (isLive) {
+      setIsOpen(true);
+    }
+  }, [isLive]);
+
+  return (
+    <div className="mb-2.5 rounded-xl bg-violet-950/20 border border-violet-500/20 overflow-hidden text-xs">
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center gap-2 px-3 py-1.5 text-violet-300/90 hover:text-violet-200 hover:bg-violet-500/10 transition-colors select-none text-left"
+      >
+        <Sparkles size={12} className={cn("text-violet-400 flex-shrink-0", isLive && "animate-spin")} style={{ animationDuration: '3s' }} />
+        <span className="font-medium font-sans text-xs">{isLive ? "Thinking…" : "Thought process"}</span>
+        <ChevronDown size={12} className={cn("ml-auto transition-transform duration-200 text-zinc-400", isOpen && "rotate-180")} />
+      </button>
+
+      {isOpen && (
+        <div className="px-3 pb-2.5 pt-1 border-t border-violet-500/10 font-mono text-[11px] text-zinc-400 whitespace-pre-wrap leading-relaxed max-h-52 overflow-y-auto select-text">
+          {reasoning}
+        </div>
+      )}
+    </div>
+  );
+};
 
 interface MessageBubbleProps {
   message: Message;
@@ -76,77 +106,84 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
         >
           {isUser ? (
             <p className="whitespace-pre-wrap break-words">{message.content}</p>
-          ) : message.tool_calls && message.tool_calls.length > 0 ? (
-            <div className="flex flex-col gap-2">
-              {message.content && <MarkdownRenderer content={message.content} />}
-              {message.tool_calls.map((tc, idx) => {
-                const toolName = tc.function?.name;
-                let text = `Tool: ${toolName || 'unknown'}`;
-                let Icon = Wrench;
-                
-                if (toolName === 'web_search' || toolName === 'read_webpage') {
-                  let queryDisplay = '';
-                  try {
-                    const parsed = JSON.parse(tc.function?.arguments || '{}');
-                    queryDisplay = parsed.query || parsed.url || '';
-                  } catch {
-                    queryDisplay = tc.function?.arguments || '';
-                  }
-
-                  return (
-                    <div key={idx} className="flex items-center gap-2.5 text-xs text-violet-300 bg-violet-950/50 border border-violet-500/30 px-3.5 py-1.5 rounded-full w-fit shadow-md shadow-violet-950/30 animate-pulse">
-                      <Globe size={13} className="text-violet-400 animate-spin" style={{ animationDuration: '3s' }} />
-                      <span className="font-mono text-[11px] font-semibold text-violet-200">Web Search</span>
-                      {queryDisplay && (
-                        <span className="text-[10px] text-zinc-400 max-w-xs truncate border-l border-violet-500/30 pl-2 font-mono">
-                          {queryDisplay}
-                        </span>
-                      )}
-                    </div>
-                  );
-                }
-
-                if (toolName === 'read_youtube_video') {
-                  text = 'Read YouTube Video';
-                  Icon = Video;
-                } else if (toolName === 'search_files') {
-                  text = 'Search Files';
-                  Icon = Search;
-                } else if (toolName === 'list_directory' || toolName === 'get_special_dirs') {
-                  text = 'Browse Directory';
-                  Icon = Folder;
-                } else if (toolName === 'read_local_file') {
-                  text = 'Read Local File';
-                  Icon = FileText;
-                } else if (toolName?.startsWith('lsp_')) {
-                  text = `LSP: ${toolName.replace('lsp_', '')}`;
-                  Icon = Terminal;
-                } else if (toolName?.startsWith('mcp')) {
-                  text = `MCP: ${toolName}`;
-                  Icon = Wrench;
-                }
-
-                return (
-                  <div key={idx} className="flex items-center gap-2 text-xs text-violet-300 bg-violet-950/40 px-3 py-1.5 rounded-full border border-violet-500/20 w-fit shadow-sm">
-                    <Icon size={12} className="text-violet-400" />
-                    <span className="font-mono text-[11px] font-semibold">{text}</span>
-                    {tc.function?.arguments && (
-                      <span className="text-[10px] text-zinc-400 max-w-xs truncate border-l border-white/10 pl-2">
-                        {tc.function.arguments}
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          ) : message.content ? (
-            <MarkdownRenderer content={message.content} />
           ) : (
-            <div className="flex flex-col items-center gap-2 text-zinc-400 py-2">
-              <span className="text-xs">⚠️ The model returned an empty response.</span>
-              <span className="text-[10px] text-zinc-500 text-center max-w-[200px]">
-                This usually happens if the conversation exceeded the local model's maximum context length limit, causing it to crash.
-              </span>
+            <div className="flex flex-col gap-2">
+              {message.reasoning && (
+                <ReasoningBlock reasoning={message.reasoning} isLive={false} />
+              )}
+              {message.tool_calls && message.tool_calls.length > 0 ? (
+                <div className="flex flex-col gap-2">
+                  {message.content && <MarkdownRenderer content={message.content} />}
+                  {message.tool_calls.map((tc, idx) => {
+                    const toolName = tc.function?.name;
+                    let text = `Tool: ${toolName || 'unknown'}`;
+                    let Icon = Wrench;
+                    
+                    if (toolName === 'web_search' || toolName === 'read_webpage') {
+                      let queryDisplay = '';
+                      try {
+                        const parsed = JSON.parse(tc.function?.arguments || '{}');
+                        queryDisplay = parsed.query || parsed.url || '';
+                      } catch {
+                        queryDisplay = tc.function?.arguments || '';
+                      }
+
+                      return (
+                        <div key={idx} className="flex items-center gap-2.5 text-xs text-violet-300 bg-violet-950/50 border border-violet-500/30 px-3.5 py-1.5 rounded-full w-fit shadow-md shadow-violet-950/30 animate-pulse">
+                          <Globe size={13} className="text-violet-400 animate-spin" style={{ animationDuration: '3s' }} />
+                          <span className="font-mono text-[11px] font-semibold text-violet-200">Web Search</span>
+                          {queryDisplay && (
+                            <span className="text-[10px] text-zinc-400 max-w-xs truncate border-l border-violet-500/30 pl-2 font-mono">
+                              {queryDisplay}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    }
+
+                    if (toolName === 'read_youtube_video') {
+                      text = 'Read YouTube Video';
+                      Icon = Video;
+                    } else if (toolName === 'search_files') {
+                      text = 'Search Files';
+                      Icon = Search;
+                    } else if (toolName === 'list_directory' || toolName === 'get_special_dirs') {
+                      text = 'Browse Directory';
+                      Icon = Folder;
+                    } else if (toolName === 'read_local_file') {
+                      text = 'Read Local File';
+                      Icon = FileText;
+                    } else if (toolName?.startsWith('lsp_')) {
+                      text = `LSP: ${toolName.replace('lsp_', '')}`;
+                      Icon = Terminal;
+                    } else if (toolName?.startsWith('mcp')) {
+                      text = `MCP: ${toolName}`;
+                      Icon = Wrench;
+                    }
+
+                    return (
+                      <div key={idx} className="flex items-center gap-2 text-xs text-violet-300 bg-violet-950/40 px-3 py-1.5 rounded-full border border-violet-500/20 w-fit shadow-sm">
+                        <Icon size={12} className="text-violet-400" />
+                        <span className="font-mono text-[11px] font-semibold">{text}</span>
+                        {tc.function?.arguments && (
+                          <span className="text-[10px] text-zinc-400 max-w-xs truncate border-l border-white/10 pl-2">
+                            {tc.function.arguments}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : message.content ? (
+                <MarkdownRenderer content={message.content} />
+              ) : (
+                <div className="flex flex-col items-center gap-2 text-zinc-400 py-2">
+                  <span className="text-xs">⚠️ The model returned an empty response.</span>
+                  <span className="text-[10px] text-zinc-500 text-center max-w-[200px]">
+                    This usually happens if the conversation exceeded the local model's maximum context length limit, causing it to crash.
+                  </span>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -188,9 +225,10 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
 
 interface StreamingMessageProps {
   content: string;
+  reasoning?: string;
 }
 
-export const StreamingMessage: React.FC<StreamingMessageProps> = ({ content }) => {
+export const StreamingMessage: React.FC<StreamingMessageProps> = ({ content, reasoning }) => {
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -203,15 +241,19 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({ content }) =
 
       <div className="flex-1 min-w-0 flex flex-col items-start">
         <div className="px-4 py-3 rounded-2xl rounded-tl-sm text-sm leading-relaxed bg-zinc-900/60 border border-white/8 text-zinc-100 w-full">
+          {reasoning && (
+            <ReasoningBlock reasoning={reasoning} isLive={!content} />
+          )}
+
           {content ? (
             <MarkdownRenderer content={content} />
-          ) : (
+          ) : !reasoning ? (
             <div className="flex gap-1 py-1">
               <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 animate-bounce" style={{ animationDelay: '0ms' }} />
               <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 animate-bounce" style={{ animationDelay: '150ms' }} />
               <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 animate-bounce" style={{ animationDelay: '300ms' }} />
             </div>
-          )}
+          ) : null}
           {content && (
             <span className="inline-block w-0.5 h-4 bg-violet-400 ml-0.5 animate-blink align-middle" />
           )}

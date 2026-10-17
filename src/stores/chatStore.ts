@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage, StateStorage } from 'zustand/middleware';
 import { LazyStore } from '@tauri-apps/plugin-store';
-import { Conversation, Message, ChatStatus, ToolCall, ToolCallDelta } from '@/types';
+import { Conversation, Message, ChatStatus, ToolCall, ToolCallDelta, ChatMode } from '@/types';
 import { generateId } from '@/lib/utils';
 
 export interface PendingToolApproval {
@@ -43,6 +43,7 @@ interface ChatStore {
   activeConversationId: string | null;
   messages: Message[];
   streamingContent: string;
+  streamingReasoning: string;
   streamingToolCalls: ToolCallDelta[];
   isStreaming: boolean;
   chatStatus: ChatStatus;
@@ -50,6 +51,7 @@ interface ChatStore {
   rightPanelOpen: boolean;
   activeMcpServers: string[];
   isAgenticMode: boolean;
+  chatMode: ChatMode;
   pendingApproval: PendingToolApproval | null;
 
   // Actions
@@ -61,6 +63,7 @@ interface ChatStore {
   setMessages: (messages: Message[]) => void;
   addMessage: (message: Message) => void;
   appendStreamToken: (token: string) => void;
+  appendReasoningToken: (token: string) => void;
   appendToolCallDelta: (toolCallsDelta: ToolCallDelta[]) => void;
   finalizeStreamMessage: (conversationId: string) => Message;
   clearStreamingContent: () => void;
@@ -72,6 +75,7 @@ interface ChatStore {
   toggleRightPanel: () => void;
   addMcpServer: (id: string) => void;
   setIsAgenticMode: (isAgentic: boolean) => void;
+  setChatMode: (mode: ChatMode) => void;
   setPendingApproval: (approval: PendingToolApproval | null) => void;
 }
 
@@ -82,6 +86,7 @@ export const useChatStore = create<ChatStore>()(
       activeConversationId: null,
       messages: [],
       streamingContent: '',
+      streamingReasoning: '',
       streamingToolCalls: [],
       isStreaming: false,
       chatStatus: 'idle',
@@ -89,6 +94,7 @@ export const useChatStore = create<ChatStore>()(
       rightPanelOpen: false,
       activeMcpServers: [],
       isAgenticMode: false,
+      chatMode: 'fast',
       pendingApproval: null,
 
       setConversations: (conversations) => set({ conversations }),
@@ -122,6 +128,9 @@ export const useChatStore = create<ChatStore>()(
 
       appendStreamToken: (token) =>
         set((state) => ({ streamingContent: state.streamingContent + token })),
+
+      appendReasoningToken: (token) =>
+        set((state) => ({ streamingReasoning: state.streamingReasoning + token })),
 
       appendToolCallDelta: (toolCallsDelta) =>
         set((state) => {
@@ -158,7 +167,7 @@ export const useChatStore = create<ChatStore>()(
         }),
 
       finalizeStreamMessage: (conversationId) => {
-        const { streamingContent, streamingToolCalls } = get();
+        const { streamingContent, streamingReasoning, streamingToolCalls } = get();
         
         // Convert Partial<ToolCall>[] to ToolCall[] if they are complete enough
         const tool_calls = streamingToolCalls.length > 0 
@@ -173,18 +182,20 @@ export const useChatStore = create<ChatStore>()(
           conversation_id: conversationId,
           role: 'assistant',
           content,
+          reasoning: streamingReasoning || undefined,
           tool_calls,
           created_at: Date.now(),
         };
         set((state) => ({
           messages: [...state.messages, message],
           streamingContent: '',
+          streamingReasoning: '',
           streamingToolCalls: [],
         }));
         return message;
       },
 
-      clearStreamingContent: () => set({ streamingContent: '', streamingToolCalls: [] }),
+      clearStreamingContent: () => set({ streamingContent: '', streamingReasoning: '', streamingToolCalls: [] }),
 
       setIsStreaming: (isStreaming) => set({ isStreaming }),
 
@@ -215,6 +226,7 @@ export const useChatStore = create<ChatStore>()(
           conversations: [conversation, ...get().conversations],
           activeConversationId: conversation.id,
           streamingContent: '',
+          streamingReasoning: '',
           streamingToolCalls: [],
           chatStatus: 'idle',
         });
@@ -224,10 +236,13 @@ export const useChatStore = create<ChatStore>()(
       toggleRightPanel: () => set((state) => ({ rightPanelOpen: !state.rightPanelOpen })),
       addMcpServer: (id) =>
         set((state) => ({
-          activeMcpServers: [...new Set([...state.activeMcpServers, id])],
+          activeMcpServers: state.activeMcpServers.includes(id)
+            ? state.activeMcpServers
+            : [...state.activeMcpServers, id],
         })),
 
-      setIsAgenticMode: (isAgenticMode) => set({ isAgenticMode }),
+      setIsAgenticMode: (isAgenticMode) => set({ isAgenticMode, chatMode: isAgenticMode ? 'agent' : 'fast' }),
+      setChatMode: (chatMode) => set({ chatMode, isAgenticMode: chatMode === 'agent' }),
       setPendingApproval: (pendingApproval) => set({ pendingApproval }),
     }),
     {
@@ -243,6 +258,7 @@ export const useChatStore = create<ChatStore>()(
         }),
         activeConversationId: state.activeConversationId,
         rightPanelOpen: state.rightPanelOpen,
+        chatMode: state.chatMode,
       }),
     }
   )

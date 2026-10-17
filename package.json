@@ -24,6 +24,7 @@
     "date-fns": "^4.4.0",
     "framer-motion": "^12.42.2",
     "highlight.js": "^11.11.1",
+    "kokoro-js": "^1.2.1",
     "lucide-react": "^1.23.0",
     "pdfjs-dist": "^6.1.200",
     "react": "^19.1.0",

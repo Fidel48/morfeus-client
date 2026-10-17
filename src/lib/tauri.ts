@@ -111,6 +111,37 @@ export const tauriApi = {
     }
   },
 
+  /** Check if local Kokoro neural TTS server is running */
+  async isKokoroRunning(): Promise<boolean> {
+    if (isTauri) {
+      return tauriInvoke<boolean>('is_kokoro_running');
+    }
+    return false;
+  },
+
+  /** Launch or ensure Kokoro neural TTS server is running */
+  async startKokoroServer(): Promise<boolean> {
+    if (isTauri) {
+      return tauriInvoke<boolean>('start_kokoro_server');
+    }
+    return false;
+  },
+
+  /** Synthesize and speak text using local Kokoro neural TTS (afplay native audio) */
+  async kokoroSpeak(text: string, voice?: string, speed?: number): Promise<void> {
+    if (isTauri) {
+      return tauriInvoke('kokoro_speak_native', { text, voice: voice ?? null, speed: speed ?? null });
+    }
+    return this.speakText(text, speed, voice);
+  },
+
+  /** Play a short preview phrase using the chosen Kokoro voice */
+  async kokoroPreview(voice: string, speed?: number): Promise<void> {
+    if (isTauri) {
+      return tauriInvoke('kokoro_preview_native', { voice, speed: speed ?? null });
+    }
+  },
+
   async webSearch(query: string): Promise<any[]> {
     return tauriInvoke<any[]>('search_duckduckgo', { query });
   },
@@ -224,6 +255,16 @@ export const tauriApi = {
   /** Call a tool on an MCP server */
   async mcpCallTool(id: string, toolName: string, argumentsObj: any): Promise<any> {
     return tauriInvoke('mcp_call_tool', { id, toolName, arguments: argumentsObj });
+  },
+
+  /** Stop / disconnect an active MCP server process */
+  async mcpStopServer(id: string): Promise<void> {
+    return tauriInvoke('mcp_stop_server', { id });
+  },
+
+  /** List IDs of all currently active (spawned) MCP server processes */
+  async mcpListActiveServers(): Promise<string[]> {
+    return tauriInvoke<string[]>('mcp_list_active_servers');
   },
 
   /** Run an inline Python code snippet. Returns stdout, stderr, exit_code, success. */

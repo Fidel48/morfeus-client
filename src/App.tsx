@@ -4,10 +4,11 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { ChatWindow } from '@/components/chat/ChatWindow';
 import { RightPanel } from '@/components/layout/RightPanel';
 import { SettingsModal } from '@/components/settings/SettingsModal';
-import { FloatingWidget } from '@/components/chat/FloatingWidget';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useVoiceStore } from '@/stores/voiceStore';
+import { useMcpStore } from '@/stores/mcpStore';
 import { tauriApi } from '@/lib/tauri';
+import { preloadKokoroEngine } from '@/lib/kokoroTts';
 import { check } from '@tauri-apps/plugin-updater';
 import { ask } from '@tauri-apps/plugin-dialog';
 import { relaunch } from '@tauri-apps/plugin-process';
@@ -24,6 +25,7 @@ const queryClient = new QueryClient({
 const AppContent: React.FC = () => {
   const { loadFromBackend } = useSettingsStore();
   const { setMicAvailable, setAvailableVoices } = useVoiceStore();
+  const { initAllServers } = useMcpStore();
 
   useEffect(() => {
     // Load settings from Tauri backend on startup
@@ -38,6 +40,17 @@ const AppContent: React.FC = () => {
     tauriApi.getVoices()
       .then(setAvailableVoices)
       .catch(() => {});
+
+    // Auto-connect all enabled MCP servers on startup
+    if (tauriApi.isDesktopApp()) {
+      initAllServers().catch(console.error);
+    }
+
+    // Auto-start Kokoro Neural TTS server on desktop launch
+    if (tauriApi.isDesktopApp()) {
+      tauriApi.startKokoroServer().catch(console.error);
+    }
+
 
     // Check for OTA updates automatically
     if (tauriApi.isDesktopApp()) {
@@ -101,8 +114,6 @@ const AppContent: React.FC = () => {
       {/* Settings Modal */}
       <SettingsModal />
 
-      {/* Floating Agentic UI */}
-      <FloatingWidget />
     </div>
   );
 };

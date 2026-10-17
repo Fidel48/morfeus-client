@@ -26,6 +26,10 @@ pub struct AppSettings {
     pub base_url: String,
     pub api_key: String,
     pub model_id: String,
+    #[serde(default)]
+    pub fast_chat_model_id: Option<String>,
+    #[serde(default)]
+    pub agent_coder_model_id: Option<String>,
     pub temperature: f64,
     pub top_p: f64,
     pub max_tokens: i64,
@@ -39,6 +43,8 @@ pub struct AppSettings {
     pub stt_model_path: String,
     pub ptt_mode: bool,
     #[serde(default)]
+    pub think_enabled: Option<bool>,
+    #[serde(default)]
     pub debug_mode: bool,
 }
 
@@ -48,6 +54,8 @@ impl Default for AppSettings {
             base_url: "http://localhost:1234/v1".to_string(),
             api_key: String::new(),
             model_id: String::new(),
+            fast_chat_model_id: None,
+            agent_coder_model_id: None,
             temperature: 0.7,
             top_p: 1.0,
             max_tokens: 2048,
@@ -60,6 +68,7 @@ impl Default for AppSettings {
             tts_volume: 1.0,
             stt_model_path: String::new(),
             ptt_mode: true,
+            think_enabled: Some(true),
             debug_mode: false,
         }
     }
