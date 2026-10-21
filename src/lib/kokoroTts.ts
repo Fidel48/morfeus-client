@@ -95,18 +95,33 @@ export async function ensureKokoroServer(): Promise<boolean> {
  * Clean markdown symbols from text so it reads naturally.
  */
 function cleanTextForSpeech(text: string): string {
+  // If the text is purely a Sources / Resources heading or bullet point, skip speaking
+  if (/^(?:#+\s*)?(?:Sources|Resources|References|Source Links|Citations)[\s:]*$/i.test(text.trim())) {
+    return '';
+  }
+  // If text is a source list entry like "1. [Title](url)" or "- [Title](url)" or purely a URL, skip speaking
+  if (/^[-*0-9.]+\s*\[[^\]]+\]\(https?:\/\/[^)]+\)/i.test(text.trim()) || /^https?:\/\/\S+$/i.test(text.trim())) {
+    return '';
+  }
+
   let cleaned = text
     .replace(/```[\s\S]*?```/g, '') // Remove code blocks
     .replace(/`[^`]+`/g, '')        // Remove inline code
+    .replace(/https?:\/\/\S+/gi, '') // Strip raw URLs so they are not spoken aloud
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Links → title text only
     .replace(/\*\*([^*]+)\*\*/g, '$1') // Bold → plain
     .replace(/\*([^*]+)\*/g, '$1')    // Italic → plain
     .replace(/#+\s/g, '')            // Headings → plain
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Links → text only
     .replace(/>\s/g, '')             // Blockquotes
     .replace(/[-*+]\s/g, '')         // List bullets
     .replace(/\n{2,}/g, '. ')        // Double newlines → pause
     .replace(/\n/g, ' ')
     .trim();
+
+  // If after stripping URLs nothing or only punctuation/numbers remain, skip
+  if (/^[\s\d.,:;!?()[\]{}"'\\/-]*$/.test(cleaned)) {
+    return '';
+  }
 
   return cleaned;
 }
@@ -178,6 +193,8 @@ export class SpeechQueue {
   private aborted = false;
   private textBuffer = '';
   private isFlushed = false;
+  private reachedResources = false;
+  private generation = 0;
 
   constructor(voice: string = DEFAULT_KOKORO_VOICE, rate: number = 1.0) {
     this.voice = voice;
@@ -197,9 +214,20 @@ export class SpeechQueue {
    * Extracts completed sentences and queues them for immediate playback.
    */
   public feedToken(token: string) {
-    if (this.aborted) return;
+    if (this.aborted || this.reachedResources) return;
     this.isFlushed = false;
     this.textBuffer += token;
+
+    // Detect if model transitioned into the Sources/Resources/References section
+    const resourcesIndex = this.textBuffer.search(/\n(?:\s*[-*#]+\s*)?(?:Sources|Resources|References|Source Links|Citations):?/i);
+    if (resourcesIndex !== -1) {
+      // Discard text from sources onwards for speech
+      this.textBuffer = this.textBuffer.slice(0, resourcesIndex);
+      this.reachedResources = true;
+      this.extractSentences(true);
+      return;
+    }
+
     this.extractSentences(false);
   }
 
@@ -279,32 +307,40 @@ export class SpeechQueue {
   private async processQueue() {
     if (this.isProcessing || this.aborted) return;
     this.isProcessing = true;
+    const currentGen = this.generation;
 
-    while (this.queue.length > 0 && !this.aborted) {
+    while (this.queue.length > 0 && !this.aborted && this.generation === currentGen) {
       const sentence = this.queue.shift();
       if (!sentence) continue;
 
       try {
         await tauriApi.kokoroSpeak(sentence, this.voice, this.rate);
       } catch (err) {
+        if (this.aborted || this.generation !== currentGen) return;
         console.warn('[SpeechQueue] Kokoro speak failed, fallback to native:', err);
         try {
           await tauriApi.speakText(sentence, this.rate, this.voice);
         } catch { /* ignore */ }
       }
+
+      if (this.aborted || this.generation !== currentGen) break;
     }
 
-    this.isProcessing = false;
+    if (this.generation === currentGen) {
+      this.isProcessing = false;
+    }
 
-    if (this.isFlushed && this.queue.length === 0 && !this.aborted) {
+    if (this.isFlushed && this.queue.length === 0 && !this.aborted && this.generation === currentGen) {
       this.isFlushed = false;
       this.notifyPlaybackComplete();
     }
   }
 
   public stop() {
+    this.generation++;
     this.aborted = true;
     this.isFlushed = false;
+    this.reachedResources = false;
     this.queue = [];
     this.textBuffer = '';
     this.isProcessing = false;
@@ -312,8 +348,10 @@ export class SpeechQueue {
   }
 
   public reset() {
+    this.generation++;
     this.aborted = false;
     this.isFlushed = false;
+    this.reachedResources = false;
     this.queue = [];
     this.textBuffer = '';
     this.isProcessing = false;

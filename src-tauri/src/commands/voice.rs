@@ -1,8 +1,11 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
 use std::io::Cursor;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
+
+static SPEECH_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Shared recording buffer managed as Tauri app state
 pub struct RecordingBuffer {
@@ -397,6 +400,7 @@ pub async fn get_voices() -> Result<Vec<String>, String> {
 #[cfg(target_os = "windows")]
 #[tauri::command]
 pub async fn stop_speaking() -> Result<(), String> {
+    SPEECH_GENERATION.fetch_add(1, Ordering::SeqCst);
     tokio::process::Command::new("powershell")
         .args([
             "-WindowStyle",
@@ -412,6 +416,7 @@ pub async fn stop_speaking() -> Result<(), String> {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn stop_speaking() -> Result<(), String> {
+    SPEECH_GENERATION.fetch_add(1, Ordering::SeqCst);
     let _ = tokio::process::Command::new("killall").arg("afplay").output().await;
     let _ = tokio::process::Command::new("killall").arg("say").output().await;
     Ok(())
@@ -435,6 +440,7 @@ pub async fn get_voices() -> Result<Vec<String>, String> {
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[tauri::command]
 pub async fn stop_speaking() -> Result<(), String> {
+    SPEECH_GENERATION.fetch_add(1, Ordering::SeqCst);
     let _ = tokio::process::Command::new("killall").arg("aplay").output().await;
     let _ = tokio::process::Command::new("spd-say").arg("-S").output().await;
     Ok(())
@@ -514,6 +520,7 @@ pub async fn kokoro_speak_native(
     voice: Option<String>,
     speed: Option<f64>,
 ) -> Result<(), String> {
+    let gen = SPEECH_GENERATION.load(Ordering::SeqCst);
     let client = reqwest::Client::new();
     let payload = serde_json::json!({
         "input": text,
@@ -533,13 +540,26 @@ pub async fn kokoro_speak_native(
         return Err(format!("Kokoro returned status {}", resp.status()));
     }
 
+    if SPEECH_GENERATION.load(Ordering::SeqCst) != gen {
+        return Ok(());
+    }
+
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+
+    if SPEECH_GENERATION.load(Ordering::SeqCst) != gen {
+        return Ok(());
+    }
 
     let temp_file_name = format!("morfeus_tts_{}.wav", uuid::Uuid::new_v4());
     let temp_path = std::env::temp_dir().join(temp_file_name);
     tokio::fs::write(&temp_path, &bytes)
         .await
         .map_err(|e| e.to_string())?;
+
+    if SPEECH_GENERATION.load(Ordering::SeqCst) != gen {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Ok(());
+    }
 
     #[cfg(target_os = "macos")]
     {

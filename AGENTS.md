@@ -86,6 +86,7 @@ morfeus/
 - **v0.1.26**: Visual image attachment thumbnails in chat input and rendering inside user message bubbles.
 - **v0.1.27**: Dual Fast Chat / Agent Coder modes, local Kokoro neural TTS, hands-free Continuous voice with voice toggle relocation, MCP server manager, and multiplatform CI matrix (Windows, macOS, Ubuntu Linux).
 - **v0.1.28**: In-place floating model selector popover on bottom toolbar with instant switching, search filter, and unrestricted model selection across Fast Chat and Agent Coder.
+- **v0.1.29**: Multi-provider settings catalog (Ollama, LM Studio, OpenRouter, DeepSeek, OpenAI, Groq), selective model search picker, strict chat popover scoping to user-configured models, removal of hardcoded model assignments and defaults, enhanced web search synthesis with top-article auto-retrieval and Google News RSS fallback, speech interruption and cancellation fixes with default-off voice readout, and markdown wrapping overflow fixes.
 
 ---
 

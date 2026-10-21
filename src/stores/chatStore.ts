@@ -3,6 +3,9 @@ import { persist, createJSONStorage, StateStorage } from 'zustand/middleware';
 import { LazyStore } from '@tauri-apps/plugin-store';
 import { Conversation, Message, ChatStatus, ToolCall, ToolCallDelta, ChatMode } from '@/types';
 import { generateId } from '@/lib/utils';
+import { speechQueue } from '@/lib/kokoroTts';
+import { tauriApi } from '@/lib/tauri';
+import { useSettingsStore } from './settingsStore';
 
 export interface PendingToolApproval {
   toolName: string;
@@ -111,15 +114,55 @@ export const useChatStore = create<ChatStore>()(
           ),
         })),
 
-      deleteConversation: (id) =>
-        set((state) => ({
-          conversations: state.conversations.filter((c) => c.id !== id),
+      deleteConversation: (id) => {
+        const state = get();
+        const isActive = state.activeConversationId === id;
+        if (isActive) {
+          if (state.abortController) {
+            state.abortController.abort();
+          }
+          speechQueue.stop();
+          tauriApi.stopSpeaking().catch(() => {});
+        }
+        set((prevState) => ({
+          conversations: prevState.conversations.filter((c) => c.id !== id),
           activeConversationId:
-            state.activeConversationId === id ? null : state.activeConversationId,
-          messages: state.messages.filter((m) => m.conversation_id !== id),
-        })),
+            prevState.activeConversationId === id ? null : prevState.activeConversationId,
+          messages: prevState.messages.filter((m) => m.conversation_id !== id),
+          ...(isActive
+            ? {
+                isStreaming: false,
+                abortController: null,
+                streamingContent: '',
+                streamingReasoning: '',
+                streamingToolCalls: [],
+                chatStatus: 'idle',
+              }
+            : {}),
+        }));
+      },
 
-      setActiveConversation: (id) => set({ activeConversationId: id }),
+      setActiveConversation: (id) => {
+        if (get().activeConversationId !== id) {
+          const { abortController, isStreaming } = get();
+          if (abortController || isStreaming) {
+            abortController?.abort();
+            speechQueue.stop();
+            tauriApi.stopSpeaking().catch(() => {});
+          }
+          // Default voice readout to OFF when switching/opening a conversation
+          useSettingsStore.getState().updateSettings({ tts_enabled: false, continuous_voice: false });
+          set({
+            activeConversationId: id,
+            isStreaming: false,
+            abortController: null,
+            streamingContent: '',
+            streamingReasoning: '',
+            streamingToolCalls: [],
+            chatStatus: 'idle',
+          });
+        }
+      },
 
       setMessages: (messages) => set({ messages }),
 
@@ -208,6 +251,8 @@ export const useChatStore = create<ChatStore>()(
         if (abortController) {
           abortController.abort();
         }
+        speechQueue.stop();
+        tauriApi.stopSpeaking().catch(() => {});
         set({
           isStreaming: false,
           chatStatus: 'idle',
@@ -216,6 +261,15 @@ export const useChatStore = create<ChatStore>()(
       },
 
       newConversation: () => {
+        const { abortController, isStreaming } = get();
+        if (abortController || isStreaming) {
+          abortController?.abort();
+          speechQueue.stop();
+          tauriApi.stopSpeaking().catch(() => {});
+        }
+        // Default voice readout to OFF when opening a new chat
+        useSettingsStore.getState().updateSettings({ tts_enabled: false, continuous_voice: false });
+
         const conversation: Conversation = {
           id: generateId(),
           title: 'New Chat',
@@ -228,6 +282,8 @@ export const useChatStore = create<ChatStore>()(
           streamingContent: '',
           streamingReasoning: '',
           streamingToolCalls: [],
+          isStreaming: false,
+          abortController: null,
           chatStatus: 'idle',
         });
         return conversation;

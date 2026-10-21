@@ -1,12 +1,13 @@
-import React, { useEffect, useRef, useState, useCallback, KeyboardEvent } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo, KeyboardEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Send, Square, PanelRight, Loader2, Wrench, Paperclip, X, FileText, Image as ImageIcon, Sparkles, AlertTriangle, Check, Zap, Code2, Volume2, VolumeX, Atom, ChevronUp, RefreshCw, Settings, Search } from 'lucide-react';
 import { MessageBubble, StreamingMessage } from './MessageBubble';
 import { VoiceButton } from '@/components/voice/VoiceButton';
 import { useChat } from '@/hooks/useChat';
 import { useChatStore } from '@/stores/chatStore';
-import { useSettingsStore } from '@/stores/settingsStore';
+import { useSettingsStore, ConfiguredModelOption, DEFAULT_PROVIDERS } from '@/stores/settingsStore';
 import { tauriApi } from '@/lib/tauri';
+import { speechQueue } from '@/lib/kokoroTts';
 import { extractPdfText, renderPdfToImages } from '@/lib/pdfParser';
 import { ContentPart, Message } from '@/types';
 import { cn, bytesToBase64, isVisionModel, resizeImage } from '@/lib/utils';
@@ -49,14 +50,12 @@ const StatusBadge: React.FC<StatusBadgeProps> = ({ status }) => {
 
 export const ChatWindow: React.FC = () => {
   const { messages, isStreaming, streamingContent, streamingReasoning, chatStatus, sendMessage, stopStreaming } = useChat();
-  const { rightPanelOpen, toggleRightPanel, chatMode, setChatMode, pendingApproval } = useChatStore();
+  const { rightPanelOpen, toggleRightPanel, chatMode, setChatMode, pendingApproval, activeConversationId } = useChatStore();
   const {
     settings,
     updateSettings,
+    saveToBackend,
     openSettings,
-    availableModels,
-    isLoadingModels,
-    fetchAvailableModels,
   } = useSettingsStore();
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -79,18 +78,69 @@ export const ChatWindow: React.FC = () => {
     ? (settings.fast_chat_model_id || settings.model_id)
     : (settings.agent_coder_model_id || settings.model_id);
 
-  const activeModelShortName = activeModelName.split('/').pop() || activeModelName || 'Select Model';
+  const activeProvider = useMemo(() => {
+    const provId = isFastMode ? settings.fast_chat_provider_id : settings.agent_coder_provider_id;
+    return (
+      (settings.providers || []).find((p) => p.id === provId) ||
+      (settings.providers || []).find((p) => p.models?.some((m) => m.id === activeModelName))
+    );
+  }, [settings.providers, settings.fast_chat_provider_id, settings.agent_coder_provider_id, isFastMode, activeModelName]);
 
-  const filteredModels = availableModels.filter(m =>
-    m.id.toLowerCase().includes(modelSearchQuery.toLowerCase().trim())
-  );
-
-  // Pre-fetch models on mount if empty
-  useEffect(() => {
-    if (availableModels.length === 0 && settings.base_url) {
-      fetchAvailableModels().catch(() => {});
+  const activeModelShortName = useMemo(() => {
+    const base = activeModelName ? activeModelName.split('/').pop() || activeModelName : 'Select Model';
+    if (activeProvider && activeModelName) {
+      return `${activeProvider.name}: ${base}`;
     }
-  }, [availableModels.length, settings.base_url, fetchAvailableModels]);
+    return base;
+  }, [activeModelName, activeProvider]);
+
+  const configuredModels = useMemo<ConfiguredModelOption[]>(() => {
+    const providers = settings.providers && settings.providers.length > 0 ? settings.providers : DEFAULT_PROVIDERS;
+    const result: ConfiguredModelOption[] = [];
+    for (const prov of providers) {
+      if (prov.enabled === false) continue;
+      // Cloud providers must have an API key configured to show models in the chat selector
+      const isLocal = prov.type === 'ollama' || prov.type === 'lmstudio' || prov.is_custom;
+      if (!isLocal && (!prov.api_key || prov.api_key.trim() === '')) {
+        continue;
+      }
+      for (const m of prov.models || []) {
+        if (!m.id || !m.id.trim()) continue;
+        result.push({
+          id: m.id,
+          name: m.name || m.id,
+          providerId: prov.id,
+          providerName: prov.name,
+          isOnline: prov.status === 'online',
+        });
+      }
+    }
+    return result;
+  }, [settings.providers]);
+
+  // Available models in chat are strictly the models explicitly configured in Settings
+  const allAvailableModels = useMemo<ConfiguredModelOption[]>(() => {
+    return configuredModels;
+  }, [configuredModels]);
+
+  const filteredModels = useMemo<ConfiguredModelOption[]>(() => {
+    const q = modelSearchQuery.toLowerCase().trim();
+    if (!q) return allAvailableModels;
+    return allAvailableModels.filter(
+      (m: ConfiguredModelOption) =>
+        m.id.toLowerCase().includes(q) ||
+        m.name.toLowerCase().includes(q) ||
+        m.providerName.toLowerCase().includes(q)
+    );
+  }, [allAvailableModels, modelSearchQuery]);
+
+  // Stop speaking and clear speech queue on ChatWindow unmount
+  useEffect(() => {
+    return () => {
+      speechQueue.stop();
+      tauriApi.stopSpeaking().catch(() => {});
+    };
+  }, []);
 
   // Close model menu when clicking outside
   useEffect(() => {
@@ -110,28 +160,56 @@ export const ChatWindow: React.FC = () => {
   const handleToggleModelMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    setIsModelMenuOpen((prev) => {
-      const next = !prev;
-      if (next && availableModels.length === 0) {
-        fetchAvailableModels().catch(() => {});
-      }
-      return next;
-    });
+    setIsModelMenuOpen((prev) => !prev);
   };
 
-  const handleSelectModel = (modelId: string) => {
+  const handleSelectModel = (modelId: string, providerId?: string) => {
+    const prov =
+      (settings.providers || []).find((p) => p.id === providerId) ||
+      (settings.providers || []).find((p) => p.models?.some((m) => m.id === modelId)) ||
+      (providerId === 'server'
+        ? (settings.providers || []).find((p) => p.base_url === settings.base_url || p.type === 'ollama')
+        : undefined);
+
     if (isFastMode) {
-      updateSettings({ fast_chat_model_id: modelId, model_id: modelId });
+      updateSettings({
+        fast_chat_model_id: modelId,
+        fast_chat_provider_id: prov?.id,
+        model_id: modelId,
+        ...(prov ? { base_url: prov.base_url, api_key: prov.api_key || '' } : {}),
+      });
     } else {
-      updateSettings({ agent_coder_model_id: modelId, model_id: modelId });
+      updateSettings({
+        agent_coder_model_id: modelId,
+        agent_coder_provider_id: prov?.id,
+        model_id: modelId,
+        ...(prov ? { base_url: prov.base_url, api_key: prov.api_key || '' } : {}),
+      });
     }
+    saveToBackend();
     setIsModelMenuOpen(false);
   };
 
-  // Auto-scroll to bottom
+  // Robust container auto-scroll to bottom
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const scrollToBottom = useCallback((instant = false) => {
+    if (messagesContainerRef.current) {
+      if (instant) {
+        messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+      } else {
+        messagesContainerRef.current.scrollTo({
+          top: messagesContainerRef.current.scrollHeight,
+          behavior: 'smooth',
+        });
+      }
+    } else {
+      messagesEndRef.current?.scrollIntoView({ behavior: instant ? 'auto' : 'smooth' });
+    }
+  }, []);
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, streamingContent]);
+    scrollToBottom(false);
+  }, [messages.length, streamingContent, scrollToBottom]);
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
@@ -165,6 +243,11 @@ export const ChatWindow: React.FC = () => {
     const userText = rawText.trim();
     if (!userText && attachments.length === 0) return;
     if (isStreaming || isParsing) return;
+
+    if (!activeModelName) {
+      setIsModelMenuOpen(true);
+      return;
+    }
 
     setInput('');
     const currentAttachments = [...attachments];
@@ -533,7 +616,10 @@ export const ChatWindow: React.FC = () => {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6 scroll-smooth">
+      <div
+        ref={messagesContainerRef}
+        className="flex-1 overflow-y-auto px-4 pt-6 pb-24 space-y-6 scroll-smooth"
+      >
         {isEmpty ? (
           <EmptyState />
         ) : (
@@ -592,7 +678,9 @@ export const ChatWindow: React.FC = () => {
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               placeholder={
-                chatMode === 'fast'
+                !activeModelName
+                  ? "Select a model below to begin chatting…"
+                  : chatMode === 'fast'
                   ? "Fast Chat: Ask questions, search web, or summarize PC files… (Enter to send)"
                   : "Agent Coder: Build, refactor, run commands, or code tasks… (Enter to send)"
               }
@@ -674,6 +762,10 @@ export const ChatWindow: React.FC = () => {
                       tts_enabled: nextTts,
                       ...(!nextTts ? { continuous_voice: false } : {}),
                     });
+                    if (!nextTts) {
+                      speechQueue.stop();
+                      tauriApi.stopSpeaking().catch(() => {});
+                    }
                   }}
                   className={cn(
                     'hidden sm:flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all select-none border',
@@ -695,13 +787,24 @@ export const ChatWindow: React.FC = () => {
                     onClick={handleToggleModelMenu}
                     className={cn(
                       'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-mono transition-all max-w-[200px] select-none',
-                      isModelMenuOpen
+                      !activeModelName
+                        ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20'
+                        : isModelMenuOpen
                         ? 'bg-white/15 text-white border-white/20 shadow-md'
                         : 'bg-white/5 hover:bg-white/10 border-white/8 text-zinc-400 hover:text-zinc-200'
                     )}
-                    title={`Click to switch model for ${isFastMode ? 'Fast Chat' : 'Agent Coder'}. Active: ${activeModelName}`}
+                    title={`Click to switch model for ${isFastMode ? 'Fast Chat' : 'Agent Coder'}. Active: ${activeModelName || 'None'}`}
                   >
-                    <span className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0', isFastMode ? 'bg-emerald-400' : 'bg-indigo-400')} />
+                    <span
+                      className={cn(
+                        'w-1.5 h-1.5 rounded-full flex-shrink-0',
+                        !activeModelName
+                          ? 'bg-amber-400 animate-pulse'
+                          : isFastMode
+                          ? 'bg-emerald-400'
+                          : 'bg-indigo-400'
+                      )}
+                    />
                     <span className="truncate">{activeModelShortName}</span>
                     <ChevronUp size={12} className={cn('transition-transform duration-200 text-zinc-500', isModelMenuOpen ? 'rotate-180' : '')} />
                   </motion.button>
@@ -731,20 +834,12 @@ export const ChatWindow: React.FC = () => {
                           <div className="flex items-center gap-1">
                             <button
                               type="button"
-                              onClick={() => fetchAvailableModels()}
-                              className="p-1 rounded-md text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
-                              title="Refresh models from server"
-                            >
-                              <RefreshCw size={12} className={cn(isLoadingModels && 'animate-spin text-violet-400')} />
-                            </button>
-                            <button
-                              type="button"
                               onClick={() => {
                                 setIsModelMenuOpen(false);
                                 openSettings();
                               }}
                               className="p-1 rounded-md text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
-                              title="Open full Settings"
+                              title="Manage models in Settings"
                             >
                               <Settings size={12} />
                             </button>
@@ -752,7 +847,7 @@ export const ChatWindow: React.FC = () => {
                         </div>
 
                         {/* Search bar if > 4 models */}
-                        {availableModels.length > 4 && (
+                        {allAvailableModels.length > 4 && (
                           <div className="relative px-1">
                             <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
                             <input
@@ -768,14 +863,9 @@ export const ChatWindow: React.FC = () => {
 
                         {/* Model list */}
                         <div className="max-h-60 overflow-y-auto space-y-1 pr-0.5 custom-scrollbar">
-                          {isLoadingModels && availableModels.length === 0 ? (
-                            <div className="py-6 flex flex-col items-center justify-center text-xs text-zinc-500 gap-1.5">
-                              <Loader2 size={16} className="animate-spin text-violet-400" />
-                              <span>Fetching models from {settings.base_url.split('/')[2] || 'server'}…</span>
-                            </div>
-                          ) : filteredModels.length === 0 ? (
+                          {filteredModels.length === 0 ? (
                             <div className="py-6 px-3 text-center text-xs text-zinc-500 flex flex-col items-center gap-2">
-                              <span>{availableModels.length === 0 ? 'No models loaded on server.' : 'No matching models.'}</span>
+                              <span>No models configured in Settings yet.</span>
                               <button
                                 type="button"
                                 onClick={() => {
@@ -784,45 +874,69 @@ export const ChatWindow: React.FC = () => {
                                 }}
                                 className="px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 text-[11px] text-zinc-300 transition-colors border border-white/10"
                               >
-                                Configure Server in Settings
+                                Configure Models in Settings
                               </button>
                             </div>
                           ) : (
-                            filteredModels.map((m) => {
-                              const isSelected = m.id === activeModelName;
-                              const isR1 = isDeepSeekR1(m.id);
-                              return (
-                                <button
-                                  key={m.id}
-                                  type="button"
-                                  onClick={() => handleSelectModel(m.id)}
-                                  className={cn(
-                                    'w-full flex items-center justify-between px-2.5 py-2 rounded-xl text-left text-xs transition-all group select-none',
-                                    isSelected
-                                      ? isFastMode
-                                        ? 'bg-emerald-500/15 text-emerald-200 border border-emerald-500/30 shadow-sm'
-                                        : 'bg-indigo-500/15 text-indigo-200 border border-indigo-500/30 shadow-sm'
-                                      : 'text-zinc-300 hover:text-white hover:bg-white/8 border border-transparent'
-                                  )}
-                                >
-                                  <div className="flex items-center gap-2 min-w-0 pr-2">
-                                    <span className={cn(
-                                      'w-1.5 h-1.5 rounded-full flex-shrink-0',
-                                      isSelected ? (isFastMode ? 'bg-emerald-400' : 'bg-indigo-400') : 'bg-zinc-600'
-                                    )} />
-                                    <span className="font-mono truncate">{m.id}</span>
-                                    {isR1 && (
-                                      <span className="px-1.5 py-0.2 rounded text-[9px] bg-violet-500/20 text-violet-300 font-sans border border-violet-500/30 flex-shrink-0">
-                                        Reasoning
-                                      </span>
+                              filteredModels.map((m) => {
+                                const isSelected = m.id === activeModelName;
+                                const isR1 = isDeepSeekR1(m.id);
+                                return (
+                                  <button
+                                    key={`${m.providerId}-${m.id}`}
+                                    type="button"
+                                    onClick={() => handleSelectModel(m.id, m.providerId)}
+                                    className={cn(
+                                      'w-full flex items-center justify-between px-2.5 py-2 rounded-xl text-left text-xs transition-all group select-none',
+                                      isSelected
+                                        ? isFastMode
+                                          ? 'bg-emerald-500/15 text-emerald-200 border border-emerald-500/30 shadow-sm'
+                                          : 'bg-indigo-500/15 text-indigo-200 border border-indigo-500/30 shadow-sm'
+                                        : 'text-zinc-300 hover:text-white hover:bg-white/8 border border-transparent'
                                     )}
-                                  </div>
-                                  {isSelected && (
-                                    <Check size={13} className={cn('flex-shrink-0', isFastMode ? 'text-emerald-400' : 'text-indigo-400')} />
-                                  )}
-                                </button>
-                              );
-                            })
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0 pr-2">
+                                      <span
+                                        className={cn(
+                                          'w-1.5 h-1.5 rounded-full flex-shrink-0',
+                                          isSelected
+                                            ? isFastMode
+                                              ? 'bg-emerald-400'
+                                              : 'bg-indigo-400'
+                                            : m.isOnline
+                                            ? 'bg-emerald-500/70'
+                                            : 'bg-zinc-600'
+                                        )}
+                                      />
+                                      <div className="flex flex-col min-w-0">
+                                        <span className="font-medium truncate text-zinc-200 text-xs">
+                                          {m.name !== m.id ? m.name : m.id}
+                                        </span>
+                                        {m.name !== m.id && (
+                                          <span className="font-mono text-[10px] text-zinc-500 truncate">{m.id}</span>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                                      <span className="px-1.5 py-0.5 rounded text-[9px] bg-white/5 text-zinc-400 font-sans border border-white/8">
+                                        {m.providerName}
+                                      </span>
+                                      {isR1 && (
+                                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-violet-500/20 text-violet-300 font-sans border border-violet-500/30">
+                                          Reasoning
+                                        </span>
+                                      )}
+                                      {isSelected && (
+                                        <Check
+                                          size={13}
+                                          className={cn('flex-shrink-0', isFastMode ? 'text-emerald-400' : 'text-indigo-400')}
+                                        />
+                                      )}
+                                    </div>
+                                  </button>
+                                );
+                              })
                           )}
                         </div>
                       </motion.div>

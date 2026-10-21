@@ -1,18 +1,18 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   X, Server, Mic, Volume2, Check, AlertCircle,
-  Loader2, RefreshCw, ChevronDown, Zap, Bug, FolderOpen, Terminal, Copy, FileText,
-  Plug, Plus, Trash2, PlugZap, ChevronRight, WifiOff, Play, Square, Atom,
+  Loader2, RefreshCw, ChevronDown, ChevronUp, Zap, Bug, FolderOpen, Terminal, Copy, FileText,
+  Plug, Plus, Trash2, PlugZap, ChevronRight, WifiOff, Play, Square, Atom, HelpCircle, Search,
 } from 'lucide-react';
-import { useSettingsStore } from '@/stores/settingsStore';
+import { useSettingsStore, PROVIDER_PRESETS, DEFAULT_PROVIDERS, ConfiguredModelOption } from '@/stores/settingsStore';
 import { useMcpStore } from '@/stores/mcpStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { testConnection, fetchModels } from '@/lib/api';
 import { tauriApi } from '@/lib/tauri';
 import { cn } from '@/lib/utils';
-import { KOKORO_VOICES, DEFAULT_KOKORO_VOICE, kokoroSpeak, kokoroPreview, kokoroStop, getEngineState } from '@/lib/kokoroTts';
-import { Model, AppSettings, McpServerConfig } from '@/types';
+import { KOKORO_VOICES, DEFAULT_KOKORO_VOICE, kokoroSpeak, kokoroPreview, kokoroStop, getEngineState, speechQueue } from '@/lib/kokoroTts';
+import { Model, AppSettings, McpServerConfig, ModelProviderConfig, ModelCatalogItem } from '@/types';
 
 type SettingsTab = 'connection' | 'parameters' | 'voice' | 'developer' | 'mcp';
 
@@ -68,31 +68,13 @@ export const SettingsModal: React.FC = () => {
       const m = await fetchModels(settings.base_url, settings.api_key);
       setModels(m);
       setTestMessage(`Connected — ${m.length} model${m.length !== 1 ? 's' : ''} available`);
-
-      // Auto-select models for Fast Chat and Agent Coder
-      const firstNonR1 = m.find((item) => !isDeepSeekR1Model(item.id));
-      const firstR1 = m.find((item) => isDeepSeekR1Model(item.id));
-      const updates: Partial<AppSettings> = {};
-
-      if (!settings.model_id && m.length > 0) {
-        updates.model_id = firstNonR1?.id || m[0].id;
-      }
-      if (!settings.fast_chat_model_id && firstNonR1) {
-        updates.fast_chat_model_id = firstNonR1.id;
-      }
-      if (!settings.agent_coder_model_id) {
-        updates.agent_coder_model_id = firstR1?.id || m[0].id;
-      }
-      if (Object.keys(updates).length > 0) {
-        updateSettings(updates);
-      }
     } catch (e) {
       setTestStatus('error');
       setTestMessage((e as Error).message || 'Connection failed');
     } finally {
       setLoadingModels(false);
     }
-  }, [settings.base_url, settings.api_key, settings.model_id, settings.fast_chat_model_id, settings.agent_coder_model_id, updateSettings]);
+  }, [settings.base_url, settings.api_key]);
 
   const handleSave = async () => {
     await saveToBackend();
@@ -241,6 +223,586 @@ const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLI
 );
 Input.displayName = 'Input';
 
+// ─── Format Friendly Display Names ──────────────────────────────────────────
+
+function formatFriendlyModelName(id: string): string {
+  const parts = id.split('/');
+  if (parts.length === 2) {
+    const org = parts[0].charAt(0).toUpperCase() + parts[0].slice(1).replace(/[-_]/g, ' ');
+    const model = parts[1]
+      .replace(/:free$/, ' (Free)')
+      .replace(/-it$/, '')
+      .replace(/-instruct$/, '')
+      .split(/[-_]/)
+      .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+      .join(' ');
+    return `${org}: ${model}`;
+  }
+  return id;
+}
+
+// ─── Choose Models To Add Modal (Matching User Screenshot) ───────────────────
+
+interface ModelPickerModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  availableModels: Model[];
+  existingModels: ModelCatalogItem[];
+  onSaveSelected: (selectedModels: ModelCatalogItem[]) => void;
+}
+
+const ModelPickerModal: React.FC<ModelPickerModalProps> = ({
+  isOpen,
+  onClose,
+  availableModels,
+  existingModels,
+  onSaveSelected,
+}) => {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeFilter, setActiveFilter] = useState<'all' | 'free' | 'reasoning' | 'selected'>('all');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  const existingModelsMap = useMemo(
+    () => new Map(existingModels.map((m) => [m.id, m])),
+    [existingModels]
+  );
+  const existingModelIds = useMemo(
+    () => new Set(existingModels.map((m) => m.id)),
+    [existingModels]
+  );
+
+  // Initialize selectedIds with currently existing models when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      setSearchQuery('');
+      setActiveFilter('all');
+      setSelectedIds(new Set(existingModelIds));
+    }
+  }, [isOpen, existingModelIds]);
+
+  // Combined models to display: fetched models + any existing custom models not in the fetched list
+  const displayModels = useMemo<Model[]>(() => {
+    const list = [...availableModels];
+    const knownIds = new Set(availableModels.map((m) => m.id));
+    for (const [id] of existingModelsMap) {
+      if (!knownIds.has(id)) {
+        list.push({ id, object: 'model' });
+        knownIds.add(id);
+      }
+    }
+    return list;
+  }, [availableModels, existingModelsMap]);
+
+  const filtered = useMemo(() => {
+    return displayModels.filter((m) => {
+      const idLower = m.id.toLowerCase();
+      if (activeFilter === 'free' && !idLower.includes('free')) {
+        return false;
+      }
+      if (activeFilter === 'reasoning' && !isDeepSeekR1Model(m.id)) {
+        return false;
+      }
+      if (activeFilter === 'selected' && !selectedIds.has(m.id)) {
+        return false;
+      }
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        return idLower.includes(q);
+      }
+      return true;
+    });
+  }, [displayModels, activeFilter, searchQuery, selectedIds]);
+
+  const allVisibleSelected =
+    filtered.length > 0 && filtered.every((m) => selectedIds.has(m.id));
+
+  const handleToggleSelectAll = () => {
+    if (allVisibleSelected) {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const m of filtered) {
+          next.delete(m.id);
+        }
+        return next;
+      });
+    } else {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const m of filtered) {
+          next.add(m.id);
+        }
+        return next;
+      });
+    }
+  };
+
+  const handleToggleModel = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const handleConfirm = () => {
+    const selectedModels: ModelCatalogItem[] = [];
+    for (const id of selectedIds) {
+      const existing = existingModelsMap.get(id);
+      if (existing) {
+        selectedModels.push(existing);
+      } else {
+        selectedModels.push({
+          id,
+          name: formatFriendlyModelName(id),
+        });
+      }
+    }
+    onSaveSelected(selectedModels);
+    onClose();
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95, y: 8 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 8 }}
+        className="w-full max-w-md bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl p-5 flex flex-col gap-3.5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-start justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-zinc-100">Choose models to add</h3>
+            <p className="text-xs text-zinc-400 mt-0.5">
+              These are the models this provider has available. Select only the ones you want.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Search bar & Select all */}
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search models (e.g. free, gemma, claude)"
+              className="w-full pl-8 pr-3 py-1.5 text-xs bg-white/5 border border-white/10 rounded-xl text-zinc-200 placeholder-zinc-500 outline-none focus:border-violet-500/50"
+              autoFocus
+            />
+          </div>
+          <button
+            type="button"
+            onClick={handleToggleSelectAll}
+            className="text-xs font-medium text-zinc-300 hover:text-white px-2 py-1.5 rounded-lg hover:bg-white/5 whitespace-nowrap transition-colors"
+          >
+            {allVisibleSelected ? 'Deselect all' : 'Select all'}
+          </button>
+        </div>
+
+        {/* Filter Chips */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <button
+            type="button"
+            onClick={() => setActiveFilter('all')}
+            className={cn(
+              'px-2.5 py-1 text-[11px] rounded-lg transition-colors font-medium',
+              activeFilter === 'all'
+                ? 'bg-violet-600/30 text-violet-300 border border-violet-500/40'
+                : 'bg-white/5 text-zinc-400 hover:text-zinc-200'
+            )}
+          >
+            All ({displayModels.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveFilter('free')}
+            className={cn(
+              'px-2.5 py-1 text-[11px] rounded-lg transition-colors font-medium flex items-center gap-1',
+              activeFilter === 'free'
+                ? 'bg-emerald-600/30 text-emerald-300 border border-emerald-500/40'
+                : 'bg-white/5 text-zinc-400 hover:text-zinc-200'
+            )}
+          >
+            Free (:free)
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveFilter('reasoning')}
+            className={cn(
+              'px-2.5 py-1 text-[11px] rounded-lg transition-colors font-medium',
+              activeFilter === 'reasoning'
+                ? 'bg-indigo-600/30 text-indigo-300 border border-indigo-500/40'
+                : 'bg-white/5 text-zinc-400 hover:text-zinc-200'
+            )}
+          >
+            Reasoning / R1
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveFilter('selected')}
+            className={cn(
+              'px-2.5 py-1 text-[11px] rounded-lg transition-colors font-medium',
+              activeFilter === 'selected'
+                ? 'bg-violet-600/40 text-violet-200 border border-violet-500/50'
+                : 'bg-white/5 text-zinc-400 hover:text-zinc-200'
+            )}
+          >
+            Selected ({selectedIds.size})
+          </button>
+        </div>
+
+        {/* Checkbox List */}
+        <div className="max-h-64 overflow-y-auto space-y-1 pr-1 custom-scrollbar border border-white/5 rounded-xl p-1 bg-black/20">
+          {filtered.length === 0 ? (
+            <div className="py-8 text-center text-xs text-zinc-500">
+              No matching models found.
+            </div>
+          ) : (
+            filtered.map((m) => {
+              const isChecked = selectedIds.has(m.id);
+              const isFree = m.id.toLowerCase().includes('free');
+              const isR1 = isDeepSeekR1Model(m.id);
+
+              return (
+                <label
+                  key={m.id}
+                  className={cn(
+                    'flex items-center gap-2.5 px-3 py-2 rounded-xl cursor-pointer text-xs transition-colors select-none',
+                    isChecked
+                      ? 'bg-violet-500/15 text-white border border-violet-500/25'
+                      : 'hover:bg-white/5 text-zinc-300 border border-transparent'
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={() => handleToggleModel(m.id)}
+                    className="w-3.5 h-3.5 rounded border-zinc-600 text-violet-600 focus:ring-0 focus:ring-offset-0 bg-zinc-800 cursor-pointer"
+                  />
+                  <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                    <span className="font-mono text-[11px] truncate">{m.id}</span>
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {isFree && (
+                      <span className="px-1.5 py-0.2 rounded text-[9px] bg-emerald-500/20 text-emerald-300 font-sans border border-emerald-500/30">
+                        FREE
+                      </span>
+                    )}
+                    {isR1 && (
+                      <span className="px-1.5 py-0.2 rounded text-[9px] bg-indigo-500/20 text-indigo-300 font-sans border border-indigo-500/30">
+                        R1
+                      </span>
+                    )}
+                  </div>
+                </label>
+              );
+            })
+          )}
+        </div>
+
+        {/* Footer Actions */}
+        <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/8">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-1.5 text-xs text-zinc-400 hover:text-white rounded-lg transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleConfirm}
+            className="px-4 py-1.5 text-xs bg-white text-zinc-950 font-medium rounded-lg hover:bg-zinc-200 transition-colors shadow-sm"
+          >
+            {selectedIds.size === 0
+              ? 'Clear Catalog (0 selected)'
+              : `Apply Selection (${selectedIds.size} model${selectedIds.size !== 1 ? 's' : ''})`}
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
+// ─── Provider Edit Card (Matching User Screenshot 2) ──────────────────────────
+
+interface ProviderEditorProps {
+  provider: ModelProviderConfig;
+  onCancel: () => void;
+  onApply: (updated: ModelProviderConfig) => void;
+}
+
+const ProviderEditor: React.FC<ProviderEditorProps> = ({ provider, onCancel, onApply }) => {
+  const [name, setName] = useState(provider.name);
+  const [apiKey, setApiKey] = useState(provider.api_key || '');
+  const [baseUrl, setBaseUrl] = useState(provider.base_url);
+  const [models, setModels] = useState<ModelCatalogItem[]>([...provider.models]);
+  const [showCustomSettings, setShowCustomSettings] = useState(true);
+  const [isFetching, setIsFetching] = useState(false);
+  const [fetchFeedback, setFetchFeedback] = useState<string | null>(null);
+
+  // Model picker modal state
+  const [showModelPicker, setShowModelPicker] = useState(false);
+  const [fetchedModelsList, setFetchedModelsList] = useState<Model[]>([]);
+
+  const handleAddModel = () => {
+    setModels((prev) => [...prev, { id: '', name: '' }]);
+  };
+
+  const handleUpdateModel = (index: number, patch: Partial<ModelCatalogItem>) => {
+    setModels((prev) => prev.map((m, i) => (i === index ? { ...m, ...patch } : m)));
+  };
+
+  const handleDeleteModel = (index: number) => {
+    setModels((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleRestoreDefaults = () => {
+    const preset = PROVIDER_PRESETS.find(
+      (p) => p.type === provider.type || p.name.toLowerCase() === provider.name.toLowerCase()
+    );
+    if (preset) {
+      setModels([...preset.defaultModels]);
+      setBaseUrl(preset.base_url);
+      setFetchFeedback('Restored default model catalog.');
+      setTimeout(() => setFetchFeedback(null), 3000);
+    }
+  };
+
+  const handleFetchModels = async () => {
+    setIsFetching(true);
+    setFetchFeedback(null);
+    try {
+      const fetched = await fetchModels(baseUrl, apiKey);
+      setFetchedModelsList(fetched);
+      setShowModelPicker(true);
+    } catch (e) {
+      setFetchFeedback(`Fetch failed: ${(e as Error).message}`);
+    } finally {
+      setIsFetching(false);
+    }
+  };
+
+  const handleSaveSelectedModels = (selectedList: ModelCatalogItem[]) => {
+    setModels(selectedList);
+    setFetchFeedback(`Updated catalog: ${selectedList.length} model${selectedList.length !== 1 ? 's' : ''} selected.`);
+    setTimeout(() => setFetchFeedback(null), 4000);
+  };
+
+  const handleApply = () => {
+    const cleanedModels = models.filter((m) => m.id.trim().length > 0);
+    onApply({
+      ...provider,
+      name,
+      api_key: apiKey,
+      base_url: baseUrl,
+      models: cleanedModels,
+    });
+  };
+
+  return (
+    <div className="bg-zinc-950/70 border border-white/10 rounded-2xl p-4 space-y-4">
+      {/* Title / Name */}
+      <div className="flex items-center justify-between">
+        {provider.is_custom ? (
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className="text-sm font-semibold bg-white/5 border border-white/10 rounded-lg px-2.5 py-1 text-zinc-100 outline-none focus:border-violet-500/50"
+            placeholder="Provider name"
+          />
+        ) : (
+          <h3 className="text-sm font-semibold text-zinc-100">{name}</h3>
+        )}
+      </div>
+
+      {/* API Key */}
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+          <span>API key</span>
+          <span title="Optional for local models like Ollama or LM Studio. Required for cloud providers like OpenRouter or DeepSeek.">
+            <HelpCircle size={12} className="text-zinc-500 hover:text-zinc-300 cursor-help" />
+          </span>
+        </div>
+        <input
+          type="password"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          placeholder="Leave blank to use saved credentials"
+          className="w-full px-3 py-2 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
+        />
+      </div>
+
+      {/* Customized settings dropdown */}
+      <div className="border border-white/8 rounded-xl overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setShowCustomSettings(!showCustomSettings)}
+          className="w-full flex items-center justify-between px-3 py-2 text-xs text-zinc-300 bg-white/[0.02] hover:bg-white/[0.05] transition-colors"
+        >
+          <div className="flex items-center gap-1.5">
+            {showCustomSettings ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            <span>Customized settings</span>
+          </div>
+        </button>
+
+        {showCustomSettings && (
+          <div className="p-3 bg-white/[0.01] border-t border-white/8 space-y-2">
+            <label className="block text-[11px] text-zinc-400">Base URL</label>
+            <input
+              type="text"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="https://..."
+              className="w-full px-3 py-2 text-xs font-mono bg-white/5 border border-white/10 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Models Section */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-xs font-semibold text-zinc-200">Models ({models.length})</div>
+            <div className="text-[10px] text-zinc-500">Customized model catalog</div>
+          </div>
+          <div className="flex items-center gap-2.5 text-xs">
+            {models.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setModels([])}
+                className="text-zinc-500 hover:text-red-400 text-[11px] transition-colors"
+                title="Clear all models from catalog"
+              >
+                Clear all
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleRestoreDefaults}
+              className="text-zinc-400 hover:text-zinc-200 text-[11px] transition-colors"
+            >
+              Restore defaults
+            </button>
+            <button
+              type="button"
+              onClick={handleFetchModels}
+              disabled={isFetching}
+              className="text-violet-400 hover:text-violet-300 text-[11px] flex items-center gap-1 transition-colors disabled:opacity-50 font-medium"
+            >
+              {isFetching && <Loader2 size={11} className="animate-spin" />}
+              Fetch available models
+            </button>
+          </div>
+        </div>
+
+        {fetchFeedback && (
+          <div className="text-[11px] px-2.5 py-1.5 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-300">
+            {fetchFeedback}
+          </div>
+        )}
+
+        {/* Model rows or empty state */}
+        {models.length === 0 ? (
+          <div className="py-5 px-4 text-center border border-dashed border-white/10 rounded-xl bg-white/[0.01]">
+            <p className="text-xs text-zinc-400 font-medium">No models selected for this provider yet.</p>
+            <p className="text-[11px] text-zinc-500 mt-1">
+              Click &quot;Fetch available models&quot; to pick models or &quot;Add model&quot; below.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1 custom-scrollbar">
+            {models.map((m, idx) => (
+              <div key={idx} className="flex items-center gap-2 bg-white/[0.02] border border-white/8 rounded-xl p-1.5">
+                <input
+                  type="text"
+                  value={m.id}
+                  onChange={(e) => handleUpdateModel(idx, { id: e.target.value })}
+                  placeholder="Model ID (e.g. google/gemma-4-31b-it:free)"
+                  className="flex-1 px-2.5 py-1.5 text-xs font-mono bg-white/5 border border-white/8 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
+                />
+                <input
+                  type="text"
+                  value={m.name || ''}
+                  onChange={(e) => handleUpdateModel(idx, { name: e.target.value })}
+                  placeholder="Display Name (e.g. Google: Gemma 4 31B)"
+                  className="flex-1 px-2.5 py-1.5 text-xs bg-white/5 border border-white/8 rounded-lg text-zinc-300 placeholder-zinc-600 outline-none focus:border-violet-500/50"
+                />
+                <ChevronRight size={13} className="text-zinc-600 flex-shrink-0" />
+                <button
+                  type="button"
+                  onClick={() => handleDeleteModel(idx)}
+                  className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-white/5 rounded-lg transition-colors flex-shrink-0"
+                  title="Remove model"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* + Add model */}
+        <button
+          type="button"
+          onClick={handleAddModel}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl transition-colors"
+        >
+          <Plus size={12} />
+          <span>Add model</span>
+        </button>
+      </div>
+
+      {/* Bottom Actions */}
+      <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/8">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="px-3 py-1.5 text-xs text-zinc-400 hover:text-white rounded-lg transition-colors"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={handleApply}
+          className="px-4 py-1.5 text-xs bg-white text-zinc-950 font-medium hover:bg-zinc-200 rounded-lg transition-colors shadow-sm"
+        >
+          Apply
+        </button>
+      </div>
+
+      {/* Selective Model Picker Modal */}
+      <ModelPickerModal
+        isOpen={showModelPicker}
+        onClose={() => setShowModelPicker(false)}
+        availableModels={fetchedModelsList}
+        existingModels={models}
+        onSaveSelected={handleSaveSelectedModels}
+      />
+    </div>
+  );
+};
+
+// ─── ConnectionTab (Matching User Screenshots 1 & 2) ──────────────────────────
+
 const ConnectionTab: React.FC<{
   settings: AppSettings;
   updateSettings: (p: Partial<AppSettings>) => void;
@@ -249,188 +811,168 @@ const ConnectionTab: React.FC<{
   onConnectAndLoad: () => void;
   loadingModels: boolean;
   models: Model[];
-}> = ({ settings, updateSettings, testStatus, testMessage, onConnectAndLoad, loadingModels, models }) => {
-  const isConnected = testStatus === 'ok';
-  const isTesting = testStatus === 'testing' || loadingModels;
+}> = ({ settings, updateSettings, models: availableServerModels }) => {
+  const {
+    addProvider,
+    updateProvider,
+    deleteProvider,
+    testProviderConnection,
+  } = useSettingsStore();
+
+  const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
+  const [showAddMenu, setShowAddMenu] = useState(false);
+
+  const providers = settings.providers && settings.providers.length > 0 ? settings.providers : DEFAULT_PROVIDERS;
+
+  const editingProvider = providers.find((p) => p.id === editingProviderId);
+
+  const handleSelectPreset = (preset: typeof PROVIDER_PRESETS[0]) => {
+    const id = `${preset.type}-${Date.now().toString(36).slice(-4)}`;
+    const newProv: ModelProviderConfig = {
+      id,
+      name: preset.name,
+      type: preset.type,
+      base_url: preset.base_url,
+      api_key: '',
+      enabled: true,
+      is_custom: preset.is_custom,
+      models: [...preset.defaultModels],
+      status: 'untested',
+    };
+    addProvider(newProv);
+    setShowAddMenu(false);
+    setEditingProviderId(id);
+  };
+
+  const handleApplyProvider = (updated: ModelProviderConfig) => {
+    updateProvider(updated.id, updated);
+    testProviderConnection(updated.id).catch(() => {});
+    setEditingProviderId(null);
+  };
 
   return (
-    <div className="space-y-4">
-      {/* Base URL */}
-      <Field
-        label="Server URL"
-        hint="Your LM Studio or Ollama base URL. Include /v1 for LM Studio."
-      >
-        <div className="flex gap-2">
-          <Input
-            type="text"
-            value={settings.base_url}
-            onChange={(e) => updateSettings({ base_url: e.target.value })}
-            placeholder="http://192.168.1.100:1234/v1"
-            onKeyDown={(e) => e.key === 'Enter' && onConnectAndLoad()}
-          />
-          <button
-            onClick={onConnectAndLoad}
-            disabled={isTesting || !settings.base_url}
-            title="Connect and load models"
-            className={cn(
-              'flex items-center gap-1.5 px-3 py-2 text-xs rounded-lg font-medium transition-all whitespace-nowrap',
-              isConnected
-                ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/30'
-                : 'bg-violet-600/20 text-violet-300 border border-violet-500/30 hover:bg-violet-600/30 disabled:opacity-50 disabled:cursor-not-allowed'
-            )}
-          >
-            {isTesting ? (
-              <Loader2 size={12} className="animate-spin" />
-            ) : isConnected ? (
-              <Check size={12} />
-            ) : (
-              <Zap size={12} />
-            )}
-            {isTesting ? 'Connecting…' : isConnected ? 'Connected' : 'Connect'}
-          </button>
-        </div>
-
-        {/* Status message */}
-        {testMessage && (
-          <div className={cn(
-            'flex items-center gap-1.5 mt-2 text-xs px-2 py-1.5 rounded-lg',
-            testStatus === 'ok'
-              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-              : 'bg-red-500/10 text-red-400 border border-red-500/20'
-          )}>
-            {testStatus === 'ok' ? <Check size={11} /> : <AlertCircle size={11} />}
-            {testMessage}
-            {testStatus === 'error' && settings.base_url.includes('localhost') && (
-              <span className="ml-1 text-zinc-600">· Is your LLM server running?</span>
-            )}
-          </div>
-        )}
-      </Field>
-
-      {/* API Key */}
-      <Field label="API Key" hint="Optional. Required for some hosted servers.">
-        <Input
-          type="password"
-          value={settings.api_key}
-          onChange={(e) => updateSettings({ api_key: e.target.value })}
-          placeholder="sk-… (leave empty for LM Studio / Ollama)"
+    <div className="space-y-5">
+      {/* If editing a provider, show ProviderEditor */}
+      {editingProvider ? (
+        <ProviderEditor
+          provider={editingProvider}
+          onCancel={() => setEditingProviderId(null)}
+          onApply={handleApplyProvider}
         />
-      </Field>
+      ) : (
+        /* Provider List (Matching Screenshot 1) */
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-xs font-semibold text-zinc-200">Model Providers</h3>
+              <p className="text-[11px] text-zinc-500">
+                Use local servers (Ollama, LM Studio) alongside cloud providers (OpenRouter, DeepSeek).
+              </p>
+            </div>
+          </div>
 
-      {/* ── Mode-Specific Model Configuration ── */}
-      <div className="pt-2 border-t border-white/8 space-y-4">
-        <div>
-          <h4 className="text-xs font-semibold text-zinc-200 mb-0.5">Model Configuration by Mode</h4>
-          <p className="text-[11px] text-zinc-500">
-            Set dedicated models for Fast Chat and Agent Coder. DeepSeek-R1 is strictly reserved for Agent Coder.
-          </p>
-        </div>
+          {/* Provider Cards */}
+          <div className="space-y-2">
+            {providers.map((p) => {
+              const isOnline = p.status === 'online';
+              const isOffline = p.status === 'offline';
+              const isTesting = p.status === 'testing';
 
-        {/* ⚡ Fast Chat Model */}
-        <Field
-          label="⚡ Fast Chat Model (Normal Chat)"
-          hint="Model for daily conversations, web searches, and file summarization."
-        >
-          <div className="space-y-1.5">
-            {models.length > 0 ? (
-              <div className="relative">
-                <select
-                  value={settings.fast_chat_model_id || settings.model_id}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    updateSettings({ fast_chat_model_id: val, model_id: val });
-                  }}
-                  className="w-full px-3 py-2 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-300 outline-none focus:border-violet-500/50 appearance-none cursor-pointer"
+              return (
+                <div
+                  key={p.id}
+                  className="flex items-center justify-between px-3.5 py-3 rounded-2xl bg-white/[0.03] hover:bg-white/[0.05] border border-white/8 transition-all"
                 >
-                  <option value="" className="bg-zinc-900">— select fast chat model —</option>
-                  {models.map((m) => {
-                    const isR1 = isDeepSeekR1Model(m.id);
-                    return (
-                      <option
-                        key={m.id}
-                        value={m.id}
-                        className="bg-zinc-900 text-zinc-200"
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-zinc-200">{p.name}</span>
+                    {p.is_custom && (
+                      <span className="px-1.5 py-0.2 rounded text-[10px] bg-white/10 text-zinc-400 font-mono">
+                        Custom
+                      </span>
+                    )}
+                    {/* Status Dot */}
+                    <span
+                      title={p.status_message || (isOnline ? 'Online' : isOffline ? 'Offline' : 'Untested')}
+                      className={cn(
+                        'w-2 h-2 rounded-full transition-all',
+                        isOnline && 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]',
+                        isOffline && 'bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.8)]',
+                        isTesting && 'bg-amber-400 animate-pulse',
+                        !isOnline && !isOffline && !isTesting && 'bg-zinc-600'
+                      )}
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setEditingProviderId(p.id)}
+                      className="px-3 py-1 text-xs text-zinc-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/8 rounded-lg transition-colors font-medium"
+                    >
+                      Edit
+                    </button>
+                    {providers.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (confirm(`Remove provider "${p.name}"?`)) {
+                            deleteProvider(p.id);
+                          }
+                        }}
+                        className="px-2.5 py-1 text-xs text-red-400/80 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors"
                       >
-                        {isR1 ? `🧠 ${m.id} (Reasoning)` : `⚡ ${m.id}`}
-                      </option>
-                    );
-                  })}
-                </select>
-                <ChevronDown size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600 pointer-events-none" />
-              </div>
-            ) : (
-              <Input
-                type="text"
-                value={settings.fast_chat_model_id || settings.model_id}
-                onChange={(e) => {
-                  updateSettings({ fast_chat_model_id: e.target.value, model_id: e.target.value });
-                }}
-                placeholder="e.g. llama3, mistral, gemma, etc."
-              />
-            )}
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        </Field>
 
-        {/* 🤖 Agent Coder Model */}
-        <Field
-          label="🤖 Agent Coder Model (IDE Developer Mode)"
-          hint="Heavy-duty coding model for terminal execution, autonomous coding loops, and MCP tools."
-        >
-          <div className="space-y-1.5">
-            {models.length > 0 ? (
-              <div className="relative">
-                <select
-                  value={settings.agent_coder_model_id || settings.model_id}
-                  onChange={(e) => updateSettings({ agent_coder_model_id: e.target.value })}
-                  className="w-full px-3 py-2 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-300 outline-none focus:border-violet-500/50 appearance-none cursor-pointer"
-                >
-                  <option value="" className="bg-zinc-900">— select agent coder model —</option>
-                  {models.map((m) => {
-                    const isR1 = isDeepSeekR1Model(m.id);
-                    return (
-                      <option key={m.id} value={m.id} className="bg-zinc-900 text-zinc-200">
-                        {isR1 ? `🧠 ${m.id} (Reasoning Model)` : `💻 ${m.id}`}
-                      </option>
-                    );
-                  })}
-                </select>
-                <ChevronDown size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600 pointer-events-none" />
-              </div>
-            ) : (
-              <Input
-                type="text"
-                value={settings.agent_coder_model_id || settings.model_id}
-                onChange={(e) => updateSettings({ agent_coder_model_id: e.target.value })}
-                placeholder="e.g. deepseek-r1, qwen-coder, etc."
-              />
-            )}
-          </div>
-        </Field>
-
-        {/* Reload models button */}
-        {isConnected && (
-          <div className="flex items-center justify-between pt-1">
+          {/* + Add model provider Button */}
+          <div className="relative">
             <button
-              onClick={onConnectAndLoad}
-              disabled={loadingModels}
-              className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+              type="button"
+              onClick={() => setShowAddMenu(!showAddMenu)}
+              className="w-full py-2.5 border border-dashed border-white/15 hover:border-violet-500/50 hover:bg-violet-500/5 text-zinc-400 hover:text-zinc-200 rounded-2xl text-xs flex items-center justify-center gap-1.5 transition-all"
             >
-              <RefreshCw size={11} className={cn(loadingModels && 'animate-spin')} />
-              Reload model list ({models.length} loaded)
+              <Plus size={13} />
+              <span>Add model provider</span>
             </button>
-          </div>
-        )}
-      </div>
 
-      {/* Helpful tips */}
-      {testStatus === 'idle' && (
-        <div className="text-xs text-zinc-700 bg-white/3 border border-white/8 rounded-lg px-3 py-2.5 space-y-1">
-          <p className="font-medium text-zinc-600">Quick start:</p>
-          <p>• <span className="text-zinc-500">LM Studio:</span> Start local server → use <code className="bg-white/8 px-1 rounded">http://localhost:1234/v1</code></p>
-          <p>• <span className="text-zinc-500">Ollama:</span> Run <code className="bg-white/8 px-1 rounded">ollama serve</code> → use <code className="bg-white/8 px-1 rounded">http://localhost:11434/v1</code></p>
-          <p>• <span className="text-zinc-500">Remote:</span> Replace localhost with your server's IP address</p>
+            {/* Presets selection popover */}
+            {showAddMenu && (
+              <div className="absolute top-full mt-1.5 left-0 right-0 bg-zinc-950 border border-white/10 rounded-2xl shadow-2xl p-2 z-50 space-y-1">
+                <div className="px-2 py-1 text-[10px] uppercase font-semibold text-zinc-500">
+                  Select Provider Preset
+                </div>
+                {PROVIDER_PRESETS.map((preset) => (
+                  <button
+                    key={preset.type}
+                    type="button"
+                    onClick={() => handleSelectPreset(preset)}
+                    className="w-full flex items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:text-white hover:bg-white/8 rounded-xl text-left transition-colors"
+                  >
+                    <span className="font-medium">{preset.name}</span>
+                    <span className="text-[10px] text-zinc-500 font-mono">{preset.base_url}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
+
+
+
+      {/* Quick reference note */}
+      <div className="text-xs text-zinc-500 bg-white/[0.02] border border-white/8 rounded-xl px-3 py-2.5 space-y-1">
+        <p className="font-medium text-zinc-400">Multi-Provider Architecture:</p>
+        <p>• Local servers like <span className="text-zinc-300">Ollama</span> (<code className="bg-white/8 px-1 rounded">http://localhost:11434/v1</code>) and <span className="text-zinc-300">LM Studio</span> (<code className="bg-white/8 px-1 rounded">http://localhost:1234/v1</code>) run without API keys.</p>
+        <p>• Cloud providers (<span className="text-zinc-300">OpenRouter</span>, <span className="text-zinc-300">DeepSeek</span>) use their respective API keys.</p>
+        <p>• All providers communicate through standard OpenAI-compatible REST streaming endpoints.</p>
+      </div>
     </div>
   );
 };
@@ -595,7 +1137,14 @@ const VoiceTab: React.FC<{
           <p className="text-[10px] text-zinc-600">AI reads responses aloud using Kokoro neural voices</p>
         </div>
         <button
-          onClick={() => updateSettings({ tts_enabled: !settings.tts_enabled })}
+          onClick={() => {
+            const nextTts = !settings.tts_enabled;
+            updateSettings({ tts_enabled: nextTts });
+            if (!nextTts) {
+              speechQueue.stop();
+              tauriApi.stopSpeaking().catch(() => {});
+            }
+          }}
           className={cn(
             'w-10 h-6 rounded-full transition-all relative flex-shrink-0',
             settings.tts_enabled ? 'bg-violet-600' : 'bg-zinc-800 border border-white/10'

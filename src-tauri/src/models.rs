@@ -22,6 +22,30 @@ pub struct Message {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ModelCatalogItem {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ModelProviderConfig {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type", default)]
+    pub provider_type: Option<String>,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub is_custom: bool,
+    #[serde(default)]
+    pub models: Vec<ModelCatalogItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
     pub base_url: String,
     pub api_key: String,
@@ -29,7 +53,13 @@ pub struct AppSettings {
     #[serde(default)]
     pub fast_chat_model_id: Option<String>,
     #[serde(default)]
+    pub fast_chat_provider_id: Option<String>,
+    #[serde(default)]
     pub agent_coder_model_id: Option<String>,
+    #[serde(default)]
+    pub agent_coder_provider_id: Option<String>,
+    #[serde(default)]
+    pub providers: Vec<ModelProviderConfig>,
     pub temperature: f64,
     pub top_p: f64,
     pub max_tokens: i64,
@@ -55,7 +85,10 @@ impl Default for AppSettings {
             api_key: String::new(),
             model_id: String::new(),
             fast_chat_model_id: None,
+            fast_chat_provider_id: None,
             agent_coder_model_id: None,
+            agent_coder_provider_id: None,
+            providers: Vec::new(),
             temperature: 0.7,
             top_p: 1.0,
             max_tokens: 2048,

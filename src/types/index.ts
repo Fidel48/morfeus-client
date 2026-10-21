@@ -44,12 +44,35 @@ export interface Model {
   owned_by?: string;
 }
 
+export type ProviderType = 'ollama' | 'lmstudio' | 'openrouter' | 'deepseek' | 'openai' | 'groq' | 'custom';
+
+export interface ModelCatalogItem {
+  id: string;
+  name?: string;
+}
+
+export interface ModelProviderConfig {
+  id: string;
+  name: string;
+  type?: ProviderType;
+  base_url: string;
+  api_key?: string;
+  enabled?: boolean;
+  is_custom?: boolean;
+  models: ModelCatalogItem[];
+  status?: 'online' | 'offline' | 'untested' | 'testing';
+  status_message?: string;
+}
+
 export interface AppSettings {
   base_url: string;
   api_key: string;
   model_id: string;
   fast_chat_model_id?: string;
+  fast_chat_provider_id?: string;
   agent_coder_model_id?: string;
+  agent_coder_provider_id?: string;
+  providers?: ModelProviderConfig[];
   temperature: number;
   top_p: number;
   max_tokens: number;

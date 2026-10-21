@@ -29,7 +29,9 @@ const AppContent: React.FC = () => {
 
   useEffect(() => {
     // Load settings from Tauri backend on startup
-    loadFromBackend();
+    loadFromBackend().then(() => {
+      useSettingsStore.getState().updateSettings({ tts_enabled: false, continuous_voice: false });
+    });
 
     // Check mic availability
     tauriApi.checkMicrophone()

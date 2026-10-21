@@ -43,9 +43,25 @@ export function useChat() {
   const sendMessage = useCallback(
     async (content: string) => {
       if (isStreaming || !content.trim()) return;
-      if (!settings.model_id) {
+      const currentSettings = useSettingsStore.getState().settings;
+      const mode = useChatStore.getState().chatMode || 'fast';
+      const activeModel = mode === 'fast'
+        ? (currentSettings.fast_chat_model_id || currentSettings.model_id)
+        : (currentSettings.agent_coder_model_id || currentSettings.model_id);
+      if (!activeModel) {
         console.error('No model selected');
         return;
+      }
+
+      // ── Ensure active conversation ──
+      let convId = activeConversationId;
+      if (!convId) {
+        const wasTtsEnabled = useSettingsStore.getState().settings.tts_enabled;
+        const conv = useChatStore.getState().newConversation();
+        convId = conv.id;
+        if (wasTtsEnabled) {
+          useSettingsStore.getState().updateSettings({ tts_enabled: true });
+        }
       }
 
       // ── Reset voice queue for this interaction ──
@@ -71,13 +87,6 @@ export function useChat() {
       } else {
         apiContent = content;
         userDisplayContent = content;
-      }
-
-      // ── Ensure active conversation ──
-      let convId = activeConversationId;
-      if (!convId) {
-        const conv = useChatStore.getState().newConversation();
-        convId = conv.id;
       }
 
       // ── Add user message to store ──
@@ -125,18 +134,32 @@ export function useChat() {
           return s.includes('deepseek-r1') || s.includes('deepseek_r1') || (s.includes('deepseek') && s.includes('r1'));
         };
 
-        // Model resolution: use configured model for the active mode
+        // Model & Provider resolution: use configured model and provider for the active mode
         const resolvedModelId = isFastMode
           ? (currentSettings.fast_chat_model_id || currentSettings.model_id)
           : (currentSettings.agent_coder_model_id || currentSettings.model_id);
 
+        const resolvedProviderId = isFastMode
+          ? currentSettings.fast_chat_provider_id
+          : currentSettings.agent_coder_provider_id;
+
+        const matchedProvider =
+          (currentSettings.providers || []).find((p) => p.id === resolvedProviderId) ||
+          (currentSettings.providers || []).find((p) => p.models?.some((m) => m.id === resolvedModelId));
+
+        const effectiveBaseUrl = matchedProvider ? matchedProvider.base_url : currentSettings.base_url;
+        const effectiveApiKey = matchedProvider ? (matchedProvider.api_key || '') : currentSettings.api_key;
+
         const effectiveSettings: AppSettings = {
           ...currentSettings,
+          base_url: effectiveBaseUrl,
+          api_key: effectiveApiKey,
           model_id: resolvedModelId,
         };
 
-        const voiceDirective = currentSettings.tts_enabled
-          ? `\n\nVOICE MODE DIRECTIVE: Your response will be spoken aloud to the user using text-to-speech. Keep conversational answers natural, direct, and concise (1 to 3 punchy sentences). Avoid long rambling introductions, bullet lists, or reading code out loud—provide the code in markdown and give a brief 1-sentence spoken summary.`
+        const isVoiceActive = useSettingsStore.getState().settings.tts_enabled;
+        const voiceDirective = isVoiceActive
+          ? `\n\nVOICE MODE DIRECTIVE: Your response will be spoken aloud to the user using text-to-speech. Keep conversational answers natural, direct, and concise (1 to 3 punchy sentences). Avoid long rambling introductions, bullet lists, or reading code out loud—provide the code in markdown and give a brief 1-sentence spoken summary. Display all source links and references at the very end under a "### Sources" heading so they are displayed visually but not spoken.`
           : '';
 
         const thinkDirective = !isThink
@@ -152,10 +175,10 @@ Today's Date: ${dateStr}
 Current Time: ${timeStr}
 
 DIRECTIVES:
-1. SPEED & CLARITY: Respond immediately and concisely without unnecessary conversational filler.
+1. SPEED & CLARITY: Respond immediately and articulately without unnecessary conversational filler.
 2. TOOLS AVAILABLE: You have access to web search (web_search, read_webpage) and local PC file tools (get_special_dirs, search_files, list_directory, read_local_file).
 3. FILE SUMMARIZATION: When asked to find, inspect, or summarize files on the PC, call the appropriate file tools to locate and read them, then provide a clear, structured summary.
-4. WEB SEARCH & GROUNDING: When searching the web, state the exact current date/time and provide direct markdown source links to references.
+4. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or asked to read news stories or articles, provide a thorough, informative breakdown covering the key details (who, what, when, where, charges, facts, context). State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable Markdown source links formatted under a "### Sources" section at the very end: [Source Title](url).
 5. CODING LIMITATION: Fast Chat does NOT run shell commands or edit files directly. If the user wants to execute code, run terminal commands, edit codebase files, or use MCP servers, inform them to switch to "Agent Coder" mode.${voiceDirective}${thinkDirective}`;
         } else {
           const basePrompt = currentSettings.system_prompt || 'You are Morfeus, a powerful, articulate, and autonomous desktop AI developer harness and assistant.';
@@ -170,7 +193,7 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
 3. EXTENSIBILITY & MCP: You have native integration with Model Context Protocol (MCP). Active MCP servers provide dynamic tools prefixed with mcp__<server>__<tool>. You can also manage servers using list_mcp_servers, connect_mcp_server, and remove_mcp_server.
 4. SURGICAL PRECISION: Always inspect files and read existing code before editing to preserve project conventions and architecture.
 5. CONVERSATIONAL BALANCE: When the user asks general questions or explanations, answer directly, concisely, and articulately without invoking unnecessary tools.
-6. WEB SEARCH & GROUNDING: When searching the web, always synthesize verified, up-to-date information and provide direct markdown source links to relevant references.
+6. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or reading news/articles, synthesize comprehensive, verified information with key details and quotes. State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS provide direct clickable markdown source links: [Source Title](url).
 7. SUMMARY ON COMPLETION: When finishing a multi-step task, provide a clear, structured summary of what was accomplished (files read/modified, tools executed, results verified).${voiceDirective}${thinkDirective}`;
         }
 
@@ -189,12 +212,18 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             m => m.conversation_id === convId
           );
 
+          // Find the active user query for this current interaction
+          const lastUserMsg = [...allMsgs].reverse().find(m => m.role === 'user');
+
           const history: any[] = [];
           // Walk backwards, newest first, until context budget is exhausted
           for (let i = allMsgs.length - 1; i >= 0; i--) {
             const msg = allMsgs[i];
+            const isCurrentTurnUser = msg === lastUserMsg;
             const tokCost = 20 + estimateTokens(msg.content ?? '') + (msg.tool_calls ? 50 : 0);
-            if (budget + tokCost > settings.context_length) {
+
+            // Never truncate the current user query even if budget is tight
+            if (!isCurrentTurnUser && budget + tokCost > settings.context_length) {
               console.log('[Context] Truncated older messages to fit context window.');
               break;
             }
@@ -247,7 +276,7 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
                 apiMsg = {
                   role: 'tool',
                   tool_call_id: msg.tool_call_id || 'call_default',
-                  content: msg.content ?? '',
+                  content: typeof msg.content === 'string' ? capOutput(msg.content) : (msg.content ?? ''),
                 };
               }
             } else {
@@ -262,6 +291,20 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             history.unshift(apiMsg);
           }
 
+          // Clean up any leading orphaned tool messages
+          while (history.length > 0 && history[0].role === 'tool') {
+            history.shift();
+          }
+
+          // Ensure at least one user query is present in history (required by LLM chat templates)
+          const hasUser = history.some(m => m.role === 'user');
+          if (!hasUser) {
+            history.unshift({
+              role: 'user',
+              content: lastUserMsg?.content || userDisplayContent || 'Help me with this task.',
+            });
+          }
+
           return [{ role: 'system', content: systemPrompt }, ...history];
         };
 
@@ -274,8 +317,35 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             if (q.startsWith('http://') || q.startsWith('https://')) {
               result = await tauriApi.fetchWebpage(q);
             } else {
-              const res = await tauriApi.webSearch(q);
-              result = JSON.stringify(res, null, 2);
+              let res: any[] = [];
+              try {
+                res = await tauriApi.webSearch(q);
+              } catch (err) {
+                console.warn('[web_search] Backend search returned error:', err);
+              }
+              if (Array.isArray(res) && res.length > 0) {
+                // Auto-fetch top article content so the LLM has complete context (like Gemini/Perplexity/Grok)
+                let topArticleContent = '';
+                const topResult = res[0];
+                if (topResult?.url && (topResult.url.startsWith('http://') || topResult.url.startsWith('https://'))) {
+                  try {
+                    const pageText = await tauriApi.fetchWebpage(topResult.url);
+                    if (pageText && !pageText.startsWith('[Webpage Notice]') && pageText.length > 50) {
+                      topArticleContent = `\n\n═══════════════════════════════════════════════════\nFULL ARTICLE CONTENT (From Top Source: "${topResult.title}" | ${topResult.url}):\n═══════════════════════════════════════════════════\n${pageText}\n═══════════════════════════════════════════════════`;
+                    }
+                  } catch (e) {
+                    console.warn('[web_search] Could not auto-scrape top article:', e);
+                  }
+                }
+
+                const searchSnippets = res.map((r, i) =>
+                  `[Source ${i + 1}]: "${r.title}"\nURL: ${r.url}\nSnippet: ${r.snippet}`
+                ).join('\n\n');
+
+                result = `Search Results for query "${q}":\n\n${searchSnippets}${topArticleContent}\n\nSYNTHESIS DIRECTIVE: Synthesize an articulate, comprehensive response based on the article content and search results above. Detail key facts, names, chronology, charges, and context. State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable markdown source links at the end: [${topResult?.title || 'Source'}](${topResult?.url || ''}). If more depth from other sources is needed, you can call \`read_webpage\`.`;
+              } else {
+                result = typeof res === 'string' ? res : JSON.stringify(res, null, 2);
+              }
             }
           } else if (name === 'read_webpage') {
             result = await tauriApi.fetchWebpage(args.url);
@@ -582,15 +652,18 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
               }
 
               // Real-time sentence speech streaming
-              if (currentSettings.tts_enabled) {
+              const liveTts = useSettingsStore.getState().settings.tts_enabled;
+              if (liveTts) {
                 speechQueue.feedToken(delta.content);
+              } else {
+                speechQueue.stop();
               }
 
               appendStreamToken(delta.content);
             }
 
             if (delta.tool_calls) {
-              speechQueue.reset(); // Don't speak tool call JSON
+              speechQueue.stop(); // Don't speak tool call JSON
               appendToolCallDelta(delta.tool_calls);
             }
 
@@ -742,9 +815,10 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           }
 
           // ── Final response: Flush speechQueue if TTS enabled ──
-          if (currentSettings.tts_enabled && !hasToolCalls) {
+          const liveSettings = useSettingsStore.getState().settings;
+          if (liveSettings.tts_enabled && !hasToolCalls) {
             speechQueue.flush();
-          } else if (!hasToolCalls && currentSettings.continuous_voice && currentSettings.tts_enabled) {
+          } else if (!hasToolCalls && liveSettings.continuous_voice && liveSettings.tts_enabled) {
             if (typeof window !== 'undefined') {
               window.dispatchEvent(new CustomEvent('speech-playback-complete'));
             }

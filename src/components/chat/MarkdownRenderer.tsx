@@ -14,7 +14,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
   className = '',
 }) => {
   return (
-    <div className={`markdown-content ${className}`}>
+    <div className={`markdown-content break-words overflow-hidden min-w-0 max-w-full ${className}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}
@@ -33,7 +33,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
             }
             return (
               <code
-                className="px-1.5 py-0.5 rounded text-xs font-mono bg-white/10 text-violet-300 border border-white/10"
+                className="px-1.5 py-0.5 rounded text-xs font-mono bg-white/10 text-violet-300 border border-white/10 break-all"
                 {...props}
               >
                 {children}
@@ -41,29 +41,29 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
             );
           },
           p({ children }) {
-            return <p className="mb-3 last:mb-0 leading-relaxed">{children}</p>;
+            return <p className="mb-3 last:mb-0 leading-relaxed break-words">{children}</p>;
           },
           h1({ children }) {
-            return <h1 className="text-2xl font-bold mb-4 mt-6 first:mt-0">{children}</h1>;
+            return <h1 className="text-2xl font-bold mb-4 mt-6 first:mt-0 break-words">{children}</h1>;
           },
           h2({ children }) {
-            return <h2 className="text-xl font-semibold mb-3 mt-5 first:mt-0">{children}</h2>;
+            return <h2 className="text-xl font-semibold mb-3 mt-5 first:mt-0 break-words">{children}</h2>;
           },
           h3({ children }) {
-            return <h3 className="text-lg font-semibold mb-2 mt-4 first:mt-0">{children}</h3>;
+            return <h3 className="text-lg font-semibold mb-2 mt-4 first:mt-0 break-words">{children}</h3>;
           },
           ul({ children }) {
-            return <ul className="list-disc list-inside mb-3 space-y-1 pl-2">{children}</ul>;
+            return <ul className="list-disc list-inside mb-3 space-y-1 pl-2 break-words">{children}</ul>;
           },
           ol({ children }) {
-            return <ol className="list-decimal list-inside mb-3 space-y-1 pl-2">{children}</ol>;
+            return <ol className="list-decimal list-inside mb-3 space-y-1 pl-2 break-words">{children}</ol>;
           },
           li({ children }) {
-            return <li className="leading-relaxed">{children}</li>;
+            return <li className="leading-relaxed break-words">{children}</li>;
           },
           blockquote({ children }) {
             return (
-              <blockquote className="border-l-2 border-violet-500 pl-4 my-3 text-zinc-400 italic">
+              <blockquote className="border-l-2 border-violet-500 pl-4 my-3 text-zinc-400 italic break-words">
                 {children}
               </blockquote>
             );
@@ -77,7 +77,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
                 href={href}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-violet-400 hover:text-violet-300 underline underline-offset-2 transition-colors"
+                className="text-violet-400 hover:text-violet-300 underline underline-offset-2 transition-colors break-words break-all"
               >
                 {children}
               </a>

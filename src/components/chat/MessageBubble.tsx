@@ -98,7 +98,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
       >
         <div
           className={cn(
-            'px-4 py-3 rounded-2xl text-sm leading-relaxed',
+            'px-4 py-3 rounded-2xl text-sm leading-relaxed break-words min-w-0 overflow-hidden',
             isUser
               ? 'bg-violet-600 text-white rounded-tr-sm max-w-[85%] self-end'
               : 'bg-zinc-900/60 border border-white/8 text-zinc-100 rounded-tl-sm w-full'
@@ -240,7 +240,7 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({ content, rea
       </div>
 
       <div className="flex-1 min-w-0 flex flex-col items-start">
-        <div className="px-4 py-3 rounded-2xl rounded-tl-sm text-sm leading-relaxed bg-zinc-900/60 border border-white/8 text-zinc-100 w-full">
+        <div className="px-4 py-3 rounded-2xl rounded-tl-sm text-sm leading-relaxed bg-zinc-900/60 border border-white/8 text-zinc-100 w-full break-words min-w-0 overflow-hidden">
           {reasoning && (
             <ReasoningBlock reasoning={reasoning} isLive={!content} />
           )}
