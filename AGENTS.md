@@ -129,11 +129,11 @@ Phase 5: Language Server Protocol (LSP) Activation (Diagnostics & Auto-Fix)
 | **P1** | MCP Server Settings UI | 🟢 Done | High | "MCP Servers" tab in `SettingsModal.tsx` with presets, add/delete, status badges. |
 | **P1** | MCP Tool Inspector Drawer | 🟢 Done | Medium | Expandable tool list showing discovered tools & parameters. |
 | **P1** | Chat MCP Auto-Connect Tools | 🟢 Done | High | `connect_mcp_server` & `remove_mcp_server` in `useChat.ts`. |
-| **P2** | `grep_search` Tool | ⚪ Backlog | High | Fast ripgrep/content search across workspace files. |
-| **P2** | `read_file_range` Tool | ⚪ Backlog | High | Slice reading `[start..end]` to avoid dumping whole files. |
-| **P2** | `replace_in_file` Tool | ⚪ Backlog | High | Surgical search-and-replace block edits without file rewrites. |
-| **P3** | Side-Panel Coder Canvas Tab | ⚪ Backlog | High | Dedicated Code tab in `RightPanel.tsx` with syntax highlighting. |
-| **P3** | Canvas Action Toolbar | ⚪ Backlog | High | "▶️ Run Code", "💾 Apply to Workspace", and "Diff View". |
-| **P3** | Chat-to-Canvas Sync | ⚪ Backlog | Medium | Button in message code blocks to open and inspect in side canvas. |
+| **P2** | `grep_search` Tool | 🟢 Done | High | Fast content/symbol search across workspace files. |
+| **P2** | `read_file_range` Tool | 🟢 Done | High | Slice reading `[start..end]` with line numbers to avoid dumping whole files. |
+| **P2** | `replace_in_file` Tool | 🟢 Done | High | Surgical search-and-replace block edits without file rewrites. |
+| **P3** | Side-Panel Coder Canvas Tab | 🟢 Done | High | Dedicated Canvas tab in `RightPanel.tsx` with dynamic 560px width. |
+| **P3** | Canvas Action Toolbar | 🟢 Done | High | "▶️ Run Code", "💾 Save", "📋 Copy", "Diff View", and console logs. |
+| **P3** | Chat-to-Canvas Sync | 🟢 Done | Medium | "Canvas" button in code blocks and live file sync upon agent edits. |
 | **P4** | Background Process Runner | ⚪ Backlog | Medium | Async `spawn_process`, `read_logs`, `kill_process` for dev servers. |
 | **P5** | Expose LSP Diagnostics | ⚪ Backlog | Medium | Feed compiler errors back to agent for automatic self-repair. |

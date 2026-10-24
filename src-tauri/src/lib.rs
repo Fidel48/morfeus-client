@@ -75,6 +75,9 @@ pub fn run() {
             commands::files::search_files,
             commands::files::write_to_file,
             commands::files::delete_file,
+            commands::files::grep_search,
+            commands::files::read_file_range,
+            commands::files::replace_in_file,
             commands::rules::find_project_rules,
             // YouTube
             commands::youtube::read_youtube_transcript,

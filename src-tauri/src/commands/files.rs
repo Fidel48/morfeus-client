@@ -309,3 +309,267 @@ pub async fn delete_file(path: String) -> Result<String, String> {
 
     Ok(format!("Successfully deleted {}", path))
 }
+
+// ─── Surgical Developer Tools (IDE Agent Coder) ─────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GrepMatch {
+    pub file: String,
+    pub line_number: usize,
+    pub line_content: String,
+}
+
+/// Fast codebase search across workspace files for symbols, patterns, and text.
+#[command]
+pub async fn grep_search(
+    query: String,
+    root: Option<String>,
+    includes: Option<Vec<String>>,
+    case_insensitive: Option<bool>,
+) -> Result<Vec<GrepMatch>, String> {
+    let search_root = if let Some(r) = root {
+        PathBuf::from(r)
+    } else {
+        home_dir_path().ok_or("Cannot determine home directory".to_string())?
+    };
+
+    if !search_root.exists() {
+        return Err(format!("Search root does not exist: {}", search_root.display()));
+    }
+
+    let is_case_insensitive = case_insensitive.unwrap_or(true);
+    let needle = if is_case_insensitive {
+        query.to_lowercase()
+    } else {
+        query.clone()
+    };
+
+    let mut matches = Vec::new();
+    walk_grep_dir(
+        &search_root,
+        &needle,
+        includes.as_deref(),
+        is_case_insensitive,
+        &mut matches,
+        0,
+    );
+
+    Ok(matches)
+}
+
+fn walk_grep_dir(
+    dir: &Path,
+    needle: &str,
+    includes: Option<&[String]>,
+    case_insensitive: bool,
+    matches: &mut Vec<GrepMatch>,
+    depth: usize,
+) {
+    if depth > 12 || matches.len() >= 50 {
+        return;
+    }
+
+    let read_dir = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+
+    for entry in read_dir.filter_map(|e| e.ok()) {
+        if matches.len() >= 50 {
+            break;
+        }
+
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+
+        if path.is_dir() {
+            // Skip hidden folders and dependency/build trees
+            if file_name.starts_with('.')
+                || file_name == "node_modules"
+                || file_name == "target"
+                || file_name == "dist"
+                || file_name == "build"
+                || file_name == ".next"
+                || file_name == "__pycache__"
+                || file_name == ".venv"
+                || file_name == "venv"
+            {
+                continue;
+            }
+            walk_grep_dir(&path, needle, includes, case_insensitive, matches, depth + 1);
+        } else if path.is_file() {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            let is_binary_ext = matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "pdf" | "zip" | "tar"
+                    | "gz" | "bin" | "exe" | "dylib" | "so" | "dll" | "wasm" | "db" | "sqlite"
+                    | "mp3" | "wav" | "mp4" | "mov" | "webm"
+            );
+
+            if is_binary_ext {
+                continue;
+            }
+
+            if let Some(inc) = includes {
+                if !inc.is_empty() {
+                    let matched = inc.iter().any(|pattern| {
+                        let clean_pat = pattern.trim_start_matches('*').trim_start_matches('.');
+                        ext == clean_pat || file_name.ends_with(pattern)
+                    });
+                    if !matched {
+                        continue;
+                    }
+                }
+            }
+
+            if let Ok(content) = fs::read_to_string(&path) {
+                for (idx, line) in content.lines().enumerate() {
+                    if matches.len() >= 50 {
+                        break;
+                    }
+                    let line_to_check = if case_insensitive {
+                        line.to_lowercase()
+                    } else {
+                        line.to_string()
+                    };
+
+                    if line_to_check.contains(needle) {
+                        let trimmed_content = if line.len() > 300 {
+                            format!("{}...", &line[..300])
+                        } else {
+                            line.to_string()
+                        };
+
+                        matches.push(GrepMatch {
+                            file: path.to_string_lossy().to_string(),
+                            line_number: idx + 1,
+                            line_content: trimmed_content,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FileRangeResult {
+    pub path: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub total_lines: usize,
+    pub content: String,
+}
+
+/// Read a slice of a file with line-number prefixing to avoid dumping entire files.
+#[command]
+pub async fn read_file_range(
+    path: String,
+    start_line: usize,
+    end_line: usize,
+) -> Result<FileRangeResult, String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("File does not exist: {}", path));
+    }
+
+    let file_content = fs::read_to_string(p)
+        .map_err(|e| format!("Failed to read file (may be binary or invalid UTF-8): {}", e))?;
+
+    let lines: Vec<&str> = file_content.lines().collect();
+    let total_lines = lines.len();
+
+    let start = if start_line == 0 { 1 } else { start_line };
+    let end = if end_line == 0 || end_line > total_lines {
+        total_lines
+    } else {
+        end_line
+    };
+
+    if start > total_lines {
+        return Err(format!(
+            "Start line {} is beyond total lines in file ({})",
+            start, total_lines
+        ));
+    }
+
+    let mut output = String::new();
+    for line_idx in start..=end {
+        if let Some(line) = lines.get(line_idx - 1) {
+            output.push_str(&format!("{:>5} | {}\n", line_idx, line));
+        }
+    }
+
+    Ok(FileRangeResult {
+        path,
+        start_line: start,
+        end_line: end,
+        total_lines,
+        content: output,
+    })
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ReplaceResult {
+    pub path: String,
+    pub occurrences_replaced: usize,
+    pub message: String,
+}
+
+/// Surgically replace an exact block of code inside a file without rewriting the whole file.
+#[command]
+pub async fn replace_in_file(
+    path: String,
+    target_content: String,
+    replacement_content: String,
+    allow_multiple: Option<bool>,
+) -> Result<ReplaceResult, String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("File does not exist: {}", path));
+    }
+
+    let content = fs::read_to_string(p)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+    let count = content.matches(&target_content).count();
+
+    if count == 0 {
+        return Err(format!(
+            "Target content not found in '{}'. Please verify exact indentation and surrounding context.",
+            path
+        ));
+    }
+
+    let allow_mult = allow_multiple.unwrap_or(false);
+    if count > 1 && !allow_mult {
+        return Err(format!(
+            "Target content matches {} occurrences in '{}'. Please provide more surrounding lines for a unique match, or set allow_multiple: true.",
+            count, path
+        ));
+    }
+
+    let new_content = if allow_mult {
+        content.replace(&target_content, &replacement_content)
+    } else {
+        content.replacen(&target_content, &replacement_content, 1)
+    };
+
+    fs::write(p, new_content)
+        .map_err(|e| format!("Failed to write updated file '{}': {}", path, e))?;
+
+    Ok(ReplaceResult {
+        path: path.clone(),
+        occurrences_replaced: if allow_mult { count } else { 1 },
+        message: format!(
+            "Successfully replaced {} occurrence(s) in {}",
+            if allow_mult { count } else { 1 },
+            path
+        ),
+    })
+}

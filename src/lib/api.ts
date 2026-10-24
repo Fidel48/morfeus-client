@@ -249,6 +249,90 @@ export const WEB_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'grep_search',
+      description: "Fast codebase search across workspace files. Searches file contents line-by-line for symbols, function definitions, variable names, or patterns. Skips build/dependency directories (node_modules, target, etc.). Returns file path, line numbers, and matching lines.",
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'The search string or symbol to find across codebase files.',
+          },
+          root: {
+            type: 'string',
+            description: 'The root folder path to search within. If omitted, searches from project root or home.',
+          },
+          includes: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional file extensions or patterns to include (e.g. ["*.rs", "*.tsx", "*.py"]).',
+          },
+          case_insensitive: {
+            type: 'boolean',
+            description: 'Whether search is case-insensitive. Defaults to true.',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_file_range',
+      description: "Read a specific line range from a text file with line numbers (e.g. lines 40 to 120). Use this instead of reading whole files to conserve tokens and inspect precise function implementations.",
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: 'The absolute path to the file to inspect.',
+          },
+          start_line: {
+            type: 'number',
+            description: 'The starting line number to read (1-indexed).',
+          },
+          end_line: {
+            type: 'number',
+            description: 'The ending line number to read (inclusive).',
+          },
+        },
+        required: ['path', 'start_line', 'end_line'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'replace_in_file',
+      description: "Surgically replace an exact code block in a file without rewriting the entire file. You must provide the exact existing target content (including indentation and newlines) and the replacement content. Preserves the rest of the file intact.",
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: 'The absolute path of the file to modify.',
+          },
+          target_content: {
+            type: 'string',
+            description: 'The exact existing block of code to find and replace. Must match the file exactly.',
+          },
+          replacement_content: {
+            type: 'string',
+            description: 'The new block of code to replace target_content with.',
+          },
+          allow_multiple: {
+            type: 'boolean',
+            description: 'Whether to replace multiple occurrences if found. Default false (expects unique match).',
+          },
+        },
+        required: ['path', 'target_content', 'replacement_content'],
+      },
+    },
+  },
   // ── Vision & Control (Violoop Architecture) ──
   {
     type: 'function',

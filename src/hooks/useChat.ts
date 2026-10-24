@@ -2,6 +2,7 @@ import { useCallback } from 'react';
 import { useChatStore } from '@/stores/chatStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useMcpStore } from '@/stores/mcpStore';
+import { useCanvasStore } from '@/stores/canvasStore';
 import { streamChat, WEB_TOOLS, FAST_CHAT_TOOLS } from '@/lib/api';
 import { tauriApi } from '@/lib/tauri';
 import { kokoroSpeak, kokoroStop, speechQueue } from '@/lib/kokoroTts';
@@ -442,6 +443,17 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             result = found.length === 0
               ? `No files found matching "${args.query}".`
               : `Found ${found.length} result(s):\n${found.map(f => f.is_dir ? `📁 ${f.path}/` : `📄 ${f.path}`).join('\n')}`;
+          } else if (name === 'grep_search') {
+            const matches = await tauriApi.grepSearch(args.query, args.root, args.includes, args.case_insensitive);
+            if (matches.length === 0) {
+              result = `No code matches found for "${args.query}".`;
+            } else {
+              const formatted = matches.map(m => `${m.file}:${m.line_number}: ${m.line_content}`).join('\n');
+              result = `Found ${matches.length} match(es) for "${args.query}":\n\`\`\`\n${formatted}\n\`\`\``;
+            }
+          } else if (name === 'read_file_range') {
+            const rangeRes = await tauriApi.readFileRange(args.path, Number(args.start_line) || 1, Number(args.end_line) || 100);
+            result = `File: ${rangeRes.path} (lines ${rangeRes.start_line}–${rangeRes.end_line} of ${rangeRes.total_lines}):\n\`\`\`\n${rangeRes.content}\`\`\``;
           } else if (name === 'read_local_file') {
             result = await tauriApi.parseLocalFile(args.path);
           } else if (name === 'run_python') {
@@ -478,6 +490,7 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           } else if (
             name === 'run_terminal_command' ||
             name === 'write_to_file' ||
+            name === 'replace_in_file' ||
             name === 'delete_file' ||
             name === 'analyze_screen' ||
             name === 'mouse_click' ||
@@ -522,6 +535,18 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
               ].filter(Boolean).join('\n');
             } else if (name === 'write_to_file') {
               result = await tauriApi.writeToFile(args.path, args.content);
+              // Live sync to Coder Canvas
+              try {
+                useCanvasStore.getState().openFileInCanvas(args.path, args.content);
+              } catch {}
+            } else if (name === 'replace_in_file') {
+              const res = await tauriApi.replaceInFile(args.path, args.target_content, args.replacement_content, args.allow_multiple);
+              result = `✅ ${res.message}`;
+              // Live sync updated file to Coder Canvas
+              try {
+                const updatedContent = await tauriApi.parseLocalFile(args.path);
+                useCanvasStore.getState().openFileInCanvas(args.path, updatedContent);
+              } catch {}
             } else if (name === 'delete_file') {
               result = await tauriApi.deleteFile(args.path);
             } else if (name === 'analyze_screen') {

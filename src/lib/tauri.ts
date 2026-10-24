@@ -297,6 +297,21 @@ export const tauriApi = {
     return tauriInvoke('delete_file', { path });
   },
 
+  /** Fast codebase search for matching lines/symbols across workspace files */
+  async grepSearch(query: string, root?: string, includes?: string[], case_insensitive?: boolean): Promise<Array<{ file: string; line_number: number; line_content: string }>> {
+    return tauriInvoke('grep_search', { query, root: root ?? null, includes: includes ?? null, caseInsensitive: case_insensitive ?? null });
+  },
+
+  /** Slice-read a file with line-number prefixing */
+  async readFileRange(path: string, start_line: number, end_line: number): Promise<{ path: string; start_line: number; end_line: number; total_lines: number; content: string }> {
+    return tauriInvoke('read_file_range', { path, startLine: start_line, endLine: end_line });
+  },
+
+  /** Surgically replace an exact code block in a file without rewriting the whole file */
+  async replaceInFile(path: string, target_content: string, replacement_content: string, allow_multiple?: boolean): Promise<{ path: string; occurrences_replaced: number; message: string }> {
+    return tauriInvoke('replace_in_file', { path, targetContent: target_content, replacementContent: replacement_content, allowMultiple: allow_multiple ?? null });
+  },
+
   // ── Vision & Control (Violoop Architecture) ──
 
   /** Capture the primary screen and return it as a Base64 PNG. */

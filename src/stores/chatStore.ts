@@ -52,6 +52,7 @@ interface ChatStore {
   chatStatus: ChatStatus;
   abortController: AbortController | null;
   rightPanelOpen: boolean;
+  rightPanelTab: 'code' | 'parameters' | 'context' | 'tools';
   activeMcpServers: string[];
   isAgenticMode: boolean;
   chatMode: ChatMode;
@@ -76,6 +77,8 @@ interface ChatStore {
   stopStreaming: () => void;
   newConversation: () => Conversation;
   toggleRightPanel: () => void;
+  setRightPanelTab: (tab: 'code' | 'parameters' | 'context' | 'tools') => void;
+  openRightPanelTab: (tab: 'code' | 'parameters' | 'context' | 'tools') => void;
   addMcpServer: (id: string) => void;
   setIsAgenticMode: (isAgentic: boolean) => void;
   setChatMode: (mode: ChatMode) => void;
@@ -95,6 +98,7 @@ export const useChatStore = create<ChatStore>()(
       chatStatus: 'idle',
       abortController: null,
       rightPanelOpen: false,
+      rightPanelTab: 'code',
       activeMcpServers: [],
       isAgenticMode: false,
       chatMode: 'fast',
@@ -290,6 +294,8 @@ export const useChatStore = create<ChatStore>()(
       },
 
       toggleRightPanel: () => set((state) => ({ rightPanelOpen: !state.rightPanelOpen })),
+      setRightPanelTab: (rightPanelTab) => set({ rightPanelTab }),
+      openRightPanelTab: (tab) => set({ rightPanelOpen: true, rightPanelTab: tab }),
       addMcpServer: (id) =>
         set((state) => ({
           activeMcpServers: state.activeMcpServers.includes(id)

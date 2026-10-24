@@ -1,65 +1,80 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { SlidersHorizontal, FileText, Wrench, X } from 'lucide-react';
+import { SlidersHorizontal, FileText, Wrench, X, Code2 } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useChatStore } from '@/stores/chatStore';
+import { CoderCanvas } from './CoderCanvas';
 import { cn } from '@/lib/utils';
 import type { AppSettings } from '@/types';
 
-type PanelTab = 'parameters' | 'context' | 'tools';
-
 export const RightPanel: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<PanelTab>('parameters');
   const { settings, updateSettings } = useSettingsStore();
-  const { rightPanelOpen, toggleRightPanel } = useChatStore();
+  const { rightPanelOpen, toggleRightPanel, rightPanelTab, setRightPanelTab } = useChatStore();
+
+  const isCode = rightPanelTab === 'code';
+  const targetWidth = isCode ? 560 : 280;
 
   return (
     <AnimatePresence>
       {rightPanelOpen && (
         <motion.div
           initial={{ width: 0, opacity: 0 }}
-          animate={{ width: 280, opacity: 1 }}
+          animate={{ width: targetWidth, opacity: 1 }}
           exit={{ width: 0, opacity: 0 }}
-          transition={{ duration: 0.2, ease: 'easeInOut' }}
+          transition={{ duration: 0.22, ease: 'easeInOut' }}
           className="flex-shrink-0 bg-zinc-950/80 border-l border-white/8 overflow-hidden"
+          style={{ width: targetWidth }}
         >
-          <div className="w-[280px] h-full flex flex-col">
+          <div className="h-full flex flex-col" style={{ width: targetWidth }}>
             {/* Tab bar */}
             <div className="flex items-center gap-1 px-3 pt-3 pb-2 border-b border-white/8 flex-shrink-0">
               <TabButton
+                icon={<Code2 size={13} />}
+                label="Canvas"
+                active={rightPanelTab === 'code'}
+                onClick={() => setRightPanelTab('code')}
+              />
+              <TabButton
                 icon={<SlidersHorizontal size={13} />}
                 label="Params"
-                active={activeTab === 'parameters'}
-                onClick={() => setActiveTab('parameters')}
+                active={rightPanelTab === 'parameters'}
+                onClick={() => setRightPanelTab('parameters')}
               />
               <TabButton
                 icon={<FileText size={13} />}
                 label="Context"
-                active={activeTab === 'context'}
-                onClick={() => setActiveTab('context')}
+                active={rightPanelTab === 'context'}
+                onClick={() => setRightPanelTab('context')}
               />
               <TabButton
                 icon={<Wrench size={13} />}
                 label="Tools"
-                active={activeTab === 'tools'}
-                onClick={() => setActiveTab('tools')}
+                active={rightPanelTab === 'tools'}
+                onClick={() => setRightPanelTab('tools')}
               />
               <button
                 onClick={toggleRightPanel}
                 className="ml-auto p-1 rounded-md text-zinc-600 hover:text-zinc-300 hover:bg-white/8 transition-colors"
+                title="Close panel (Ctrl+\)"
               >
                 <X size={13} />
               </button>
             </div>
 
             {/* Content */}
-            <div className="flex-1 overflow-y-auto p-3 space-y-4">
-              {activeTab === 'parameters' && (
-                <ParametersTab settings={settings} updateSettings={updateSettings} />
-              )}
-              {activeTab === 'context' && <ContextTab settings={settings} updateSettings={updateSettings} />}
-              {activeTab === 'tools' && <ToolsTab />}
-            </div>
+            {rightPanelTab === 'code' ? (
+              <div className="flex-1 overflow-hidden">
+                <CoderCanvas />
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto p-3 space-y-4">
+                {rightPanelTab === 'parameters' && (
+                  <ParametersTab settings={settings} updateSettings={updateSettings} />
+                )}
+                {rightPanelTab === 'context' && <ContextTab settings={settings} updateSettings={updateSettings} />}
+                {rightPanelTab === 'tools' && <ToolsTab />}
+              </div>
+            )}
           </div>
         </motion.div>
       )}
