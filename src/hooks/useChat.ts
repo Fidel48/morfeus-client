@@ -201,12 +201,16 @@ export function useChat() {
         const effectiveBaseUrl = matchedProvider ? matchedProvider.base_url : currentSettings.base_url;
         const effectiveApiKey = matchedProvider ? (matchedProvider.api_key || '') : currentSettings.api_key;
 
-        // Reasoning tokens count against max_tokens on most servers. When Think is on,
-        // add headroom so the model can finish thinking AND still write an answer.
+        // Reasoning tokens count against max_tokens on most servers. When Think is on, add
+        // headroom so the model can finish thinking AND write an answer, but never exceed
+        // half of the user's chosen context window, so history/prompt still fit and the
+        // context window setting is respected exactly as configured.
         const REASONING_HEADROOM = 6144;
         const baseMaxTokens = currentSettings.max_tokens > 0 ? currentSettings.max_tokens : 2048;
-        const effectiveMaxTokens = isThink ? baseMaxTokens + REASONING_HEADROOM : baseMaxTokens;
-        const effectiveContext = Math.max(currentSettings.context_length || 0, effectiveMaxTokens + 2048);
+        const userContext = currentSettings.context_length || 4096;
+        const effectiveMaxTokens = isThink
+          ? Math.max(baseMaxTokens, Math.min(baseMaxTokens + REASONING_HEADROOM, Math.floor(userContext / 2)))
+          : baseMaxTokens;
 
         const effectiveSettings: AppSettings = {
           ...currentSettings,
@@ -214,7 +218,6 @@ export function useChat() {
           api_key: effectiveApiKey,
           model_id: resolvedModelId,
           max_tokens: effectiveMaxTokens,
-          context_length: effectiveContext,
         };
 
         const isVoiceActive = useSettingsStore.getState().settings.tts_enabled;
