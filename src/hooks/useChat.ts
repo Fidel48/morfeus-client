@@ -242,10 +242,11 @@ Current Time: ${timeStr}
 
 DIRECTIVES:
 1. SPEED & CLARITY: Respond immediately and articulately without unnecessary conversational filler.
-2. TOOLS AVAILABLE: You have access to web search (web_search, read_webpage) and local PC file tools (get_special_dirs, search_files, list_directory, read_local_file).
-3. FILE SUMMARIZATION: When asked to find, inspect, or summarize files on the PC, call the appropriate file tools to locate and read them, then provide a clear, structured summary.
-4. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or asked to read news stories or articles, provide a thorough, informative breakdown covering the key details (who, what, when, where, charges, facts, context). State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable Markdown source links formatted under a "### Sources" section at the very end: [Source Title](url).
-5. CODING LIMITATION: Chat mode does NOT run shell commands or edit files directly. If the user wants to execute code, run terminal commands, edit codebase files, or use MCP servers, inform them to switch to "Agent Coder" mode.${voiceDirective}${thinkDirective}`;
+2. CONCISE CODE OUTPUT: When asked for code, output clean, self-contained code without redundant post-code tutorials or unsolicited line-by-line breakdowns. Let clean code speak for itself and conserve tokens.
+3. TOOLS AVAILABLE: You have access to web search (web_search, read_webpage) and local PC file tools (get_special_dirs, search_files, list_directory, read_local_file).
+4. FILE SUMMARIZATION: When asked to find, inspect, or summarize files on the PC, call the appropriate file tools to locate and read them, then provide a clear, structured summary.
+5. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or asked to read news stories or articles, provide a thorough, informative breakdown covering the key details (who, what, when, where, charges, facts, context). State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable Markdown source links formatted under a "### Sources" section at the very end: [Source Title](url).
+6. CODING LIMITATION: Chat mode does NOT run shell commands or edit files directly. If the user wants to execute code, run terminal commands, edit codebase files, or use MCP servers, inform them to switch to "Agent Coder" mode.${voiceDirective}${thinkDirective}`;
         } else {
           const basePrompt = currentSettings.system_prompt || 'You are Morfeus, a powerful, articulate, and autonomous desktop AI developer harness and assistant.';
           systemPrompt = `${basePrompt}
@@ -260,7 +261,12 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
 4. SURGICAL PRECISION: Always inspect files and read existing code before editing to preserve project conventions and architecture.
 5. CONVERSATIONAL BALANCE: When the user asks general questions or explanations, answer directly, concisely, and articulately without invoking unnecessary tools.
 6. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or reading news/articles, synthesize comprehensive, verified information with key details and quotes. State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS provide direct clickable markdown source links: [Source Title](url).
-7. SUMMARY ON COMPLETION: When finishing a multi-step task, provide a clear, structured summary of what was accomplished (files read/modified, tools executed, results verified).${voiceDirective}${thinkDirective}`;
+7. SUMMARY ON COMPLETION: When finishing a multi-step task, provide a clear, structured summary of what was accomplished (files read/modified, tools executed, results verified).
+8. TOKEN CONSERVATION & ZERO-NOISE CODE DELIVERY:
+   - NO PREAMBLE: Deliver code directly without conversational throat-clearing ("Here is the complete drop-in file...", "Sure, I can help with that...").
+   - ZERO UNPROMPTED EXPLANATIONS: Do NOT append unsolicited line-by-line breakdowns ("What this does"), beginner tutorials ("To use it: save as file, press F5..."), or speculative advice ("If you want 3D printing..."). The user already knows how to run their tools.
+   - NO CONVERSATIONAL TRAILERS: Do NOT end with unsolicited offers ("Want me to also add a filleted version... Just say the word."). Stop generating as soon as the code/task is delivered.
+   - CODE OVER NOISE: Let well-structured code with concise inline comments explain the implementation. If the user explicitly asks for an explanation, keep it to 1–2 punchy bullets highlighting key architectural decisions.${voiceDirective}${thinkDirective}`;
         }
 
         // ── Tool dedup + rate limiting: persists across all recursive depths for this turn ──
