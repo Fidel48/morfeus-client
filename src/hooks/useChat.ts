@@ -220,7 +220,7 @@ export function useChat() {
         let systemPrompt: string;
 
         if (isFastMode) {
-          systemPrompt = `You are Morfeus in Fast Chat mode. Be lightning fast, direct, and concise.
+          systemPrompt = `You are Morfeus in Chat mode. Be direct, clear, and concise.
 
 Today's Date: ${dateStr}
 Current Time: ${timeStr}
@@ -230,7 +230,7 @@ DIRECTIVES:
 2. TOOLS AVAILABLE: You have access to web search (web_search, read_webpage) and local PC file tools (get_special_dirs, search_files, list_directory, read_local_file).
 3. FILE SUMMARIZATION: When asked to find, inspect, or summarize files on the PC, call the appropriate file tools to locate and read them, then provide a clear, structured summary.
 4. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or asked to read news stories or articles, provide a thorough, informative breakdown covering the key details (who, what, when, where, charges, facts, context). State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable Markdown source links formatted under a "### Sources" section at the very end: [Source Title](url).
-5. CODING LIMITATION: Fast Chat does NOT run shell commands or edit files directly. If the user wants to execute code, run terminal commands, edit codebase files, or use MCP servers, inform them to switch to "Agent Coder" mode.${voiceDirective}${thinkDirective}`;
+5. CODING LIMITATION: Chat mode does NOT run shell commands or edit files directly. If the user wants to execute code, run terminal commands, edit codebase files, or use MCP servers, inform them to switch to "Agent Coder" mode.${voiceDirective}${thinkDirective}`;
         } else {
           const basePrompt = currentSettings.system_prompt || 'You are Morfeus, a powerful, articulate, and autonomous desktop AI developer harness and assistant.';
           systemPrompt = `${basePrompt}
@@ -598,7 +598,7 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           let availableTools: ToolDefinition[] = [];
           if (!isMaxDepth) {
             if (isFastMode) {
-              // Fast Chat: minimal lightweight read-only tools for instant response & low prefill latency
+              // Chat: minimal lightweight read-only tools for instant response & low prefill latency
               availableTools = FAST_CHAT_TOOLS;
             } else {
               // Agent Coder: full developer suite with all built-in tools + active MCP servers

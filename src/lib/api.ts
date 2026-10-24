@@ -394,7 +394,7 @@ export const WEB_TOOLS: ToolDefinition[] = [
 ];
 
 /**
- * Fast Chat Toolset:
+ * Chat Toolset:
  * Minimal, lightweight read-only tools designed for lightning-fast response times
  * without heavy tool grammar prefill overhead. Allows web search and looking for/summarizing PC files.
  */

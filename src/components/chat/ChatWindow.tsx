@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo, KeyboardEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Send, Square, PanelRight, Loader2, Wrench, Paperclip, X, FileText, Image as ImageIcon, Sparkles, AlertTriangle, Check, Zap, Code2, Volume2, VolumeX, Atom, ChevronUp, RefreshCw, Settings, Search, UploadCloud } from 'lucide-react';
+import { Send, Square, PanelRight, Loader2, Wrench, Paperclip, X, FileText, Image as ImageIcon, Sparkles, AlertTriangle, Check, Code2, Volume2, VolumeX, Atom, ChevronUp, RefreshCw, Settings, Search, UploadCloud, MessageSquare } from 'lucide-react';
 import { MessageBubble, StreamingMessage } from './MessageBubble';
 import { VoiceButton } from '@/components/voice/VoiceButton';
 import { useChat } from '@/hooks/useChat';
@@ -690,13 +690,12 @@ export const ChatWindow: React.FC = () => {
             className={cn(
               'flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition-all duration-200 cursor-pointer',
               chatMode === 'fast'
-                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm shadow-emerald-500/10'
+                ? 'bg-zinc-800 text-zinc-100 border border-zinc-700/80 shadow-sm'
                 : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
             )}
-            title="Fast Chat: Lightning-fast responses with web search & local PC file summarization"
+            title="Chat: Ask questions, search web, or summarize PC files"
           >
-            <Zap size={13} className={cn(chatMode === 'fast' ? 'text-emerald-400 fill-emerald-400/30' : 'text-zinc-500')} />
-            <span>Fast Chat</span>
+            <span>Chat</span>
           </button>
 
           <button
@@ -796,7 +795,7 @@ export const ChatWindow: React.FC = () => {
                 !activeModelName
                   ? "Select a model below to begin chatting…"
                   : chatMode === 'fast'
-                  ? "Fast Chat: Ask questions, search web, or summarize PC files… (Enter to send)"
+                  ? "Chat: Ask questions, search web, or summarize PC files… (Enter to send)"
                   : "Agent Coder: Build, refactor, run commands, or code tasks… (Enter to send)"
               }
               rows={1}
@@ -908,7 +907,7 @@ export const ChatWindow: React.FC = () => {
                         ? 'bg-white/15 text-white border-white/20 shadow-md'
                         : 'bg-white/5 hover:bg-white/10 border-white/8 text-zinc-400 hover:text-zinc-200'
                     )}
-                    title={`Click to switch model for ${isFastMode ? 'Fast Chat' : 'Agent Coder'}. Active: ${activeModelName || 'None'}`}
+                    title={`Click to switch model for ${isFastMode ? 'Chat' : 'Agent Coder'}. Active: ${activeModelName || 'None'}`}
                   >
                     <span
                       className={cn(
@@ -916,7 +915,7 @@ export const ChatWindow: React.FC = () => {
                         !activeModelName
                           ? 'bg-amber-400 animate-pulse'
                           : isFastMode
-                          ? 'bg-emerald-400'
+                          ? 'bg-zinc-300'
                           : 'bg-indigo-400'
                       )}
                     />
@@ -938,12 +937,12 @@ export const ChatWindow: React.FC = () => {
                         <div className="flex items-center justify-between px-2 pt-1 pb-1 border-b border-white/5">
                           <div className="flex items-center gap-1.5">
                             {isFastMode ? (
-                              <Zap size={14} className="text-emerald-400" />
+                              <MessageSquare size={13} className="text-zinc-400" />
                             ) : (
-                              <Code2 size={14} className="text-indigo-400" />
+                              <Code2 size={13} className="text-indigo-400" />
                             )}
                             <span className="text-xs font-semibold text-zinc-200">
-                              {isFastMode ? 'Fast Chat Model' : 'Agent Coder Model'}
+                              {isFastMode ? 'Chat Model' : 'Agent Coder Model'}
                             </span>
                           </div>
                           <div className="flex items-center gap-1">
@@ -1005,7 +1004,7 @@ export const ChatWindow: React.FC = () => {
                                       'w-full flex items-center justify-between px-2.5 py-2 rounded-xl text-left text-xs transition-all group select-none',
                                       isSelected
                                         ? isFastMode
-                                          ? 'bg-emerald-500/15 text-emerald-200 border border-emerald-500/30 shadow-sm'
+                                          ? 'bg-white/10 text-white border border-white/20 shadow-sm'
                                           : 'bg-indigo-500/15 text-indigo-200 border border-indigo-500/30 shadow-sm'
                                         : 'text-zinc-300 hover:text-white hover:bg-white/8 border border-transparent'
                                     )}
@@ -1016,7 +1015,7 @@ export const ChatWindow: React.FC = () => {
                                           'w-1.5 h-1.5 rounded-full flex-shrink-0',
                                           isSelected
                                             ? isFastMode
-                                              ? 'bg-emerald-400'
+                                              ? 'bg-zinc-200'
                                               : 'bg-indigo-400'
                                             : m.isOnline
                                             ? 'bg-emerald-500/70'
@@ -1045,7 +1044,7 @@ export const ChatWindow: React.FC = () => {
                                       {isSelected && (
                                         <Check
                                           size={13}
-                                          className={cn('flex-shrink-0', isFastMode ? 'text-emerald-400' : 'text-indigo-400')}
+                                          className={cn('flex-shrink-0', isFastMode ? 'text-zinc-200' : 'text-indigo-400')}
                                         />
                                       )}
                                     </div>
