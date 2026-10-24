@@ -225,8 +225,11 @@ export function useChat() {
           ? `\n\nVOICE MODE DIRECTIVE: Your response will be spoken aloud to the user using text-to-speech. Keep conversational answers natural, direct, and concise (1 to 3 punchy sentences). Avoid long rambling introductions, bullet lists, or reading code out loud—provide the code in markdown and give a brief 1-sentence spoken summary. Display all source links and references at the very end under a "### Sources" heading so they are displayed visually but not spoken.`
           : '';
 
+        // Qwen3-family models ignore the API-level think flag on OpenAI-compatible endpoints;
+        // their documented soft switch is "/no_think" in the prompt.
+        const isQwenModel = /qwen/i.test(resolvedModelId || '');
         const thinkDirective = !isThink
-          ? `\n\nCRITICAL THINKING DIRECTIVE: Thinking mode is explicitly turned OFF by the user. Do NOT output internal reasoning scratchpads, thinking tokens, or <think> tags. Answer immediately, directly, and concisely.`
+          ? `\n\nCRITICAL THINKING DIRECTIVE: Thinking mode is explicitly turned OFF by the user. Do NOT output internal reasoning scratchpads, thinking tokens, or <think> tags. Answer immediately, directly, and concisely.${isQwenModel ? '\n\n/no_think' : ''}`
           : '';
 
         let systemPrompt: string;

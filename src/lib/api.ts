@@ -465,6 +465,7 @@ export async function* streamChat(
   const allTools = disableTools ? [] : (extraTools !== undefined ? extraTools : WEB_TOOLS);
 
   const isThink = settings.think_enabled ?? true;
+  const isLocalServer = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(settings.base_url || '');
 
   const body: any = {
     model: settings.model_id,
@@ -476,7 +477,7 @@ export async function* streamChat(
     repetition_penalty: 1.1,
     stream: true,
     think: isThink,
-    reasoning_effort: isThink ? 'medium' : 'low',
+    reasoning_effort: isThink ? 'medium' : (isLocalServer ? 'none' : 'low'),
     include_reasoning: isThink,
     chat_template_kwargs: { think: isThink },
     ...(allTools.length > 0 ? { tools: allTools } : {}), // omit tools key entirely when empty — some servers reject tools: []
