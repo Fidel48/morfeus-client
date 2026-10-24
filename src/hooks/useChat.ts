@@ -17,6 +17,57 @@ function capOutput(text: string): string {
   return text.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n\n[... output truncated at ${MAX_TOOL_OUTPUT_CHARS} chars ...]`;
 }
 
+export function formatChatErrorMessage(rawError: string | unknown, activeModelName?: string): string {
+  let text = rawError instanceof Error ? rawError.message : String(rawError || 'Unknown error');
+  text = text.replace(/^Error:\s*/i, '').trim();
+
+  // Try extracting inner JSON error messages if any provider returned JSON string
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  let extractedDetail: string | null = null;
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      extractedDetail =
+        parsed?.error?.metadata?.raw ||
+        parsed?.error?.message ||
+        parsed?.message ||
+        (typeof parsed?.error === 'string' ? parsed.error : null);
+    } catch {
+      // not JSON
+    }
+  }
+
+  const is429 = /429|rate[- ]limit/i.test(text);
+  const is401 = /401|403|unauthorized|authentication failed/i.test(text);
+  const is402 = /402|insufficient|payment required|credit/i.test(text);
+  const is404 = /404|not found/i.test(text);
+  const is503 = /503|service unavailable|overloaded/i.test(text);
+
+  const cleanBody = (extractedDetail || text.replace(/^HTTP\s+\d+[:\s]*/i, '')).trim();
+
+  if (is429) {
+    return `### ⚠️ Model Rate Limited (HTTP 429)\n\n${cleanBody}\n\n**Why did this happen?**\nFree models (like \`${activeModelName || 'this model'}\`) share a public upstream quota pool on OpenRouter and can be temporarily throttled during high traffic.\n\n💡 **How to continue:**\n- **Wait 30–60 seconds** and try sending your message again, or\n- **Switch models**: Click the model pill in the bottom toolbar to switch to a local model (Ollama) or another cloud model.`;
+  }
+
+  if (is402) {
+    return `### ⚠️ Insufficient Credits (HTTP 402)\n\n${cleanBody}\n\n💡 **How to continue:**\n- Your provider account has run out of credits or requires billing setup.\n- Add credits in your provider dashboard or switch to a free or local model.`;
+  }
+
+  if (is401) {
+    return `### ⚠️ Authentication Failed (HTTP 401/403)\n\n${cleanBody}\n\n💡 **How to continue:**\n- Open **Settings → Model Providers** and verify your API key is correctly entered.\n- Make sure the API key is active on your provider's dashboard.`;
+  }
+
+  if (is404) {
+    return `### ⚠️ Model or Endpoint Not Found (HTTP 404)\n\n${cleanBody}\n\n💡 **How to continue:**\n- The model \`${activeModelName || 'selected'}\` could not be found at this endpoint.\n- In **Settings → Model Providers**, click **Edit** on your provider and click **Fetch available models** to update your model catalog.`;
+  }
+
+  if (is503) {
+    return `### ⚠️ Provider Server Busy (HTTP 503)\n\n${cleanBody}\n\n💡 **How to continue:**\n- The model server is currently loading or under heavy load. Please retry shortly.`;
+  }
+
+  return `### ⚠️ Provider Error\n\n${cleanBody}`;
+}
+
 export function useChat() {
   const {
     messages,
@@ -782,13 +833,12 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             try {
               await executeChatLoop(false, depth + 1);
             } catch (err: unknown) {
-              const msg = err instanceof Error ? err.message : String(err);
               console.error('[Stream error on turn 2]:', err);
               addMessage({
                 id: generateId(),
                 conversation_id: convId!,
                 role: 'assistant',
-                content: `⚠️ Error during response generation: ${msg}`,
+                content: formatChatErrorMessage(err, activeModel),
                 created_at: Date.now(),
               });
             }
@@ -839,12 +889,11 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           clearStreamingContent();
         } else {
           console.error('Chat error:', error);
-          const errMsg = error instanceof Error ? error.message : String(error);
           addMessage({
             id: generateId(),
             conversation_id: convId!,
             role: 'assistant',
-            content: `⚠️ Error: ${errMsg}`,
+            content: formatChatErrorMessage(error, activeModel),
             created_at: Date.now(),
           });
           clearStreamingContent();

@@ -30,6 +30,8 @@ fn make_client() -> reqwest::Client {
 fn make_headers(api_key: &str) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("Content-Type", "application/json".parse().unwrap());
+    headers.insert("HTTP-Referer", "https://morfeus.app".parse().unwrap());
+    headers.insert("X-Title", "Morfeus Client".parse().unwrap());
     if !api_key.is_empty() {
         if let Ok(val) = format!("Bearer {}", api_key).parse() {
             headers.insert("Authorization", val);
@@ -174,8 +176,21 @@ pub async fn proxy_stream_chat(
         })?;
 
     if !resp.status().is_success() {
-        let status = resp.status().as_u16();
+        let status_code = resp.status();
+        let status = status_code.as_u16();
+        let canonical_reason = status_code.canonical_reason().unwrap_or("").to_string();
         let body = resp.text().await.unwrap_or_default();
+
+        // Extract human-readable error detail if body is JSON
+        let parsed_detail = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+            json.pointer("/error/metadata/raw")
+                .and_then(|v| v.as_str())
+                .or_else(|| json.pointer("/error/message").and_then(|v| v.as_str()))
+                .or_else(|| json.get("message").and_then(|v| v.as_str()))
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
 
         // Provide specific, actionable messages for common failure codes
         let msg = match status {
@@ -192,18 +207,35 @@ pub async fn proxy_stream_chat(
                 Check that your LLM server is running and the tunnel/URL in Settings is correct. \
                 Body: {}", body
             ),
-            401 | 403 => format!(
-                "HTTP {}: Authentication failed. Check that your API key in Settings is correct. Body: {}", status, body
-            ),
-            404 => format!(
-                "HTTP 404: Endpoint not found. Check your Base URL in Settings — make sure it points to \
-                the correct server and port (e.g. http://localhost:1234 for LM Studio). Body: {}", body
-            ),
-            503 => format!(
-                "HTTP 503: LLM server is not ready. The server is running but may still be loading the model. \
-                Wait a moment and try again. Body: {}", body
-            ),
-            _ => format!("HTTP {}: {}", status, if body.is_empty() { "no response body".to_string() } else { body }),
+            429 => {
+                let detail = parsed_detail.unwrap_or_else(|| body.clone());
+                format!("HTTP 429: {}", detail)
+            }
+            402 => {
+                let detail = parsed_detail.unwrap_or_else(|| body.clone());
+                format!("HTTP 402: {}", detail)
+            }
+            401 | 403 => {
+                let detail = parsed_detail.unwrap_or_else(|| body.clone());
+                format!("HTTP {}: {}", status, detail)
+            }
+            404 => {
+                let detail = parsed_detail.unwrap_or_else(|| body.clone());
+                format!("HTTP 404: {}", detail)
+            }
+            503 => {
+                let detail = parsed_detail.unwrap_or_else(|| body.clone());
+                format!("HTTP 503: {}", detail)
+            }
+            _ => {
+                if let Some(detail) = parsed_detail {
+                    format!("HTTP {}: {}", status, detail)
+                } else if body.is_empty() {
+                    format!("HTTP {} {}", status, canonical_reason)
+                } else {
+                    format!("HTTP {}: {}", status, body)
+                }
+            }
         };
 
         let _ = app.emit("stream-error", serde_json::json!({ "id": stream_id, "error": msg }));
