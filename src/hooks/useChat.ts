@@ -670,6 +670,12 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             return false;
           };
 
+          // Code is legitimately repetitive; never treat tokens inside a ``` fenced block as a loop.
+          const insideCodeFence = (): boolean => {
+            const soFar = useChatStore.getState().streamingContent || '';
+            return ((soFar.match(/```/g) || []).length % 2) === 1;
+          };
+
           let finishReason: string | null = null;
           for await (const chunk of streamChat(effectiveSettings, apiMessages, controller.signal, availableTools, disableTools)) {
             if (controller.signal.aborted) break;
@@ -697,7 +703,7 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
                 recentTokens.push(trimmed);
                 if (recentTokens.length > 60) recentTokens.splice(0, recentTokens.length - 50);
                 // Only run detection after 200 chars to avoid false positives
-                if (totalChars > 200 && detectRepetition()) {
+                if (totalChars > 200 && !insideCodeFence() && detectRepetition()) {
                   console.warn('[Repetition] Loop detected — aborting stream');
                   tauriApi.appendSystemLog('warn', 'Repetition loop detected. Auto-aborting.');
                   repetitionAborted = true;
