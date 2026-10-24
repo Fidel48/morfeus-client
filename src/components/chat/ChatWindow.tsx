@@ -67,6 +67,7 @@ export const ChatWindow: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const handleSendRef = useRef<(overrideText?: string | React.MouseEvent) => Promise<void> | void>(() => {});
+  const lastDropTimestampRef = useRef<number>(0);
 
   const isDeepSeekR1 = useCallback((id?: string) => {
     if (!id) return false;
@@ -472,7 +473,11 @@ export const ChatWindow: React.FC = () => {
     }
 
     if (newAttachments.length > 0) {
-      setAttachments(prev => [...prev, ...newAttachments]);
+      setAttachments(prev => {
+        const existingNames = new Set(prev.map(a => a.name.toLowerCase()));
+        const unique = newAttachments.filter(a => !existingNames.has(a.name.toLowerCase()));
+        return [...prev, ...unique];
+      });
     }
   }, []);
 
@@ -495,7 +500,11 @@ export const ChatWindow: React.FC = () => {
       }
     }
     if (newAttachments.length > 0) {
-      setAttachments(prev => [...prev, ...newAttachments]);
+      setAttachments(prev => {
+        const existingNames = new Set(prev.map(a => a.name.toLowerCase()));
+        const unique = newAttachments.filter(a => !existingNames.has(a.name.toLowerCase()));
+        return [...prev, ...unique];
+      });
     }
   }, []);
 
@@ -509,6 +518,7 @@ export const ChatWindow: React.FC = () => {
             setIsDraggingFiles(true);
           } else if (event.payload.type === 'drop') {
             setIsDraggingFiles(false);
+            lastDropTimestampRef.current = Date.now();
             const paths = event.payload.paths;
             if (Array.isArray(paths) && paths.length > 0) {
               processFilePaths(paths);
@@ -549,6 +559,12 @@ export const ChatWindow: React.FC = () => {
     e.preventDefault();
     e.stopPropagation();
     setIsDraggingFiles(false);
+
+    // If native Tauri OS drop event already handled this within 600ms, ignore duplicate DOM drop
+    if (Date.now() - lastDropTimestampRef.current < 600) {
+      return;
+    }
+    lastDropTimestampRef.current = Date.now();
 
     if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
       await processFiles(Array.from(e.dataTransfer.files));
