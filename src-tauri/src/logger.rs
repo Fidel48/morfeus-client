@@ -58,7 +58,7 @@ pub async fn get_system_logs(app: AppHandle) -> Result<Vec<String>, String> {
     let file = fs::File::open(&log_file).map_err(|e| e.to_string())?;
     let reader = BufReader::new(file);
 
-    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
     
     // Return last 200 lines
     let start = if lines.len() > 200 { lines.len() - 200 } else { 0 };

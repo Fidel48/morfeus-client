@@ -511,6 +511,7 @@ export const ChatWindow: React.FC = () => {
   // Listen for native OS file drag-drop from Finder / Explorer in Tauri
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
     import('@tauri-apps/api/window')
       .then(({ getCurrentWindow }) => {
         return getCurrentWindow().onDragDropEvent((event) => {
@@ -529,13 +530,18 @@ export const ChatWindow: React.FC = () => {
         });
       })
       .then((u) => {
-        unlisten = u;
+        if (cancelled) {
+          u();
+        } else {
+          unlisten = u;
+        }
       })
       .catch((err) => {
         console.warn('[DragDrop] Tauri onDragDropEvent registration failed:', err);
       });
 
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }, [processFilePaths]);
