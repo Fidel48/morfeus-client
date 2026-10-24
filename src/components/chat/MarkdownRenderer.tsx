@@ -83,6 +83,16 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
               </a>
             );
           },
+          img({ src, alt }) {
+            return (
+              <img
+                src={src}
+                alt={alt || 'Image'}
+                className="max-h-72 max-w-full rounded-xl object-contain border border-white/10 my-2 shadow-md hover:scale-[1.01] transition-transform"
+                loading="lazy"
+              />
+            );
+          },
           table({ children }) {
             return (
               <div className="overflow-x-auto my-3">

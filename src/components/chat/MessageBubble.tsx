@@ -3,9 +3,52 @@ import { motion } from 'framer-motion';
 import { Message } from '@/types';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { cn } from '@/lib/utils';
-import { Bot, User, Wrench, Globe, FileText, Search, Folder, Video, Terminal, Copy, VolumeX, Sparkles, ChevronDown } from 'lucide-react';
+import { Bot, User, Wrench, Globe, FileText, Search, Folder, Video, Terminal, Copy, VolumeX, Sparkles, ChevronDown, X, ZoomIn } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { tauriApi } from '@/lib/tauri';
+
+interface ParsedUserContent {
+  images: { alt: string; url: string }[];
+  text: string;
+}
+
+export function parseUserMessageContent(content?: string): ParsedUserContent {
+  if (!content) return { images: [], text: '' };
+
+  const images: { alt: string; url: string }[] = [];
+
+  // Match markdown images: ![alt](url)
+  // url can be data:image/..., blob:..., http://, https://
+  const imgRegex = /!\[([^\]]*)\]\((data:image\/[^;]+;base64,[A-Za-z0-9+/=]+|blob:[^)]+|https?:\/\/[^)]+)\)/g;
+
+  let text = content;
+  let match: RegExpExecArray | null;
+
+  while ((match = imgRegex.exec(content)) !== null) {
+    images.push({
+      alt: match[1] || 'Attached image',
+      url: match[2],
+    });
+  }
+
+  // Remove the image markdown tags from text
+  text = text.replace(imgRegex, '').trim();
+
+  // Also check for raw data:image/... that may not have markdown formatting
+  if (images.length === 0 && text.includes('data:image/')) {
+    const rawDataRegex = /(data:image\/[^;]+;base64,[A-Za-z0-9+/=]+)/g;
+    let rawMatch: RegExpExecArray | null;
+    while ((rawMatch = rawDataRegex.exec(content)) !== null) {
+      images.push({ alt: 'Attached image', url: rawMatch[1] });
+    }
+    text = text.replace(rawDataRegex, '').trim();
+  }
+
+  // Clean up any empty attachment header left behind
+  text = text.replace(/^📎 Attached:\s*(\n+|$)/i, '').trim();
+
+  return { images, text };
+}
 
 const ReasoningBlock: React.FC<{ reasoning: string; isLive?: boolean }> = ({ reasoning, isLive }) => {
   const [isOpen, setIsOpen] = React.useState(Boolean(isLive));
@@ -44,8 +87,14 @@ interface MessageBubbleProps {
 
 export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) => {
   const { settings } = useSettingsStore();
+  const [lightboxImage, setLightboxImage] = React.useState<string | null>(null);
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
+
+  const parsedUser = React.useMemo(() => {
+    if (!isUser) return { images: [], text: message.content || '' };
+    return parseUserMessageContent(message.content);
+  }, [isUser, message.content]);
 
   // Hide tool result messages completely from the chat timeline
   if (message.role === 'tool') {
@@ -67,46 +116,76 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
   }
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2, delay: Math.min(index * 0.02, 0.1) }}
-      className={cn(
-        'flex gap-3 w-full max-w-3xl group',
-        isUser ? 'flex-row-reverse ml-auto' : 'flex-row'
-      )}
-    >
-      {/* Avatar */}
-      <div
+    <>
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.2, delay: Math.min(index * 0.02, 0.1) }}
         className={cn(
-          'flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center mt-1',
-          isUser
-            ? 'bg-violet-600 text-white'
-            : 'bg-zinc-800 border border-white/10 text-zinc-400'
+          'flex gap-3 w-full max-w-3xl group',
+          isUser ? 'flex-row-reverse ml-auto' : 'flex-row'
         )}
       >
-        {isUser ? <User size={14} /> : <Bot size={14} />}
-      </div>
-
-      {/* Content */}
-      <div
-        className={cn(
-          'flex-1 min-w-0',
-          isUser ? 'items-end' : 'items-start',
-          'flex flex-col'
-        )}
-      >
+        {/* Avatar */}
         <div
           className={cn(
-            'px-4 py-3 rounded-2xl text-sm leading-relaxed break-words min-w-0 overflow-hidden',
+            'flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center mt-1',
             isUser
-              ? 'bg-violet-600 text-white rounded-tr-sm max-w-[85%] self-end'
-              : 'bg-zinc-900/60 border border-white/8 text-zinc-100 rounded-tl-sm w-full'
+              ? 'bg-violet-600 text-white'
+              : 'bg-zinc-800 border border-white/10 text-zinc-400'
           )}
         >
-          {isUser ? (
-            <p className="whitespace-pre-wrap break-words">{message.content}</p>
-          ) : (
+          {isUser ? <User size={14} /> : <Bot size={14} />}
+        </div>
+
+        {/* Content */}
+        <div
+          className={cn(
+            'flex-1 min-w-0',
+            isUser ? 'items-end' : 'items-start',
+            'flex flex-col'
+          )}
+        >
+          <div
+            className={cn(
+              'px-4 py-3 rounded-2xl text-sm leading-relaxed break-words min-w-0 overflow-hidden',
+              isUser
+                ? 'bg-violet-600 text-white rounded-tr-sm max-w-[85%] self-end'
+                : 'bg-zinc-900/60 border border-white/8 text-zinc-100 rounded-tl-sm w-full'
+            )}
+          >
+            {isUser ? (
+              <div className="flex flex-col gap-2.5">
+                {parsedUser.images.length > 0 && (
+                  <div className={cn("flex flex-wrap gap-2", parsedUser.images.length === 1 ? "max-w-md" : "max-w-lg")}>
+                    {parsedUser.images.map((img, idx) => (
+                      <div
+                        key={idx}
+                        onClick={() => setLightboxImage(img.url)}
+                        className="relative group rounded-xl overflow-hidden bg-black/40 border border-white/15 cursor-pointer hover:border-violet-300/80 transition-all shadow-md"
+                        title="Click to enlarge"
+                      >
+                        <img
+                          src={img.url}
+                          alt={img.alt}
+                          className="max-h-60 max-w-full rounded-xl object-contain hover:scale-[1.01] transition-transform"
+                          loading="lazy"
+                        />
+                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/25 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">
+                          <span className="text-[11px] font-medium bg-black/60 text-white px-2 py-1 rounded-md backdrop-blur-sm flex items-center gap-1">
+                            <ZoomIn size={12} />
+                            Enlarge
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {parsedUser.text && (
+                  <p className="whitespace-pre-wrap break-words">{parsedUser.text}</p>
+                )}
+              </div>
+            ) : (
             <div className="flex flex-col gap-2">
               {message.reasoning && (
                 <ReasoningBlock reasoning={message.reasoning} isLive={false} />
@@ -220,6 +299,32 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
         </div>
       </div>
     </motion.div>
+
+    {/* Lightbox Modal */}
+    {lightboxImage && (
+      <div
+        className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 select-none"
+        onClick={() => setLightboxImage(null)}
+      >
+        <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center">
+          <img
+            src={lightboxImage}
+            alt="Full size view"
+            className="max-w-full max-h-[85vh] object-contain rounded-2xl shadow-2xl border border-white/10"
+            onClick={(e) => e.stopPropagation()}
+          />
+          <button
+            type="button"
+            onClick={() => setLightboxImage(null)}
+            className="absolute -top-3 -right-3 p-2 rounded-full bg-zinc-900 border border-white/20 text-white hover:bg-zinc-800 transition-colors shadow-lg"
+            title="Close image preview"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      </div>
+    )}
+    </>
   );
 };
 

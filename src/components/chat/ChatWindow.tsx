@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo, KeyboardEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Send, Square, PanelRight, Loader2, Wrench, Paperclip, X, FileText, Image as ImageIcon, Sparkles, AlertTriangle, Check, Zap, Code2, Volume2, VolumeX, Atom, ChevronUp, RefreshCw, Settings, Search } from 'lucide-react';
+import { Send, Square, PanelRight, Loader2, Wrench, Paperclip, X, FileText, Image as ImageIcon, Sparkles, AlertTriangle, Check, Zap, Code2, Volume2, VolumeX, Atom, ChevronUp, RefreshCw, Settings, Search, UploadCloud } from 'lucide-react';
 import { MessageBubble, StreamingMessage } from './MessageBubble';
 import { VoiceButton } from '@/components/voice/VoiceButton';
 import { useChat } from '@/hooks/useChat';
@@ -60,6 +60,7 @@ export const ChatWindow: React.FC = () => {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isParsing, setIsParsing] = useState(false);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [modelSearchQuery, setModelSearchQuery] = useState('');
   const modelMenuRef = useRef<HTMLDivElement>(null);
@@ -447,15 +448,118 @@ export const ChatWindow: React.FC = () => {
     handleSendRef.current(overrideText);
   }, []);
 
+  const processFiles = useCallback(async (files: File[]) => {
+    const newAttachments: Attachment[] = [];
+    for (const file of files) {
+      const ext = file.name.split('.').pop() || file.type.split('/')[1] || 'bin';
+      const fileName = file.name || `file_${Date.now()}.${ext}`;
+
+      if (file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp)$/i.test(fileName)) {
+        try {
+          const { base64 } = await resizeImage(file, 1024);
+          newAttachments.push({
+            name: fileName,
+            file: file,
+            previewUrl: `data:${file.type || 'image/jpeg'};base64,${base64}`,
+            base64,
+          });
+        } catch (e) {
+          newAttachments.push({ name: fileName, file: file });
+        }
+      } else {
+        newAttachments.push({ name: fileName, file: file });
+      }
+    }
+
+    if (newAttachments.length > 0) {
+      setAttachments(prev => [...prev, ...newAttachments]);
+    }
+  }, []);
+
+  const processFilePaths = useCallback(async (paths: string[]) => {
+    const newAttachments: Attachment[] = [];
+    for (const p of paths) {
+      const name = p.split(/[/\\]/).pop() || 'Unknown file';
+      const isImg = /\.(png|jpe?g|gif|webp)$/i.test(name);
+      if (isImg) {
+        try {
+          const bytes = await tauriApi.readFileBytes(p);
+          const blob = new Blob([bytes], { type: 'image/jpeg' });
+          const { base64 } = await resizeImage(blob, 1024);
+          newAttachments.push({ name, path: p, previewUrl: `data:image/jpeg;base64,${base64}`, base64 });
+        } catch (e) {
+          newAttachments.push({ name, path: p });
+        }
+      } else {
+        newAttachments.push({ name, path: p });
+      }
+    }
+    if (newAttachments.length > 0) {
+      setAttachments(prev => [...prev, ...newAttachments]);
+    }
+  }, []);
+
+  // Listen for native OS file drag-drop from Finder / Explorer in Tauri
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    import('@tauri-apps/api/window')
+      .then(({ getCurrentWindow }) => {
+        return getCurrentWindow().onDragDropEvent((event) => {
+          if (event.payload.type === 'enter' || event.payload.type === 'over') {
+            setIsDraggingFiles(true);
+          } else if (event.payload.type === 'drop') {
+            setIsDraggingFiles(false);
+            const paths = event.payload.paths;
+            if (Array.isArray(paths) && paths.length > 0) {
+              processFilePaths(paths);
+            }
+          } else {
+            setIsDraggingFiles(false);
+          }
+        });
+      })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch((err) => {
+        console.warn('[DragDrop] Tauri onDragDropEvent registration failed:', err);
+      });
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [processFilePaths]);
+
+  // HTML5 drag and drop handlers for webview
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isDraggingFiles) setIsDraggingFiles(true);
+  }, [isDraggingFiles]);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDraggingFiles(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingFiles(false);
+
+    if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+      await processFiles(Array.from(e.dataTransfer.files));
+    }
+  }, [processFiles]);
+
   const handleAttachFiles = async () => {
     try {
       const paths = await tauriApi.openFileDialog();
-      if (paths) {
-        const newAttachments = paths.map(p => {
-          const name = p.split(/[/\\]/).pop() || 'Unknown file';
-          return { name, path: p };
-        });
-        setAttachments(prev => [...prev, ...newAttachments]);
+      if (paths && paths.length > 0) {
+        await processFilePaths(paths);
       }
     } catch (e) {
       console.error('Failed to open file dialog:', e);
@@ -465,20 +569,8 @@ export const ChatWindow: React.FC = () => {
   const handleAttachImages = async () => {
     try {
       const paths = await tauriApi.openImageDialog();
-      if (paths) {
-        const newAttachments: Attachment[] = [];
-        for (const p of paths) {
-          const name = p.split(/[/\\]/).pop() || 'Unknown image';
-          try {
-            const bytes = await tauriApi.readFileBytes(p);
-            const blob = new Blob([bytes], { type: 'image/jpeg' });
-            const { base64 } = await resizeImage(blob, 1024);
-            newAttachments.push({ name, path: p, previewUrl: `data:image/jpeg;base64,${base64}`, base64 });
-          } catch(e) {
-            newAttachments.push({ name, path: p }); // fallback to just path
-          }
-        }
-        setAttachments(prev => [...prev, ...newAttachments]);
+      if (paths && paths.length > 0) {
+        await processFilePaths(paths);
       }
     } catch (e) {
       console.error('Failed to open image dialog:', e);
@@ -489,36 +581,17 @@ export const ChatWindow: React.FC = () => {
     const items = e.clipboardData?.items;
     if (!items) return;
 
-    const newAttachments: Attachment[] = [];
+    const files: File[] = [];
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       if (item.kind === 'file') {
         const file = item.getAsFile();
-        if (file) {
-          const ext = file.type.split('/')[1] || 'bin';
-          const fileName = file.name === 'image.png' ? `pasted_image_${Date.now()}.${ext}` : (file.name || `Pasted file.${ext}`);
-          
-          if (file.type.startsWith('image/')) {
-            try {
-              const { base64 } = await resizeImage(file, 1024);
-              newAttachments.push({
-                name: fileName,
-                file: file,
-                previewUrl: `data:${file.type};base64,${base64}`,
-                base64
-              });
-            } catch(e) {
-              newAttachments.push({ name: fileName, file: file });
-            }
-          } else {
-            newAttachments.push({ name: fileName, file: file });
-          }
-        }
+        if (file) files.push(file);
       }
     }
 
-    if (newAttachments.length > 0) {
-      setAttachments(prev => [...prev, ...newAttachments]);
+    if (files.length > 0) {
+      await processFiles(files);
     }
   };
 
@@ -559,7 +632,33 @@ export const ChatWindow: React.FC = () => {
   const isEmpty = messages.length === 0 && !isStreaming;
 
   return (
-    <div className="flex flex-col h-full relative">
+    <div
+      className="flex flex-col h-full relative"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* Drag & Drop Visual Overlay */}
+      <AnimatePresence>
+        {isDraggingFiles && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.98 }}
+            transition={{ duration: 0.15 }}
+            className="absolute inset-2 z-50 rounded-3xl bg-zinc-950/85 backdrop-blur-md border-2 border-dashed border-violet-500/80 flex flex-col items-center justify-center gap-3 pointer-events-none shadow-2xl"
+          >
+            <div className="w-16 h-16 rounded-2xl bg-violet-600/20 border border-violet-500/40 flex items-center justify-center text-violet-400 shadow-lg shadow-violet-500/10">
+              <UploadCloud size={32} className="animate-bounce" />
+            </div>
+            <div className="text-center">
+              <h3 className="text-base font-semibold text-white">Drop files or images here</h3>
+              <p className="text-xs text-zinc-400 mt-1">Attachments will be added to your prompt</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Top bar */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-white/8 flex-shrink-0">
         <div className="flex items-center gap-2">
