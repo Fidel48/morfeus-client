@@ -259,7 +259,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
                 <div className="flex flex-col items-center gap-2 text-zinc-400 py-2">
                   <span className="text-xs">⚠️ The model returned an empty response.</span>
                   <span className="text-[10px] text-zinc-500 text-center max-w-[200px]">
-                    This usually happens if the conversation exceeded the local model's maximum context length limit, causing it to crash.
+                    This usually happens if the model hit its Max Tokens or context length limit, or doesn't support tools. Try raising Max Tokens / Context Length or turning off Think.
                   </span>
                 </div>
               )}

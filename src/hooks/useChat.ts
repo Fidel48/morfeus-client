@@ -201,11 +201,20 @@ export function useChat() {
         const effectiveBaseUrl = matchedProvider ? matchedProvider.base_url : currentSettings.base_url;
         const effectiveApiKey = matchedProvider ? (matchedProvider.api_key || '') : currentSettings.api_key;
 
+        // Reasoning tokens count against max_tokens on most servers. When Think is on,
+        // add headroom so the model can finish thinking AND still write an answer.
+        const REASONING_HEADROOM = 6144;
+        const baseMaxTokens = currentSettings.max_tokens > 0 ? currentSettings.max_tokens : 2048;
+        const effectiveMaxTokens = isThink ? baseMaxTokens + REASONING_HEADROOM : baseMaxTokens;
+        const effectiveContext = Math.max(currentSettings.context_length || 0, effectiveMaxTokens + 2048);
+
         const effectiveSettings: AppSettings = {
           ...currentSettings,
           base_url: effectiveBaseUrl,
           api_key: effectiveApiKey,
           model_id: resolvedModelId,
+          max_tokens: effectiveMaxTokens,
+          context_length: effectiveContext,
         };
 
         const isVoiceActive = useSettingsStore.getState().settings.tts_enabled;
@@ -655,6 +664,7 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             return false;
           };
 
+          let finishReason: string | null = null;
           for await (const chunk of streamChat(effectiveSettings, apiMessages, controller.signal, availableTools, disableTools)) {
             if (controller.signal.aborted) break;
             if (!chunk || !Array.isArray(chunk.choices) || chunk.choices.length === 0) continue;
@@ -718,7 +728,9 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
               appendToolCallDelta(delta.tool_calls);
             }
 
-            if (choice?.finish_reason === 'stop' || choice?.finish_reason === 'tool_calls') {
+            if (choice?.finish_reason) finishReason = choice.finish_reason;
+
+            if (choice?.finish_reason === 'stop' || choice?.finish_reason === 'tool_calls' || choice?.finish_reason === 'length') {
               break;
             }
           }
@@ -728,17 +740,38 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             return;
           }
 
+          const hadReasoning = !!useChatStore.getState().streamingReasoning;
           const finalMessage = finalizeStreamMessage(convId!);
           const hasToolCalls = finalMessage.tool_calls && finalMessage.tool_calls.length > 0;
+
+          // ── Truncated while thinking: model hit the token limit before writing an answer ──
+          // A retry can't help (same limit) and would discard the reasoning, so show an
+          // actionable notice and keep the thinking text visible.
+          const isEmptyContent = !finalMessage.content
+            || finalMessage.content === '[empty response]'
+            || finalMessage.content.trim() === '';
+          const noToolCalls = !finalMessage.tool_calls || finalMessage.tool_calls.length === 0;
+          const wasTruncated = !controller.signal.aborted
+            && (finishReason === 'length' || (hadReasoning && finishReason !== 'stop'));
+
+          if (isEmptyContent && noToolCalls && hadReasoning && wasTruncated) {
+            tauriApi.appendSystemLog('warn', 'Model ran out of tokens while thinking (finish_reason=length). Raise Max Tokens / Context Length or turn off Think.');
+            useChatStore.setState((state) => ({
+              messages: state.messages.map((m) =>
+                m.id === finalMessage.id
+                  ? { ...m, content: '⚠️ **The model ran out of tokens while thinking**, so it never wrote a final answer. Raise **Max Tokens** / **Context Length** in the Params panel, turn off **Think**, or try a simpler request.' }
+                  : m
+              ),
+            }));
+            return;
+          }
 
           // ── Auto-retry without tools if model returned an empty response ──
           // This happens when GGUF/Ollama models don't support function calling:
           // they receive the tools array, get confused, and return nothing.
           // Retry once without the tools array so the model can respond normally.
-          const isEmptyResponse = !finalMessage.content
-            || finalMessage.content === '[empty response]'
-            || finalMessage.content.trim() === '';
-          const hasNoToolCalls = !finalMessage.tool_calls || finalMessage.tool_calls.length === 0;
+          const isEmptyResponse = isEmptyContent;
+          const hasNoToolCalls = noToolCalls;
 
           if (isEmptyResponse && hasNoToolCalls && depth === 0 && !disableTools) {
             console.warn('[Chat] Empty response received — model may not support function calling. Retrying without tools.');
