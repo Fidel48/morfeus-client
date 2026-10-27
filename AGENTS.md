@@ -86,6 +86,12 @@ morfeus/
 - **v0.1.26**: Visual image attachment thumbnails in chat input and rendering inside user message bubbles.
 - **v0.1.27**: Dual Fast Chat / Agent Coder modes, local Kokoro neural TTS, hands-free Continuous voice with voice toggle relocation, MCP server manager, and multiplatform CI matrix (Windows, macOS, Ubuntu Linux).
 - **v0.1.29**: Multi-provider settings catalog (Ollama, LM Studio, OpenRouter, DeepSeek, OpenAI, Groq), selective model search picker, strict chat popover scoping to user-configured models, removal of hardcoded model assignments and defaults, enhanced web search synthesis with top-article auto-retrieval and Google News RSS fallback, speech interruption and cancellation fixes with default-off voice readout, markdown wrapping overflow fixes, human-readable error cards for upstream HTTP 429/402/401 rate limits and billing, native OS & HTML5 drag-and-drop file/image attachments with debounce deduplication, and ChatGPT/Gemini-style visual image rendering with interactive full-screen lightbox in user message bubbles.
+- **v0.1.30**: Full 3-column VS Code + Cline Developer IDE Workspace:
+  - **Left Explorer**: Interactive directory tree with lazy expansion, specialized file icons, and file/session switcher.
+  - **Center Editor**: Multi-tab code editor with line gutter, modified indicators, breadcrumbs, ▶ Run / 💾 Save / Diff view actions, minimal VS Code watermark empty state, and collapsible execution output drawer.
+  - **Right Panel**: Autonomous Agent Coder panel with collapsible drawer.
+  - **Workspace & Storage**: Native project picker with recent projects, scratchpad launcher, and persistent disk storage via `@tauri-apps/plugin-store`.
+  - **Surgical Tools & Resilience**: `grep_search`, `read_file_range`, `replace_in_file`, per-file read throttling (anti-loop protection), and fallback parsing for models emitting raw `<tool_call>` XML.
 
 ---
 
@@ -135,5 +141,6 @@ Phase 5: Language Server Protocol (LSP) Activation (Diagnostics & Auto-Fix)
 | **P3** | Side-Panel Coder Canvas Tab | 🟢 Done | High | Dedicated Canvas tab in `RightPanel.tsx` with dynamic 560px width. |
 | **P3** | Canvas Action Toolbar | 🟢 Done | High | "▶️ Run Code", "💾 Save", "📋 Copy", "Diff View", and console logs. |
 | **P3** | Chat-to-Canvas Sync | 🟢 Done | Medium | "Canvas" button in code blocks and live file sync upon agent edits. |
+| **P3** | Coder Workspace & Project Picker | 🟢 Done | High | Agent Coder swaps the layout for `components/coder/` (`ProjectPicker`, `CoderSidebar`, `CoderWorkspace`). Projects in `projectStore.ts`; conversations carry `mode` + `project_path` so Chat and Coder histories are separate. Project tree/git/rules injected into the prompt; terminal `cwd` + relative paths anchored to the project; per-session auto-approve (terminal only). |
 | **P4** | Background Process Runner | ⚪ Backlog | Medium | Async `spawn_process`, `read_logs`, `kill_process` for dev servers. |
 | **P5** | Expose LSP Diagnostics | ⚪ Backlog | Medium | Feed compiler errors back to agent for automatic self-repair. |

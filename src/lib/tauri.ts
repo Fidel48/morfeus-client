@@ -176,6 +176,13 @@ export const tauriApi = {
     return Array.isArray(selected) ? selected : [selected];
   },
 
+  /** Native folder picker (used to choose an Agent Coder project) */
+  async pickFolder(): Promise<string | null> {
+    const selected = await tauriOpen({ directory: true, multiple: false });
+    if (selected === null || selected === undefined) return null;
+    return Array.isArray(selected) ? (selected[0] ?? null) : selected;
+  },
+
   /** Read any local file as raw bytes (needed for PDF parsing with pdfjs-dist) */
   async readFileBytes(path: string): Promise<Uint8Array> {
     return tauriReadFile(path);
@@ -186,9 +193,14 @@ export const tauriApi = {
     return tauriInvoke<string>('parse_local_file', { path });
   },
 
-  /** List the contents of a directory */
-  async listDirectory(path: string): Promise<Array<{name: string, path: string, is_dir: boolean, size_bytes: number | null, extension: string | null}>> {
-    return tauriInvoke('list_directory', { path });
+  /** Read a text / code file verbatim without cleaning or truncation (for the editor) */
+  async readTextFile(path: string): Promise<{ path: string; content: string; size_bytes: number }> {
+    return tauriInvoke('read_text_file', { path });
+  },
+
+  /** List the contents of a directory. includeHidden defaults to false */
+  async listDirectory(path: string, includeHidden?: boolean): Promise<Array<{name: string, path: string, is_dir: boolean, size_bytes: number | null, extension: string | null}>> {
+    return tauriInvoke('list_directory', { path, includeHidden: includeHidden ?? false });
   },
 
   /** Get platform-aware paths to Home, Downloads, Documents, Desktop */
@@ -282,9 +294,9 @@ export const tauriApi = {
     return tauriInvoke('install_python_packages', { packages });
   },
 
-  /** Run a raw terminal command (sh -c or cmd.exe /c). Returns stdout, stderr, exit_code, success. */
-  async runTerminalCommand(command: string): Promise<{ stdout: string; stderr: string; exit_code: number; success: boolean }> {
-    return tauriInvoke('run_terminal_command', { command });
+  /** Run a raw terminal command (sh -c or cmd.exe /c). Optional cwd runs it inside a project folder. Returns stdout, stderr, exit_code, success. */
+  async runTerminalCommand(command: string, cwd?: string | null): Promise<{ stdout: string; stderr: string; exit_code: number; success: boolean }> {
+    return tauriInvoke('run_terminal_command', { command, cwd: cwd ?? null });
   },
 
   /** Write content to an absolute file path. Creates directories if they don't exist. */

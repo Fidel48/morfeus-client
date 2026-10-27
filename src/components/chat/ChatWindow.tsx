@@ -6,6 +6,7 @@ import { VoiceButton } from '@/components/voice/VoiceButton';
 import { useChat } from '@/hooks/useChat';
 import { useChatStore } from '@/stores/chatStore';
 import { useSettingsStore, ConfiguredModelOption, DEFAULT_PROVIDERS } from '@/stores/settingsStore';
+import { useProjectStore, projectNameFromPath } from '@/stores/projectStore';
 import { tauriApi } from '@/lib/tauri';
 import { speechQueue } from '@/lib/kokoroTts';
 import { extractPdfText, renderPdfToImages } from '@/lib/pdfParser';
@@ -1160,39 +1161,53 @@ export const ChatWindow: React.FC = () => {
   );
 };
 
-const EmptyState: React.FC = () => (
-  <motion.div
-    initial={{ opacity: 0, y: 16 }}
-    animate={{ opacity: 1, y: 0 }}
-    className="flex flex-col items-center justify-center h-full text-center py-20"
-  >
-    <div className="w-16 h-16 rounded-2xl bg-violet-600/20 border border-violet-500/30 flex items-center justify-center mb-4">
-      <svg
-        width="32"
-        height="32"
-        viewBox="0 0 32 32"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-        className="text-violet-400"
+const EmptyState: React.FC = () => {
+  const chatMode = useChatStore((s) => s.chatMode);
+  const projectPath = useProjectStore((s) => s.activeProjectPath);
+  const isCoder = chatMode === 'agent' && !!projectPath;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="flex flex-col items-center justify-center h-full text-center py-20"
+    >
+      <div
+        className={cn(
+          'w-16 h-16 rounded-2xl border flex items-center justify-center mb-4',
+          isCoder ? 'bg-indigo-500/15 border-indigo-500/30' : 'bg-violet-600/20 border-violet-500/30'
+        )}
       >
-        <path
-          d="M16 4C9.373 4 4 9.373 4 16s5.373 12 12 12 12-5.373 12-12S22.627 4 16 4z"
-          fill="currentColor"
-          fillOpacity="0.2"
-          stroke="currentColor"
-          strokeWidth="1.5"
-        />
-        <path
-          d="M11 16h10M16 11v10"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-        />
-      </svg>
-    </div>
-    <h2 className="text-lg font-semibold text-zinc-300 mb-2">Start a conversation</h2>
-    <p className="text-sm text-zinc-600 max-w-sm">
-      Type a message below or hold the microphone button to speak. Connect to your LLM server in Settings.
-    </p>
-  </motion.div>
-);
+        {isCoder ? (
+          <Code2 size={30} className="text-indigo-400" />
+        ) : (
+          <svg
+            width="32"
+            height="32"
+            viewBox="0 0 32 32"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+            className="text-violet-400"
+          >
+            <path
+              d="M16 4C9.373 4 4 9.373 4 16s5.373 12 12 12 12-5.373 12-12S22.627 4 16 4z"
+              fill="currentColor"
+              fillOpacity="0.2"
+              stroke="currentColor"
+              strokeWidth="1.5"
+            />
+            <path d="M11 16h10M16 11v10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+        )}
+      </div>
+      <h2 className="text-lg font-semibold text-zinc-300 mb-2">
+        {isCoder ? `Working in ${projectNameFromPath(projectPath!)}` : 'Start a conversation'}
+      </h2>
+      <p className="text-sm text-zinc-600 max-w-sm">
+        {isCoder
+          ? 'Describe a task — the agent can search, read and edit files, and run commands inside this project.'
+          : 'Type a message below or hold the microphone button to speak. Connect to your LLM server in Settings.'}
+      </p>
+    </motion.div>
+  );
+};

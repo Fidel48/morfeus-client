@@ -3,11 +3,12 @@ import { useChatStore } from '@/stores/chatStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useMcpStore } from '@/stores/mcpStore';
 import { useCanvasStore } from '@/stores/canvasStore';
+import { useProjectStore } from '@/stores/projectStore';
 import { streamChat, WEB_TOOLS, FAST_CHAT_TOOLS } from '@/lib/api';
 import { tauriApi } from '@/lib/tauri';
 import { kokoroSpeak, kokoroStop, speechQueue } from '@/lib/kokoroTts';
 import { generateId, extractTextContent } from '@/lib/utils';
-import { Message, ContentPart, ToolDefinition, AppSettings } from '@/types';
+import { Message, ContentPart, ToolDefinition, AppSettings, ToolCall } from '@/types';
 
 // Max chars returned from any single file/page tool call.
 // Keeps local 14B model context from being flooded.
@@ -16,6 +17,59 @@ const MAX_TOOL_OUTPUT_CHARS = 6000;
 function capOutput(text: string): string {
   if (text.length <= MAX_TOOL_OUTPUT_CHARS) return text;
   return text.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n\n[... output truncated at ${MAX_TOOL_OUTPUT_CHARS} chars ...]`;
+}
+
+// ── Agent Coder project context ──────────────────────────────────────────────
+const IGNORED_TOP_LEVEL = new Set([
+  'node_modules', 'target', 'dist', 'build', '.git', '.next', '.venv', 'venv', '__pycache__', '.DS_Store',
+]);
+
+/**
+ * Build a compact description of the selected project (file tree, git state, project rules)
+ * that is injected into the Agent Coder system prompt so the model knows where it is working.
+ * Every step is best-effort; failures never block the chat.
+ */
+async function buildProjectContext(projectPath: string): Promise<string> {
+  const sections: string[] = [];
+
+  try {
+    const entries = await tauriApi.listDirectory(projectPath);
+    const visible = entries
+      .filter((e) => !IGNORED_TOP_LEVEL.has(e.name))
+      .sort((a, b) => Number(b.is_dir) - Number(a.is_dir) || a.name.localeCompare(b.name))
+      .slice(0, 60);
+    if (visible.length > 0) {
+      sections.push(`Top-level files:\n${visible.map((e) => (e.is_dir ? `${e.name}/` : e.name)).join('\n')}`);
+    }
+  } catch { /* unreadable folder */ }
+
+  try {
+    const branch = await tauriApi.runTerminalCommand('git branch --show-current', projectPath);
+    if (branch.success && branch.stdout.trim()) {
+      const status = await tauriApi.runTerminalCommand('git status --short', projectPath);
+      const changed = status.success ? status.stdout.split('\n').map((l) => l.trimEnd()).filter(Boolean) : [];
+      const shown = changed.slice(0, 25);
+      sections.push(
+        `Git branch: ${branch.stdout.trim()}\n` +
+        (changed.length === 0
+          ? 'Working tree clean.'
+          : `Uncommitted changes (${changed.length}):\n${shown.join('\n')}${changed.length > shown.length ? `\n… and ${changed.length - shown.length} more` : ''}`)
+      );
+    }
+  } catch { /* not a git repo */ }
+
+  try {
+    const rules = await tauriApi.findProjectRules(projectPath);
+    let budget = 6000;
+    for (const rule of rules) {
+      if (budget <= 0) break;
+      const text = rule.content.slice(0, Math.min(3000, budget));
+      budget -= text.length;
+      sections.push(`Project rules (${rule.file_name}):\n${text}`);
+    }
+  } catch { /* no rules */ }
+
+  return sections.join('\n\n');
 }
 
 export function formatChatErrorMessage(rawError: string | unknown, activeModelName?: string): string {
@@ -67,6 +121,68 @@ export function formatChatErrorMessage(rawError: string | unknown, activeModelNa
   }
 
   return `### ⚠️ Provider Error\n\n${cleanBody}`;
+}
+
+/**
+ * Fallback parser for text-formatted tool calls emitted by models like Nemotron, Qwen, or Mistral.
+ * Handles both XML format (<tool_call><function=name><parameter=k>v</parameter></function></tool_call>)
+ * and JSON format (<tool_call>{"name": "...", "arguments": {...}}</tool_call>).
+ */
+function parseTextToolCalls(content: string): { toolCalls: ToolCall[]; cleanedContent: string } {
+  const toolCalls: ToolCall[] = [];
+  let cleanedContent = content;
+
+  // 1. Nemotron XML format
+  const xmlRegex = /<tool_call>\s*<function=([a-zA-Z0-9_-]+)>(.*?)<\/function>\s*<\/tool_call>/gis;
+  let match;
+  while ((match = xmlRegex.exec(content)) !== null) {
+    const fnName = match[1];
+    const body = match[2];
+    const args: Record<string, any> = {};
+    const paramRegex = /<parameter=([a-zA-Z0-9_-]+)>\s*(.*?)\s*<\/parameter>/gis;
+    let pMatch;
+    while ((pMatch = paramRegex.exec(body)) !== null) {
+      const pName = pMatch[1];
+      let pVal: any = pMatch[2].trim();
+      if (/^\d+$/.test(pVal)) pVal = parseInt(pVal, 10);
+      else if (/^\d+\.\d+$/.test(pVal)) pVal = parseFloat(pVal);
+      else if (pVal === 'true') pVal = true;
+      else if (pVal === 'false') pVal = false;
+      args[pName] = pVal;
+    }
+    toolCalls.push({
+      id: generateId(),
+      type: 'function',
+      function: {
+        name: fnName,
+        arguments: JSON.stringify(args),
+      },
+    });
+  }
+
+  // 2. JSON format
+  const jsonRegex = /<tool_call>\s*(\{.*?\})\s*<\/tool_call>/gis;
+  while ((match = jsonRegex.exec(content)) !== null) {
+    try {
+      const obj = JSON.parse(match[1]);
+      const fnName = obj.name || obj.function?.name;
+      const fnArgs = obj.arguments || obj.function?.arguments || obj.parameters || {};
+      if (fnName) {
+        toolCalls.push({
+          id: generateId(),
+          type: 'function',
+          function: {
+            name: fnName,
+            arguments: typeof fnArgs === 'string' ? fnArgs : JSON.stringify(fnArgs),
+          },
+        });
+      }
+    } catch {}
+  }
+
+  cleanedContent = cleanedContent.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').trim();
+
+  return { toolCalls, cleanedContent };
 }
 
 export function useChat() {
@@ -179,6 +295,34 @@ export function useChat() {
         const isFastMode = chatMode === 'fast';
         const isThink = currentSettings.think_enabled ?? true;
 
+        // ── Agent Coder project scope ──
+        const convRecord = useChatStore.getState().conversations.find((c) => c.id === convId);
+        const projectPath: string | null = !isFastMode
+          ? (convRecord?.project_path ?? useProjectStore.getState().activeProjectPath ?? null)
+          : null;
+
+        // Resolve model-supplied paths: relative paths (and '.') are anchored to the project root.
+        const resolvePath = (p?: string): string => {
+          const raw = (p ?? '').trim();
+          if (!projectPath) return raw;
+          if (!raw || raw === '.') return projectPath;
+          if (/^([a-zA-Z]:[\\/]|[\\/]|~)/.test(raw)) return raw;
+          const sep = projectPath.includes('\\') && !projectPath.includes('/') ? '\\' : '/';
+          return projectPath.replace(/[\\/]+$/, '') + sep + raw.replace(/^\.[\\/]/, '');
+        };
+
+        let projectBlock = '';
+        if (projectPath) {
+          const ctx = await buildProjectContext(projectPath);
+          projectBlock = `PROJECT WORKSPACE:
+You are working inside the project at: ${projectPath}
+- Relative paths resolve against the project root. run_terminal_command executes with the project root as its working directory.
+- grep_search and search_files default to the project root. Prefer grep_search → read_file_range → replace_in_file over reading or rewriting whole files.
+- Do not read or modify files outside the project unless the user explicitly asks.
+${ctx ? `\n${ctx}\n` : ''}
+`;
+        }
+
         // Helper to detect any variant of DeepSeek-R1
         const isDeepSeekR1 = (id?: string) => {
           if (!id) return false;
@@ -255,7 +399,7 @@ DIRECTIVES:
 Today's Date: ${dateStr}
 Current Time: ${timeStr}
 
-CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
+${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
 1. AUTONOMOUS ReAct LOOP: You are in Agent Coder mode with full IDE developer harness capabilities. When tasked with solving a problem, debugging, or coding, operate autonomously in a continuous ReAct (Reason, Act, Observe) loop. Do not stop at the first step—inspect files, search, run code, observe outputs, and iterate until the objective is accomplished.
 2. FULL DEVELOPER TOOL ACCESS: You have complete access to terminal commands (run_terminal_command), Python execution (run_python, run_python_file), package installation (install_python_packages), file creation and editing (write_to_file, delete_file), filesystem exploration, screen inspection (analyze_screen), and OS automation.
 3. EXTENSIBILITY & MCP: You have native integration with Model Context Protocol (MCP). Active MCP servers provide dynamic tools prefixed with mcp__<server>__<tool>. You can also manage servers using list_mcp_servers, connect_mcp_server, and remove_mcp_server.
@@ -267,14 +411,22 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
    - NO PREAMBLE: Deliver code directly without conversational throat-clearing ("Here is the complete drop-in file...", "Sure, I can help with that...").
    - ZERO UNPROMPTED EXPLANATIONS: Do NOT append unsolicited line-by-line breakdowns ("What this does"), beginner tutorials ("To use it: save as file, press F5..."), or speculative advice ("If you want 3D printing..."). The user already knows how to run their tools.
    - NO CONVERSATIONAL TRAILERS: Do NOT end with unsolicited offers ("Want me to also add a filleted version... Just say the word."). Stop generating as soon as the code/task is delivered.
-   - CODE OVER NOISE: Let well-structured code with concise inline comments explain the implementation. If the user explicitly asks for an explanation, keep it to 1–2 punchy bullets highlighting key architectural decisions.${voiceDirective}${thinkDirective}`;
+   - CODE OVER NOISE: Let well-structured code with concise inline comments explain the implementation. If the user explicitly asks for an explanation, keep it to 1–2 punchy bullets highlighting key architectural decisions.
+9. NO REPEATED FILE READS (ANTI-LOOP DIRECTIVE):
+   - Never call read_file_range or read_local_file repeatedly on the same file in overlapping or slightly shifted chunks. Once you have read a file, its complete contents are already in your conversation context above.
+   - Do NOT loop. Synthesize what you have gathered and write your response.
+10. WORKSPACE OVERVIEW PROTOCOL:
+   - When asked to "read the workspace", "get familiar with the project", or "understand the application", inspect the key architecture/entry files ONCE, then immediately synthesize your findings into a comprehensive, structured architecture summary (Overview, Key Modules, Execution Flow, Configuration).
+11. NATIVE FUNCTION CALLING ONLY:
+   - Always invoke tools via native API function calling. NEVER output raw XML or pseudo-tags such as <tool_call>, <function=...>, or </tool_call> in plain text.${voiceDirective}${thinkDirective}`;
         }
 
         // ── Tool dedup + rate limiting: persists across all recursive depths for this turn ──
         const calledToolKeys = new Set<string>();
+        const fileReadCounts = new Map<string, number>();
         let totalToolCalls = 0;       // hard cap: max tools total per user turn
         let consecutiveErrors = 0;    // if 2 errors in a row, stop and answer from what we know
-        const MAX_TOTAL_TOOLS = 25;
+        const MAX_TOTAL_TOOLS = 20;
 
         // ── Build API-formatted message history ──
         const buildApiMessages = (isInitialTurn: boolean) => {
@@ -384,6 +536,15 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
         // ── Execute tool call ──
         const executeTool = async (name: string, args: Record<string, any>, callId: string): Promise<string> => {
           let result: string;
+
+          // Anchor model-supplied paths/roots to the selected project (Agent Coder only)
+          if (projectPath) {
+            if (['list_directory', 'read_local_file', 'read_file_range', 'run_python_file', 'write_to_file', 'replace_in_file', 'delete_file'].includes(name)) {
+              args = { ...args, path: resolvePath(args.path) };
+            } else if (name === 'search_files' || name === 'grep_search') {
+              args = { ...args, root: args.root ? resolvePath(args.root) : projectPath };
+            }
+          }
 
           if (name === 'web_search') {
             const q = (args.query || '').trim();
@@ -511,6 +672,11 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
               needsApproval = true;
             }
 
+            // Per-session auto-approve applies to terminal commands only; delete / screen / keyboard / mouse always ask.
+            if (name === 'run_terminal_command' && useChatStore.getState().autoApprove) {
+              needsApproval = false;
+            }
+
             let approved = true;
             if (needsApproval) {
               approved = await new Promise<boolean>((resolve) => {
@@ -524,7 +690,7 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             }
 
             if (name === 'run_terminal_command') {
-              const res = await tauriApi.runTerminalCommand(args.command);
+              const res = await tauriApi.runTerminalCommand(args.command, projectPath);
               const status = res.success ? '✅ Success' : `❌ Failed (exit code ${res.exit_code})`;
               const out = res.stdout.trim();
               const err = res.stderr.trim();
@@ -784,8 +950,38 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           }
 
           const hadReasoning = !!useChatStore.getState().streamingReasoning;
-          const finalMessage = finalizeStreamMessage(convId!);
-          const hasToolCalls = finalMessage.tool_calls && finalMessage.tool_calls.length > 0;
+          let finalMessage = finalizeStreamMessage(convId!);
+          let hasToolCalls = finalMessage.tool_calls && finalMessage.tool_calls.length > 0;
+
+          // ── Fallback parser for text-based tool calls (Nemotron, Qwen, Mistral) ──
+          if (!hasToolCalls && finalMessage.content && finalMessage.content.includes('<tool_call>')) {
+            const { toolCalls: parsedCalls, cleanedContent } = parseTextToolCalls(finalMessage.content);
+            if (parsedCalls.length > 0) {
+              finalMessage = {
+                ...finalMessage,
+                tool_calls: parsedCalls,
+                content: cleanedContent || undefined,
+              };
+              hasToolCalls = true;
+              // Clean up in store so raw <tool_call> XML is never displayed in the chat bubble
+              useChatStore.setState((state) => ({
+                messages: state.messages.map((m) =>
+                  m.id === finalMessage.id
+                    ? { ...m, content: cleanedContent || undefined, tool_calls: parsedCalls }
+                    : m
+                ),
+              }));
+            } else {
+              // Strip orphaned tags so raw XML is not displayed
+              const stripped = finalMessage.content.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').trim();
+              finalMessage = { ...finalMessage, content: stripped || undefined };
+              useChatStore.setState((state) => ({
+                messages: state.messages.map((m) =>
+                  m.id === finalMessage.id ? { ...m, content: stripped || undefined } : m
+                ),
+              }));
+            }
+          }
 
           // ── Truncated while thinking: model hit the token limit before writing an answer ──
           // A retry can't help (same limit) and would discard the reasoning, so show an
@@ -871,6 +1067,31 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
                 continue;
               }
               calledToolKeys.add(toolKey);
+
+              // Per-file read throttling to prevent infinite reading loops
+              if (toolName === 'read_file_range' || toolName === 'read_local_file') {
+                const rawPath = String(toolArgs?.path || '').trim();
+                if (rawPath) {
+                  const normPath = rawPath.toLowerCase();
+                  const count = fileReadCounts.get(normPath) || 0;
+                  if (count >= 2) {
+                    const fileName = rawPath.split(/[/\\]/).pop() || rawPath;
+                    console.log(`[Throttling] Blocked repeated reads of ${fileName} (${count} prior reads)`);
+                    tauriApi.appendSystemLog('warn', `Throttling repeated reads of ${fileName} (${count} prior reads)`);
+                    addMessage({
+                      id: generateId(),
+                      conversation_id: convId!,
+                      role: 'tool',
+                      content: `[NOTICE]: "${fileName}" has already been read in full (${count} times). You already have its entire contents in your context history above. DO NOT re-read this file. Synthesize what you have learned and write your response to the user now.`,
+                      tool_call_id: tc.id,
+                      created_at: Date.now(),
+                    });
+                    continue;
+                  }
+                  fileReadCounts.set(normPath, count + 1);
+                }
+              }
+
               totalToolCalls++;
 
               tauriApi.appendSystemLog('info', `Tool Call: ${toolName}(${tc.function?.arguments})`);
@@ -935,8 +1156,7 @@ CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             }
             if (controller.signal.aborted) return;
             setChatStatus('thinking');
-            clearStreamingContent();
-            await executeChatLoop(false, depth + 1);
+            await executeChatLoop(false, depth + 1, true); // Force final answer without tools
             return;
           }
 

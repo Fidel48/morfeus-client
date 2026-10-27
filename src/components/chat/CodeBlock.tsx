@@ -36,11 +36,11 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ language, code }) => {
         <div className="flex items-center gap-2.5 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
             onClick={handleOpenInCanvas}
-            className="flex items-center gap-1 text-xs text-zinc-400 hover:text-violet-300 transition-colors"
-            title="Inspect & run in side Coder Canvas (Ctrl+\)"
+            className="flex items-center gap-1 text-xs text-zinc-400 hover:text-indigo-300 transition-colors"
+            title="Inspect & run in Editor (Ctrl+\)"
           >
-            <Code2 size={12} className="text-violet-400" />
-            <span>Canvas</span>
+            <Code2 size={12} className="text-indigo-400" />
+            <span>Editor</span>
           </button>
           <button
             onClick={handleCopy}

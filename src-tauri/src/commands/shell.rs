@@ -104,8 +104,10 @@ async fn run_python_file_inner(python: &str, path: &str) -> Result<RunResult, St
 
 /// Execute a raw terminal command.
 /// Uses `sh -c` on Unix and `cmd.exe /c` on Windows.
+/// If `cwd` is provided (and non-empty), the command runs in that directory
+/// (used by Agent Coder to run inside the selected project).
 #[tauri::command]
-pub async fn run_terminal_command(command: String) -> Result<RunResult, String> {
+pub async fn run_terminal_command(command: String, cwd: Option<String>) -> Result<RunResult, String> {
     #[cfg(target_os = "windows")]
     let mut cmd = Command::new("cmd");
     #[cfg(target_os = "windows")]
@@ -115,6 +117,13 @@ pub async fn run_terminal_command(command: String) -> Result<RunResult, String> 
     let mut cmd = Command::new("sh");
     #[cfg(not(target_os = "windows"))]
     cmd.arg("-c").arg(&command);
+
+    if let Some(dir) = cwd.as_deref().filter(|d| !d.trim().is_empty()) {
+        if !std::path::Path::new(dir).is_dir() {
+            return Err(format!("Working directory does not exist: {}", dir));
+        }
+        cmd.current_dir(dir);
+    }
 
     let output = cmd.output()
         .map_err(|e| format!("Failed to execute command: {}", e))?;

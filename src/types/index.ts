@@ -5,6 +5,10 @@ export interface Conversation {
   updated_at: number;
   model_id?: string;
   system_prompt?: string;
+  /** 'agent' = Agent Coder session; undefined/'fast' = regular Chat. */
+  mode?: ChatMode;
+  /** Absolute project folder for Agent Coder sessions. */
+  project_path?: string;
 }
 
 export interface Message {

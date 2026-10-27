@@ -6,6 +6,9 @@ import { RightPanel } from '@/components/layout/RightPanel';
 import { SettingsModal } from '@/components/settings/SettingsModal';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useVoiceStore } from '@/stores/voiceStore';
+import { useChatStore } from '@/stores/chatStore';
+import { useProjectStore } from '@/stores/projectStore';
+import { CoderWorkspace } from '@/components/coder/CoderWorkspace';
 import { useMcpStore } from '@/stores/mcpStore';
 import { tauriApi } from '@/lib/tauri';
 import { preloadKokoroEngine } from '@/lib/kokoroTts';
@@ -26,6 +29,21 @@ const AppContent: React.FC = () => {
   const { loadFromBackend } = useSettingsStore();
   const { setMicAvailable, setAvailableVoices } = useVoiceStore();
   const { initAllServers } = useMcpStore();
+  const chatMode = useChatStore((s) => s.chatMode);
+  const activeConversationId = useChatStore((s) => s.activeConversationId);
+  const activeProjectPath = useProjectStore((s) => s.activeProjectPath);
+
+  // Keep the open conversation consistent with the current mode/project:
+  // Chat and Agent Coder sessions live in separate spaces (also covers app restarts).
+  useEffect(() => {
+    const { conversations, setActiveConversation } = useChatStore.getState();
+    const conv = conversations.find((c) => c.id === activeConversationId);
+    if (!conv) return;
+    const convMode = conv.mode ?? 'fast';
+    const mismatch =
+      convMode !== chatMode || (chatMode === 'agent' && conv.project_path !== activeProjectPath);
+    if (mismatch) setActiveConversation(null);
+  }, [chatMode, activeConversationId, activeProjectPath]);
 
   useEffect(() => {
     // Load settings from Tauri backend on startup
@@ -46,6 +64,11 @@ const AppContent: React.FC = () => {
     // Auto-connect all enabled MCP servers on startup
     if (tauriApi.isDesktopApp()) {
       initAllServers().catch(console.error);
+    }
+
+    // Auto-discover projects in ~/Documents/projects on desktop launch
+    if (tauriApi.isDesktopApp()) {
+      useProjectStore.getState().discoverLocalProjects().catch(console.error);
     }
 
     // Auto-start Kokoro Neural TTS server on desktop launch
@@ -98,20 +121,24 @@ const AppContent: React.FC = () => {
         </div>
       )}
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left Sidebar */}
-        <div className="w-60 flex-shrink-0">
-          <Sidebar />
-        </div>
+      {chatMode === 'agent' ? (
+        <CoderWorkspace />
+      ) : (
+        <div className="flex flex-1 overflow-hidden">
+          {/* Left Sidebar */}
+          <div className="w-60 flex-shrink-0">
+            <Sidebar />
+          </div>
 
-        {/* Main Chat Area */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <ChatWindow />
-        </div>
+          {/* Main Chat Area */}
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <ChatWindow />
+          </div>
 
-        {/* Right Panel */}
-        <RightPanel />
-      </div>
+          {/* Right Panel */}
+          <RightPanel />
+        </div>
+      )}
 
       {/* Settings Modal */}
       <SettingsModal />

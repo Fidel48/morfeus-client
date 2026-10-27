@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { SlidersHorizontal, FileText, Wrench, X, Code2 } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useChatStore } from '@/stores/chatStore';
-import { CoderCanvas } from './CoderCanvas';
+import { CodeEditorView } from '@/components/coder/CodeEditorView';
 import { cn } from '@/lib/utils';
 import type { AppSettings } from '@/types';
 
@@ -30,7 +30,7 @@ export const RightPanel: React.FC = () => {
             <div className="flex items-center gap-1 px-3 pt-3 pb-2 border-b border-white/8 flex-shrink-0">
               <TabButton
                 icon={<Code2 size={13} />}
-                label="Canvas"
+                label="Editor"
                 active={rightPanelTab === 'code'}
                 onClick={() => setRightPanelTab('code')}
               />
@@ -64,7 +64,7 @@ export const RightPanel: React.FC = () => {
             {/* Content */}
             {rightPanelTab === 'code' ? (
               <div className="flex-1 overflow-hidden">
-                <CoderCanvas />
+                <CodeEditorView />
               </div>
             ) : (
               <div className="flex-1 overflow-y-auto p-3 space-y-4">

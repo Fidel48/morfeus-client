@@ -6,6 +6,7 @@ import { generateId } from '@/lib/utils';
 import { speechQueue } from '@/lib/kokoroTts';
 import { tauriApi } from '@/lib/tauri';
 import { useSettingsStore } from './settingsStore';
+import { useProjectStore } from './projectStore';
 
 export interface PendingToolApproval {
   toolName: string;
@@ -57,6 +58,8 @@ interface ChatStore {
   isAgenticMode: boolean;
   chatMode: ChatMode;
   pendingApproval: PendingToolApproval | null;
+  /** Per-session: auto-approve terminal commands without asking (reset when the session changes). */
+  autoApprove: boolean;
 
   // Actions
   setConversations: (conversations: Conversation[]) => void;
@@ -83,6 +86,7 @@ interface ChatStore {
   setIsAgenticMode: (isAgentic: boolean) => void;
   setChatMode: (mode: ChatMode) => void;
   setPendingApproval: (approval: PendingToolApproval | null) => void;
+  setAutoApprove: (value: boolean) => void;
 }
 
 export const useChatStore = create<ChatStore>()(
@@ -103,6 +107,7 @@ export const useChatStore = create<ChatStore>()(
       isAgenticMode: false,
       chatMode: 'fast',
       pendingApproval: null,
+      autoApprove: false,
 
       setConversations: (conversations) => set({ conversations }),
       
@@ -164,6 +169,7 @@ export const useChatStore = create<ChatStore>()(
             streamingReasoning: '',
             streamingToolCalls: [],
             chatStatus: 'idle',
+            autoApprove: false,
           });
         }
       },
@@ -274,11 +280,15 @@ export const useChatStore = create<ChatStore>()(
         // Default voice readout to OFF when opening a new chat
         useSettingsStore.getState().updateSettings({ tts_enabled: false, continuous_voice: false });
 
+        const isAgent = get().chatMode === 'agent';
+        const projectPath = isAgent ? useProjectStore.getState().activeProjectPath : null;
         const conversation: Conversation = {
           id: generateId(),
-          title: 'New Chat',
+          title: isAgent ? 'New Session' : 'New Chat',
           created_at: Date.now(),
           updated_at: Date.now(),
+          mode: isAgent ? 'agent' : 'fast',
+          ...(projectPath ? { project_path: projectPath } : {}),
         };
         set({
           conversations: [conversation, ...get().conversations],
@@ -289,6 +299,7 @@ export const useChatStore = create<ChatStore>()(
           isStreaming: false,
           abortController: null,
           chatStatus: 'idle',
+          autoApprove: false,
         });
         return conversation;
       },
@@ -303,9 +314,39 @@ export const useChatStore = create<ChatStore>()(
             : [...state.activeMcpServers, id],
         })),
 
-      setIsAgenticMode: (isAgenticMode) => set({ isAgenticMode, chatMode: isAgenticMode ? 'agent' : 'fast' }),
-      setChatMode: (chatMode) => set({ chatMode, isAgenticMode: chatMode === 'agent' }),
+      // Switching between Chat and Agent Coder swaps to a separate conversation space:
+      // the active conversation is cleared if it belongs to the other mode (empty drafts are dropped).
+      setIsAgenticMode: (isAgenticMode) => get().setChatMode(isAgenticMode ? 'agent' : 'fast'),
+      setChatMode: (chatMode) => {
+        const state = get();
+        const active = state.conversations.find((c) => c.id === state.activeConversationId);
+        const activeMode = active?.mode ?? 'fast';
+
+        if (active && activeMode !== chatMode) {
+          state.abortController?.abort();
+          speechQueue.stop();
+          const isEmptyDraft = !state.messages.some((m) => m.conversation_id === active.id);
+          set({
+            chatMode,
+            isAgenticMode: chatMode === 'agent',
+            activeConversationId: null,
+            conversations: isEmptyDraft
+              ? state.conversations.filter((c) => c.id !== active.id)
+              : state.conversations,
+            isStreaming: false,
+            abortController: null,
+            streamingContent: '',
+            streamingReasoning: '',
+            streamingToolCalls: [],
+            chatStatus: 'idle',
+            autoApprove: false,
+          });
+          return;
+        }
+        set({ chatMode, isAgenticMode: chatMode === 'agent' });
+      },
       setPendingApproval: (pendingApproval) => set({ pendingApproval }),
+      setAutoApprove: (autoApprove) => set({ autoApprove }),
     }),
     {
       name: 'morfeus-chat-storage',

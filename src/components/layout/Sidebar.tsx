@@ -30,8 +30,9 @@ export const Sidebar: React.FC = () => {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
-  const filtered = conversations.filter((c) =>
-    c.title.toLowerCase().includes(searchQuery.toLowerCase())
+  // Agent Coder sessions live in the Agent Coder workspace, not in the Chat history.
+  const filtered = conversations.filter(
+    (c) => (c.mode ?? 'fast') !== 'agent' && c.title.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   const grouped = groupConversationsByDate(filtered);
@@ -87,7 +88,7 @@ export const Sidebar: React.FC = () => {
 
       {/* Conversation list */}
       <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-0.5 scrollbar-thin">
-        {conversations.length === 0 ? (
+        {conversations.filter((c) => (c.mode ?? 'fast') !== 'agent').length === 0 ? (
           <div className="px-3 py-8 text-center">
             <MessageSquare size={20} className="mx-auto text-zinc-700 mb-2" />
             <p className="text-xs text-zinc-700">No conversations yet</p>

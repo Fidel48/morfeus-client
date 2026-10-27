@@ -1,6 +1,11 @@
 import { create } from 'zustand';
 import { tauriApi } from '@/lib/tauri';
 
+export interface EditorTab {
+  path: string;
+  name: string;
+}
+
 export interface CanvasState {
   code: string;
   filePath: string | null;
@@ -10,11 +15,15 @@ export interface CanvasState {
   showDiff: boolean;
   consoleOutput: string | null;
   isExecuting: boolean;
+  openTabs: EditorTab[];
 
   // Actions
   setCode: (code: string) => void;
   openFileInCanvas: (filePath: string, content: string, language?: string) => void;
+  openFileFromDisk: (filePath: string) => Promise<boolean>;
   loadCodeSnippet: (code: string, language?: string, filePath?: string) => void;
+  closeTab: (filePath: string) => void;
+  switchTab: (filePath: string) => Promise<void>;
   setShowDiff: (show: boolean) => void;
   toggleDiff: () => void;
   setConsoleOutput: (output: string | null) => void;
@@ -56,23 +65,20 @@ export function detectLanguageFromPath(path: string): string {
   return map[ext] || 'plaintext';
 }
 
-const DEFAULT_SAMPLE_CODE = `// Morfeus Coder Canvas
-// Paste, write, or click "Open in Canvas" on any code block in chat.
-
-fn main() {
-    println!("Hello from Morfeus Developer Harness!");
+function fileNameFromPath(path: string): string {
+  return path.split(/[/\\]/).pop() || path;
 }
-`;
 
 export const useCanvasStore = create<CanvasState>((set, get) => ({
-  code: DEFAULT_SAMPLE_CODE,
+  code: '',
   filePath: null,
-  language: 'rust',
-  originalCode: DEFAULT_SAMPLE_CODE,
+  language: 'plaintext',
+  originalCode: null,
   isModified: false,
   showDiff: false,
   consoleOutput: null,
   isExecuting: false,
+  openTabs: [],
 
   setCode: (code: string) => {
     const { originalCode } = get();
@@ -84,6 +90,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
   openFileInCanvas: (filePath: string, content: string, language?: string) => {
     const lang = language || detectLanguageFromPath(filePath);
+    const name = fileNameFromPath(filePath);
+    const existingTabs = get().openTabs;
+    const tabExists = existingTabs.some((t) => t.path === filePath);
+    const updatedTabs = tabExists ? existingTabs : [...existingTabs, { path: filePath, name }];
+
     set({
       code: content,
       filePath,
@@ -92,20 +103,79 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       isModified: false,
       showDiff: false,
       consoleOutput: null,
+      openTabs: updatedTabs,
     });
+  },
+
+  openFileFromDisk: async (filePath: string) => {
+    try {
+      let content = '';
+      try {
+        const res = await tauriApi.readTextFile(filePath);
+        content = res.content;
+      } catch {
+        content = await tauriApi.parseLocalFile(filePath);
+      }
+
+      get().openFileInCanvas(filePath, content);
+      return true;
+    } catch (err) {
+      console.error('Failed to open file from disk:', err);
+      return false;
+    }
   },
 
   loadCodeSnippet: (code: string, language?: string, filePath?: string) => {
     const lang = language || (filePath ? detectLanguageFromPath(filePath) : 'plaintext');
+    const path = filePath || null;
+    let updatedTabs = get().openTabs;
+
+    if (path) {
+      const name = fileNameFromPath(path);
+      if (!updatedTabs.some((t) => t.path === path)) {
+        updatedTabs = [...updatedTabs, { path, name }];
+      }
+    }
+
     set({
       code,
-      filePath: filePath || null,
+      filePath: path,
       language: lang,
       originalCode: code,
       isModified: false,
       showDiff: false,
       consoleOutput: null,
+      openTabs: updatedTabs,
     });
+  },
+
+  closeTab: (tabPath: string) => {
+    const { openTabs, filePath } = get();
+    const remaining = openTabs.filter((t) => t.path !== tabPath);
+
+    if (filePath === tabPath) {
+      if (remaining.length > 0) {
+        const next = remaining[remaining.length - 1];
+        get().switchTab(next.path);
+      } else {
+        set({
+          code: '',
+          filePath: null,
+          language: 'plaintext',
+          originalCode: null,
+          isModified: false,
+          showDiff: false,
+          consoleOutput: null,
+          openTabs: [],
+        });
+      }
+    } else {
+      set({ openTabs: remaining });
+    }
+  },
+
+  switchTab: async (tabPath: string) => {
+    await get().openFileFromDisk(tabPath);
   },
 
   setShowDiff: (show: boolean) => set({ showDiff: show }),
@@ -152,16 +222,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         const err = res.stderr ? `\n--- stderr ---\n${res.stderr}` : '';
         output = `${header}${out}${err}`;
       } else if (language === 'openscad' && filePath) {
-        // Run OpenSCAD CLI to render / export if available
         const res = await tauriApi.runTerminalCommand(`openscad -o /tmp/morfeus_preview.png --preview "${filePath}" 2>&1 || openscad "${filePath}"`);
         output = res.stdout || res.stderr || 'OpenSCAD launched.';
       } else if (filePath) {
-        // Fallback: check if we can run it via shell
         output = `Running file: ${filePath}...\n`;
         const res = await tauriApi.runTerminalCommand(`cat "${filePath}" | head -n 50`);
         output += res.stdout || res.stderr;
       } else {
-        // Generic execution info
         output = `Language '${language}' scratchpad cannot be auto-executed directly without a file path or compiler.\nUse Python, Bash, or specify a project file to run.`;
       }
 
@@ -173,14 +240,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
   resetCanvas: () => {
     set({
-      code: DEFAULT_SAMPLE_CODE,
+      code: '',
       filePath: null,
-      language: 'rust',
-      originalCode: DEFAULT_SAMPLE_CODE,
+      language: 'plaintext',
+      originalCode: null,
       isModified: false,
       showDiff: false,
       consoleOutput: null,
       isExecuting: false,
+      openTabs: [],
     });
   },
 }));

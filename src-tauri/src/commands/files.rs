@@ -74,21 +74,59 @@ pub async fn parse_local_file(path: String) -> Result<String, String> {
             .map_err(|e| format!("Failed to read file (might be binary): {}", e))?
     };
 
-    // Clean up whitespace a bit to save context
-    let cleaned_content = content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+    let is_extracted = extension == "pdf" || extension == "docx";
 
-    if cleaned_content.is_empty() {
+    // Only extracted documents (PDF/DOCX) get whitespace cleanup. Plain text and source code
+    // must be returned verbatim: indentation and blank lines are meaningful.
+    let cleaned_content = if is_extracted {
+        content.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+    } else {
+        content
+    };
+
+    if cleaned_content.trim().is_empty() {
         return Err("File contains no readable text. If this is a PDF, it might be a scanned image or lack a text layer (OCR is not yet supported).".into());
     }
 
     // Truncate if too long (safety limit, ~15k chars for local LLMs)
-    if cleaned_content.len() > 15000 {
+    if cleaned_content.chars().count() > 15000 {
         let mut truncated = cleaned_content.chars().take(15000).collect::<String>();
         truncated.push_str("\n\n[...Content truncated due to size limits...]");
         Ok(truncated)
     } else {
         Ok(cleaned_content)
     }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TextFileContent {
+    pub path: String,
+    pub content: String,
+    pub size_bytes: u64,
+}
+
+/// Read a text/source file exactly as it is on disk (no cleanup, no truncation).
+/// Used by the editor so what you see is what gets saved. Rejects binary and very large files.
+#[command]
+pub async fn read_text_file(path: String) -> Result<TextFileContent, String> {
+    const MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+    let file_path = Path::new(&path);
+    if !file_path.is_file() {
+        return Err(format!("Not a file: {}", path));
+    }
+    let size = fs::metadata(file_path).map_err(|e| format!("Cannot stat file: {}", e))?.len();
+    if size > MAX_BYTES {
+        return Err(format!("File is too large to open in the editor ({:.1} MB, limit 2 MB).", size as f64 / 1_048_576.0));
+    }
+
+    let bytes = fs::read(file_path).map_err(|e| format!("Cannot read file: {}", e))?;
+    if bytes.iter().take(8000).any(|b| *b == 0) {
+        return Err("Binary file — cannot be opened in the editor.".to_string());
+    }
+
+    let content = String::from_utf8(bytes).map_err(|_| "File is not valid UTF-8 text.".to_string())?;
+    Ok(TextFileContent { path, content, size_bytes: size })
 }
 
 // ─── Directory Entry ──────────────────────────────────────────────────────────
@@ -103,8 +141,11 @@ pub struct DirEntry {
 }
 
 /// List the contents of a directory. Returns entries sorted: folders first, then files.
+/// Hidden entries (dotfiles) are skipped unless `include_hidden` is true (the file explorer
+/// sets it); `.git` and `.DS_Store` are always skipped.
 #[command]
-pub async fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
+pub async fn list_directory(path: String, include_hidden: Option<bool>) -> Result<Vec<DirEntry>, String> {
+    let show_hidden = include_hidden.unwrap_or(false);
     let dir = Path::new(&path);
 
     if !dir.exists() {
@@ -120,8 +161,8 @@ pub async fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
         .filter_map(|res| res.ok())
         .filter_map(|entry| {
             let file_name = entry.file_name().to_string_lossy().to_string();
-            // Skip hidden files (start with .)
-            if file_name.starts_with('.') {
+            // Skip hidden files (start with .) unless explicitly requested
+            if file_name == ".git" || file_name == ".DS_Store" || (!show_hidden && file_name.starts_with('.')) {
                 return None;
             }
             let full_path = entry.path().to_string_lossy().to_string();
@@ -152,9 +193,9 @@ pub async fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
         b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
-    // Safety cap: don't send 10,000 entries to the LLM
-    if entries.len() > 200 {
-        entries.truncate(200);
+    // Safety cap: don't send 10,000 entries to the LLM / UI
+    if entries.len() > 500 {
+        entries.truncate(500);
     }
 
     Ok(entries)
