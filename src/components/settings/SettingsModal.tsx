@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   X, Server, Mic, Volume2, Check, AlertCircle,
   Loader2, RefreshCw, ChevronDown, ChevronUp, Zap, Bug, FolderOpen, Terminal, Copy, FileText,
-  Plug, Plus, Trash2, PlugZap, ChevronRight, WifiOff, Play, Square, Atom, HelpCircle, Search,
+  Plug, Plus, Trash2, PlugZap, ChevronRight, WifiOff, Play, Square, Atom, HelpCircle, Search, Sparkles,
 } from 'lucide-react';
 import { useSettingsStore, PROVIDER_PRESETS, DEFAULT_PROVIDERS, ConfiguredModelOption } from '@/stores/settingsStore';
 import { useMcpStore } from '@/stores/mcpStore';
@@ -1472,10 +1472,12 @@ const StatusDot: React.FC<{ status?: string }> = ({ status = 'disabled' }) => (
 );
 
 const McpTab: React.FC = () => {
-  const { servers, addServer, removeServer, setEnabled, connectServer, disconnectServer, refreshServerTools } = useMcpStore();
+  const { servers, addServer, removeServer, setEnabled, connectServer, disconnectServer, refreshServerTools, importFromClaudeDesktop } = useMcpStore();
 
   const [showAdd, setShowAdd] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importMessage, setImportMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   // ── Add-server form state ──
   const [form, setForm] = useState({
@@ -1486,6 +1488,25 @@ const McpTab: React.FC = () => {
     envRaw: '',   // KEY=VALUE,KEY2=VALUE2
   });
   const [addError, setAddError] = useState('');
+
+  const handleImportClaude = async () => {
+    setImporting(true);
+    setImportMessage(null);
+    try {
+      const res = await importFromClaudeDesktop();
+      if (res.imported === 0 && res.skipped === 0) {
+        setImportMessage({ type: 'err', text: 'No MCP servers found in Claude Desktop configuration.' });
+      } else if (res.imported === 0 && res.skipped > 0) {
+        setImportMessage({ type: 'ok', text: `All ${res.skipped} server(s) from Claude Desktop are already configured.` });
+      } else {
+        setImportMessage({ type: 'ok', text: `Imported ${res.imported} server(s) from Claude Desktop (${res.names.join(', ')}). Connecting...` });
+      }
+    } catch (err: any) {
+      setImportMessage({ type: 'err', text: `Claude config not found or unreadable: ${err?.message || err}` });
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const handleAdd = () => {
     setAddError('');
@@ -1521,14 +1542,40 @@ const McpTab: React.FC = () => {
             {servers.filter((s) => s.status === 'connected').length} of {servers.length} servers connected
           </p>
         </div>
-        <button
-          onClick={() => setShowAdd(!showAdd)}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-violet-600/20 text-violet-300 border border-violet-500/30 hover:bg-violet-600/30 transition-colors"
-        >
-          <Plus size={12} />
-          Add Server
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleImportClaude}
+            disabled={importing}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-amber-500/10 text-amber-300 border border-amber-500/25 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+            title="Import MCP servers configured in Claude Desktop (claude_desktop_config.json)"
+          >
+            <Sparkles size={12} className={importing ? 'animate-spin' : 'text-amber-400'} />
+            <span>{importing ? 'Importing...' : 'Import from Claude'}</span>
+          </button>
+          <button
+            onClick={() => setShowAdd(!showAdd)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-violet-600/20 text-violet-300 border border-violet-500/30 hover:bg-violet-600/30 transition-colors"
+          >
+            <Plus size={12} />
+            Add Server
+          </button>
+        </div>
       </div>
+
+      {/* Claude Import Feedback */}
+      {importMessage && (
+        <div className={cn(
+          'px-3 py-2 rounded-lg text-xs flex items-center justify-between border',
+          importMessage.type === 'ok'
+            ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/25'
+            : 'bg-amber-500/10 text-amber-300 border-amber-500/25'
+        )}>
+          <span>{importMessage.text}</span>
+          <button onClick={() => setImportMessage(null)} className="text-zinc-500 hover:text-zinc-300 ml-2">
+            <X size={12} />
+          </button>
+        </div>
+      )}
 
       {/* Add-server form */}
       <AnimatePresence>

@@ -40,6 +40,7 @@ interface McpStore {
   openManager: () => void;
   closeManager: () => void;
   getActiveTools: () => Array<{ serverId: string; tool: McpToolInfo }>;
+  importFromClaudeDesktop: () => Promise<{ imported: number; skipped: number; names: string[] }>;
 
   // ── Internal runtime update (not exposed as persisted state) ──
   _setServerRuntime: (id: string, status: McpServerStatus, tools?: McpToolInfo[], errorMessage?: string) => void;
@@ -52,6 +53,33 @@ export const useMcpStore = create<McpStore>()(
     (set, get) => ({
       servers: [],
       isManagerOpen: false,
+
+      importFromClaudeDesktop: async () => {
+        const discovered = await tauriApi.mcpImportClaudeDesktop();
+        let imported = 0;
+        let skipped = 0;
+        const names: string[] = [];
+
+        for (const item of discovered) {
+          const exists = get().servers.some((s) => s.id === item.id);
+          if (exists) {
+            skipped++;
+            continue;
+          }
+          get().addServer({
+            id: item.id,
+            name: item.name,
+            command: item.command,
+            args: item.args,
+            env: item.env,
+            enabled: true,
+          });
+          imported++;
+          names.push(item.id);
+        }
+
+        return { imported, skipped, names };
+      },
 
       addServer: (config) => {
         const full: McpServerConfig = {

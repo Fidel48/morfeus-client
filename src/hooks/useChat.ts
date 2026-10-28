@@ -401,7 +401,7 @@ Current Time: ${timeStr}
 
 ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
 1. AUTONOMOUS ReAct LOOP: You are in Agent Coder mode with full IDE developer harness capabilities. When tasked with solving a problem, debugging, or coding, operate autonomously in a continuous ReAct (Reason, Act, Observe) loop. Do not stop at the first step—inspect files, search, run code, observe outputs, and iterate until the objective is accomplished.
-2. FULL DEVELOPER TOOL ACCESS: You have complete access to terminal commands (run_terminal_command), Python execution (run_python, run_python_file), package installation (install_python_packages), file creation and editing (write_to_file, delete_file), filesystem exploration, screen inspection (analyze_screen), and OS automation.
+2. FULL DEVELOPER TOOL ACCESS: You have complete access to terminal commands (run_terminal_command), remote device execution over SSH (ssh_execute), background dev server & process management (spawn_background_process, read_process_logs, kill_background_process, list_background_processes), Python execution (run_python, run_python_file), package installation (install_python_packages), file creation and editing (write_to_file, delete_file), filesystem exploration, screen inspection (analyze_screen), and OS automation.
 3. EXTENSIBILITY & MCP: You have native integration with Model Context Protocol (MCP). Active MCP servers provide dynamic tools prefixed with mcp__<server>__<tool>. You can also manage servers using list_mcp_servers, connect_mcp_server, and remove_mcp_server.
 4. SURGICAL PRECISION: Always inspect files and read existing code before editing to preserve project conventions and architecture.
 5. CONVERSATIONAL BALANCE: When the user asks general questions or explanations, answer directly, concisely, and articulately without invoking unnecessary tools.
@@ -650,6 +650,11 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             ].filter(Boolean).join('\n');
           } else if (
             name === 'run_terminal_command' ||
+            name === 'ssh_execute' ||
+            name === 'spawn_background_process' ||
+            name === 'kill_background_process' ||
+            name === 'read_process_logs' ||
+            name === 'list_background_processes' ||
             name === 'write_to_file' ||
             name === 'replace_in_file' ||
             name === 'delete_file' ||
@@ -661,19 +666,25 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           ) {
             let needsApproval = false;
             
-            // Require approval for sensitive or active OS tools
+            // Require approval for sensitive or active OS / process tools
             if (
               name === 'delete_file' ||
               name === 'mouse_click' ||
               name === 'type_text' ||
               name === 'press_key' ||
-              name === 'run_terminal_command'
+              name === 'run_terminal_command' ||
+              name === 'ssh_execute' ||
+              name === 'spawn_background_process' ||
+              name === 'kill_background_process'
             ) {
               needsApproval = true;
             }
 
-            // Per-session auto-approve applies to terminal commands only; delete / screen / keyboard / mouse always ask.
-            if (name === 'run_terminal_command' && useChatStore.getState().autoApprove) {
+            // Per-session auto-approve applies to terminal commands and SSH
+            if (
+              (name === 'run_terminal_command' || name === 'ssh_execute') &&
+              useChatStore.getState().autoApprove
+            ) {
               needsApproval = false;
             }
 
@@ -699,6 +710,46 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
                 out ? `\n**stdout:**\n\`\`\`\n${out}\n\`\`\`` : '',
                 err ? `\n**stderr:**\n\`\`\`\n${err}\n\`\`\`` : '',
               ].filter(Boolean).join('\n');
+            } else if (name === 'ssh_execute') {
+              const res = await tauriApi.runSshCommand(args.host, args.command, {
+                user: args.user,
+                port: args.port ? Number(args.port) : undefined,
+                key_path: args.key_path,
+              });
+              const targetStr = `${args.user ? args.user + '@' : ''}${args.host}${args.port ? ':' + args.port : ''}`;
+              const status = res.success ? `✅ SSH Success (${targetStr})` : `❌ SSH Failed (${targetStr}, exit code ${res.exit_code})`;
+              const out = res.stdout.trim();
+              const err = res.stderr.trim();
+              result = [
+                `${status}`,
+                out ? `\n**stdout:**\n\`\`\`\n${out}\n\`\`\`` : '',
+                err ? `\n**stderr:**\n\`\`\`\n${err}\n\`\`\`` : '',
+              ].filter(Boolean).join('\n');
+            } else if (name === 'spawn_background_process') {
+              const cwd = args.cwd || projectPath || null;
+              const info = await tauriApi.spawnBackgroundProcess(args.id, args.command, cwd);
+              result = `✅ Background process "${info.id}" started (PID: ${info.pid ?? 'unknown'}).\nCommand: \`${info.command}\`\nWorking Directory: \`${info.cwd || 'default'}\`\n\nUse \`read_process_logs\` with id="${info.id}" to inspect stdout/stderr.`;
+            } else if (name === 'read_process_logs') {
+              const logs = await tauriApi.readProcessLogs(args.id, args.tail ? Number(args.tail) : 50);
+              const output = logs.lines.join('\n');
+              result = `Process "${logs.id}" (${logs.running ? '🟢 Running' : '⚪ Stopped'}):\n\`\`\`\n${output || '(no output yet)'}\n\`\`\``;
+            } else if (name === 'kill_background_process') {
+              const stopped = await tauriApi.killBackgroundProcess(args.id);
+              result = stopped
+                ? `✅ Background process "${args.id}" terminated.`
+                : `ℹ️ Background process "${args.id}" was not running or not found.`;
+            } else if (name === 'list_background_processes') {
+              const list = await tauriApi.listBackgroundProcesses();
+              if (list.length === 0) {
+                result = "No background processes currently registered.";
+              } else {
+                result = list
+                  .map(
+                    (p) =>
+                      `- **${p.id}** (${p.running ? '🟢 running' : '⚪ stopped'}, PID ${p.pid ?? '?'}) -> \`${p.command}\` (started: ${new Date(p.started_at * 1000).toLocaleTimeString()})`
+                  )
+                  .join('\n');
+              }
             } else if (name === 'write_to_file') {
               result = await tauriApi.writeToFile(args.path, args.content);
               // Live sync to Coder Canvas

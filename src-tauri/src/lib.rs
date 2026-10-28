@@ -27,6 +27,7 @@ pub fn run() {
                 .build(),
         )
         .manage(RecordingBuffer::default())
+        .manage(commands::process::ProcessState::default())
         .setup(|_app| {
             // Auto-start Kokoro neural TTS server on app boot
             tauri::async_runtime::spawn(async {
@@ -46,6 +47,7 @@ pub fn run() {
             mcp::mcp_call_tool,
             mcp::mcp_stop_server,
             mcp::mcp_list_active_servers,
+            mcp::mcp_import_claude_desktop,
             // LSP
             lsp::lsp_start_server,
             lsp::lsp_goto_definition,
@@ -86,11 +88,17 @@ pub fn run() {
             logger::append_system_log,
             logger::get_system_logs,
             logger::open_log_folder,
-            // Shell / Script execution
+            // Shell / Script execution / SSH
             commands::shell::run_python_code,
             commands::shell::run_python_file,
             commands::shell::install_python_packages,
             commands::shell::run_terminal_command,
+            commands::shell::run_ssh_command,
+            // Background Process Runner (Phase 4)
+            commands::process::spawn_background_process,
+            commands::process::read_process_logs,
+            commands::process::kill_background_process,
+            commands::process::list_background_processes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Morfeus");

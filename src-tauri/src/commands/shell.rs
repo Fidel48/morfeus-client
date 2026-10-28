@@ -140,3 +140,65 @@ pub async fn run_terminal_command(command: String, cwd: Option<String>) -> Resul
         success,
     })
 }
+
+/// Execute a remote shell command via SSH.
+/// Automatically applies BatchMode=yes and ConnectTimeout to avoid hanging indefinitely.
+#[tauri::command]
+pub async fn run_ssh_command(
+    host: String,
+    command: String,
+    user: Option<String>,
+    port: Option<u16>,
+    key_path: Option<String>,
+    timeout_secs: Option<u64>,
+) -> Result<RunResult, String> {
+    let mut cmd = Command::new("ssh");
+
+    // Prevent hanging indefinitely on interactive password prompts
+    cmd.arg("-o").arg("BatchMode=yes");
+    
+    // Auto-accept new SSH host keys (OpenSSH >= 7.6)
+    cmd.arg("-o").arg("StrictHostKeyChecking=accept-new");
+
+    let timeout = timeout_secs.unwrap_or(20);
+    cmd.arg("-o").arg(format!("ConnectTimeout={}", timeout));
+
+    if let Some(p) = port {
+        cmd.arg("-p").arg(p.to_string());
+    }
+
+    if let Some(k) = key_path.filter(|p| !p.trim().is_empty()) {
+        cmd.arg("-i").arg(k);
+    }
+
+    let target = if let Some(u) = user.filter(|u| !u.trim().is_empty()) {
+        format!("{}@{}", u, host)
+    } else {
+        host
+    };
+
+    cmd.arg(&target);
+    cmd.arg(&command);
+
+    let output = cmd.output()
+        .map_err(|e| format!("Failed to execute SSH command: {}. Make sure 'ssh' is installed on your system.", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+    let success = output.status.success();
+
+    if !success && (stderr.contains("Permission denied (publickey)") || stderr.contains("Host key verification failed")) {
+        stderr.push_str("\n💡 Tip: Morfeus runs SSH in non-interactive batch mode. Ensure your SSH public key is added to the remote device using:\n   ssh-copy-id ");
+        stderr.push_str(&target);
+        stderr.push_str("\nor provide the private key path in key_path.");
+    }
+
+    Ok(RunResult {
+        stdout,
+        stderr,
+        exit_code,
+        success,
+    })
+}
+

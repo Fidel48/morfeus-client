@@ -279,6 +279,11 @@ export const tauriApi = {
     return tauriInvoke<string[]>('mcp_list_active_servers');
   },
 
+  /** Import MCP servers defined in Claude Desktop configuration file */
+  async mcpImportClaudeDesktop(): Promise<Array<{ id: string; name: string; command: string; args: string[]; env: Record<string, string> }>> {
+    return tauriInvoke('mcp_import_claude_desktop');
+  },
+
   /** Run an inline Python code snippet. Returns stdout, stderr, exit_code, success. */
   async runPythonCode(code: string): Promise<{ stdout: string; stderr: string; exit_code: number; success: boolean }> {
     return tauriInvoke('run_python_code', { code });
@@ -297,6 +302,46 @@ export const tauriApi = {
   /** Run a raw terminal command (sh -c or cmd.exe /c). Optional cwd runs it inside a project folder. Returns stdout, stderr, exit_code, success. */
   async runTerminalCommand(command: string, cwd?: string | null): Promise<{ stdout: string; stderr: string; exit_code: number; success: boolean }> {
     return tauriInvoke('run_terminal_command', { command, cwd: cwd ?? null });
+  },
+
+  /** Run a remote shell command via SSH. Automatically sets batch mode and connection timeout. */
+  async runSshCommand(
+    host: string,
+    command: string,
+    options?: { user?: string; port?: number; key_path?: string; timeout_secs?: number }
+  ): Promise<{ stdout: string; stderr: string; exit_code: number; success: boolean }> {
+    return tauriInvoke('run_ssh_command', {
+      host,
+      command,
+      user: options?.user ?? null,
+      port: options?.port ?? null,
+      keyPath: options?.key_path ?? null,
+      timeoutSecs: options?.timeout_secs ?? null,
+    });
+  },
+
+  /** Phase 4: Spawn a long-running background process (e.g. dev server, continuous script) */
+  async spawnBackgroundProcess(
+    id: string,
+    command: string,
+    cwd?: string | null
+  ): Promise<{ id: string; command: string; cwd?: string; running: boolean; pid?: number; started_at: number }> {
+    return tauriInvoke('spawn_background_process', { id, command, cwd: cwd ?? null });
+  },
+
+  /** Phase 4: Read log output lines from a background process */
+  async readProcessLogs(id: string, tail?: number): Promise<{ id: string; running: boolean; lines: string[] }> {
+    return tauriInvoke('read_process_logs', { id, tail: tail ?? null });
+  },
+
+  /** Phase 4: Terminate a running background process */
+  async killBackgroundProcess(id: string): Promise<boolean> {
+    return tauriInvoke('kill_background_process', { id });
+  },
+
+  /** Phase 4: List all tracked background processes */
+  async listBackgroundProcesses(): Promise<Array<{ id: string; command: string; cwd?: string; running: boolean; pid?: number; started_at: number }>> {
+    return tauriInvoke('list_background_processes');
   },
 
   /** Write content to an absolute file path. Creates directories if they don't exist. */

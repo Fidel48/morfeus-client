@@ -142,5 +142,7 @@ Phase 5: Language Server Protocol (LSP) Activation (Diagnostics & Auto-Fix)
 | **P3** | Canvas Action Toolbar | 🟢 Done | High | "▶️ Run Code", "💾 Save", "📋 Copy", "Diff View", and console logs. |
 | **P3** | Chat-to-Canvas Sync | 🟢 Done | Medium | "Canvas" button in code blocks and live file sync upon agent edits. |
 | **P3** | Coder Workspace & Project Picker | 🟢 Done | High | Agent Coder swaps the layout for `components/coder/` (`ProjectPicker`, `CoderSidebar`, `CoderWorkspace`). Projects in `projectStore.ts`; conversations carry `mode` + `project_path` so Chat and Coder histories are separate. Project tree/git/rules injected into the prompt; terminal `cwd` + relative paths anchored to the project; per-session auto-approve (terminal only). |
-| **P4** | Background Process Runner | ⚪ Backlog | Medium | Async `spawn_process`, `read_logs`, `kill_process` for dev servers. |
+| **P4** | Background Process Runner & Dev Servers | 🟢 Done | High | Async `spawn_background_process`, `read_process_logs`, `kill_background_process`, `list_background_processes` in Rust with bounded circular log buffers. |
+| **P4** | Remote Device Execution over SSH | 🟢 Done | High | Native `ssh_execute` / `run_ssh_command` with non-interactive batch mode and safe connection timeouts. |
+| **P4** | Claude Desktop MCP 1-Click Importer | 🟢 Done | Medium | Auto-discovers and imports MCP servers from `claude_desktop_config.json` via Settings > MCP Servers. |
 | **P5** | Expose LSP Diagnostics | ⚪ Backlog | Medium | Feed compiler errors back to agent for automatic self-repair. |

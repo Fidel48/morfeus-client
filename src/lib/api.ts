@@ -214,6 +214,113 @@ export const WEB_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'ssh_execute',
+      description: "Execute a shell command on a remote machine or device (Raspberry Pi, Linux server, VPS, embedded system) over SSH. Automatically uses non-interactive batch mode and safe timeouts. Requires SSH key authentication configured on the host.",
+      parameters: {
+        type: 'object',
+        properties: {
+          host: {
+            type: 'string',
+            description: 'Remote hostname or IP address (e.g. "192.168.1.50" or "raspberrypi.local" or "myserver.com").',
+          },
+          command: {
+            type: 'string',
+            description: 'The shell command to execute remotely.',
+          },
+          user: {
+            type: 'string',
+            description: 'Optional remote username (e.g. "admin", "pi", "ubuntu").',
+          },
+          port: {
+            type: 'number',
+            description: 'Optional SSH port (defaults to 22).',
+          },
+          key_path: {
+            type: 'string',
+            description: 'Optional path to the SSH private key (e.g. "~/.ssh/id_ed25519").',
+          },
+        },
+        required: ['host', 'command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'spawn_background_process',
+      description: "Start a long-running background command or dev server (e.g. 'npm run dev', 'python app.py', 'cargo run'). Does not block; returns a process ID. Use read_process_logs to check its output or kill_background_process to stop it.",
+      parameters: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: 'A unique identifier for this background process (e.g. "dev-server", "backend", "vite").',
+          },
+          command: {
+            type: 'string',
+            description: 'The complete command to run in the background.',
+          },
+          cwd: {
+            type: 'string',
+            description: 'Optional directory path to execute the command in. Defaults to the current active workspace.',
+          },
+        },
+        required: ['id', 'command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_process_logs',
+      description: "Read recent stdout and stderr output lines from a background process started with spawn_background_process.",
+      parameters: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: 'The identifier of the running background process.',
+          },
+          tail: {
+            type: 'number',
+            description: 'Maximum number of recent lines to return (default 50).',
+          },
+        },
+        required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'kill_background_process',
+      description: "Terminate a running background process by ID.",
+      parameters: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: 'The identifier of the process to stop.',
+          },
+        },
+        required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_background_processes',
+      description: "List all active and completed background processes with their running status, PID, and command.",
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'write_to_file',
       description: "Create a new file or overwrite an existing file with the provided content. Parent directories are created automatically if they do not exist.",
       parameters: {

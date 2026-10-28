@@ -248,3 +248,97 @@ pub async fn mcp_list_active_servers(
     let clients = state.clients.lock().await;
     Ok(clients.keys().cloned().collect())
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ClaudeMcpServerEntry {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+}
+
+#[command]
+pub async fn mcp_import_claude_desktop() -> Result<Vec<ClaudeMcpServerEntry>, String> {
+    let config_path = find_claude_desktop_config_path()
+        .ok_or_else(|| "Could not locate Claude Desktop configuration directory on this system.".to_string())?;
+
+    if !config_path.exists() {
+        return Err(format!("Claude Desktop config file not found at: {}", config_path.display()));
+    }
+
+    let contents = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read Claude Desktop config: {}", e))?;
+
+    let parsed: Value = serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse Claude Desktop config JSON: {}", e))?;
+
+    let mut result = Vec::new();
+
+    if let Some(mcp_servers) = parsed.get("mcpServers").and_then(|v| v.as_object()) {
+        for (server_id, server_val) in mcp_servers {
+            let command = server_val.get("command").and_then(|c| c.as_str()).unwrap_or("").to_string();
+            if command.is_empty() {
+                continue;
+            }
+
+            let args = server_val.get("args")
+                .and_then(|a| a.as_array())
+                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+
+            let env = server_val.get("env")
+                .and_then(|e| e.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|val| (k.clone(), val.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let name = format!("{} (Claude)", server_id);
+
+            result.push(ClaudeMcpServerEntry {
+                id: server_id.clone(),
+                name,
+                command,
+                args,
+                env,
+            });
+        }
+    }
+
+    Ok(result)
+}
+
+fn find_claude_desktop_config_path() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let p = std::path::PathBuf::from(home)
+                .join("Library/Application Support/Claude/claude_desktop_config.json");
+            return Some(p);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let p = std::path::PathBuf::from(appdata)
+                .join("Claude/claude_desktop_config.json");
+            return Some(p);
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let p = std::path::PathBuf::from(home)
+                .join(".config/Claude/claude_desktop_config.json");
+            return Some(p);
+        }
+    }
+
+    None
+}
+
