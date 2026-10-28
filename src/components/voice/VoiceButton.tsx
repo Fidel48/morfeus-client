@@ -99,7 +99,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
 
   // ─── macOS Path: Native Rust CoreAudio + Apple SFSpeechRecognizer ────────
   const startMacRecording = useCallback(async () => {
-    if (isStartingRef.current || status === 'recording' || status === 'transcribing') return;
+    if (isStartingRef.current || statusRef.current === 'recording' || statusRef.current === 'transcribing') return;
     isStartingRef.current = true;
 
     try {
@@ -116,7 +116,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
     } finally {
       isStartingRef.current = false;
     }
-  }, [status, setStatus, startWaveform, stopWaveform]);
+  }, [setStatus, startWaveform, stopWaveform]);
 
   const stopMacRecording = useCallback(async () => {
     stopWaveform();
@@ -131,31 +131,39 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
           onTranscriptRef.current(trimmed);
           onAutoSendRef.current?.(trimmed);
           // In Full-Duplex Continuous Mode:
-          // Immediately re-arm recording so mic is actively listening for VAD barge-in while AI streams & speaks
+          // Re-arm recording after brief 350ms dispatch pause so user can barge-in while AI speaks!
           if (isContinuousActiveRef.current) {
             setTimeout(() => {
               if (isContinuousActiveRef.current && statusRef.current === 'idle') {
                 startRecordingRef.current();
               }
-            }, 300);
+            }, 350);
           }
         } else if (isContinuousActiveRef.current) {
+          // Empty capture (silence/ambient timeout) - seamlessly keep listening for user
           setTimeout(() => {
-            if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+            if (isContinuousActiveRef.current && statusRef.current === 'idle' && !useVoiceStore.getState().isSpeaking) {
               startRecordingRef.current();
             }
-          }, 300);
+          }, 200);
         }
       } else if (isContinuousActiveRef.current) {
         setTimeout(() => {
-          if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+          if (isContinuousActiveRef.current && statusRef.current === 'idle' && !useVoiceStore.getState().isSpeaking) {
             startRecordingRef.current();
           }
-        }, 300);
+        }, 200);
       }
     } catch (err: any) {
       console.error('[VoiceButton/Mac] Native STT error:', err);
       tauriApi.appendSystemLog('error', `Mac STT error: ${err?.message || err}`);
+      if (isContinuousActiveRef.current) {
+        setTimeout(() => {
+          if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+            startRecordingRef.current();
+          }
+        }, 400);
+      }
     } finally {
       setStatus('idle');
       usingNativeRef.current = false;
@@ -326,9 +334,6 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
 
   // ─── Unified start/stop dispatch ─────────────────────────────────────────
   const startRecording = useCallback(() => {
-    // Barge-in: immediately silence the AI if it is speaking
-    interruptAiSpeech(false);
-
     if (isMacOS) {
       startMacRecording();
     } else {
@@ -409,7 +414,10 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
             if (isContinuousActiveRef.current && statusRef.current === 'idle') {
               startRecordingRef.current();
             }
-          }, 300);
+          }, 200);
+        } else {
+          // If mic was already active in full-duplex mode, flush residual audio from buffer
+          tauriApi.clearRecordingBuffer().catch(() => {});
         }
       }
     };
@@ -419,6 +427,27 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
       window.removeEventListener('speech-playback-complete', handlePlaybackComplete);
     };
   }, []);
+
+  // ─── Continuous Mode Auto-Arm Watchdog ────────────────────────────────────
+  // Ensures that whenever Continuous Mode is active and AI is not speaking/generating,
+  // the microphone remains reliably armed and listening for the user's turn (just like LiveKit / local-voice-ai).
+  useEffect(() => {
+    if (!isContinuousActive) return;
+
+    // Immediately arm if idle
+    if (statusRef.current === 'idle' && !useVoiceStore.getState().isSpeaking && !isStartingRef.current) {
+      startRecordingRef.current();
+    }
+
+    const interval = setInterval(() => {
+      const isSpeaking = useVoiceStore.getState().isSpeaking;
+      if (isContinuousActiveRef.current && statusRef.current === 'idle' && !isSpeaking && !isStartingRef.current) {
+        startRecordingRef.current();
+      }
+    }, 1200);
+
+    return () => clearInterval(interval);
+  }, [isContinuousActive]);
 
   // ─── If voice readout is turned off, disengage Continuous Mode and stop mic ─
   useEffect(() => {
@@ -462,7 +491,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
 
     // If AI is currently speaking, clicking the voice button immediately silences it
     if (useVoiceStore.getState().isSpeaking) {
-      interruptAiSpeech(false);
+      interruptAiSpeech(true);
       return;
     }
 

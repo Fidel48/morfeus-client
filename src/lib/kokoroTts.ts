@@ -263,7 +263,10 @@ export class SpeechQueue {
    * Flush remaining text at the end of LLM generation.
    */
   public flush() {
-    if (this.aborted) return;
+    if (this.aborted) {
+      this.notifyPlaybackComplete();
+      return;
+    }
     this.isFlushed = true;
     this.extractSentences(true);
 

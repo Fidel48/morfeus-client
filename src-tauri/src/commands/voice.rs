@@ -239,11 +239,12 @@ pub async fn start_recording(
                 continue;
             }
 
-            // Check if speech was detected followed by 1600ms of silence
+            // Check if speech was detected followed by silence (850ms in continuous mode for snappy back-and-forth)
             if has_spoken && !silence_emitted {
                 let last_time = last_speech_time.lock().map(|g| *g).unwrap_or(None);
                 if let Some(t) = last_time {
-                    if t.elapsed() >= std::time::Duration::from_millis(1600) {
+                    let silence_threshold = if is_continuous { 850 } else { 1200 };
+                    if t.elapsed() >= std::time::Duration::from_millis(silence_threshold) {
                         silence_emitted = true;
                         let _ = app_handle.emit("voice-silence-detected", ());
                     }
@@ -426,9 +427,11 @@ pub async fn speak_text(text: String, rate: Option<f64>, voiceId: Option<String>
         }
     }
 
-    cmd.arg(&text)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    IS_AI_SPEAKING.store(true, Ordering::SeqCst);
+    let _ = cmd.arg(&text)
+        .status()
+        .await;
+    IS_AI_SPEAKING.store(false, Ordering::SeqCst);
 
     Ok(())
 }
