@@ -62,6 +62,24 @@ export const tauriApi = {
     return tauriInvoke<string>('transcribe_native', { base64Wav });
   },
 
+  async setContinuousMode(enabled: boolean): Promise<void> {
+    if (isTauri) {
+      return tauriInvoke('set_continuous_mode', { enabled });
+    }
+  },
+
+  async setAiSpeaking(speaking: boolean): Promise<void> {
+    if (isTauri) {
+      return tauriInvoke('set_ai_speaking', { speaking });
+    }
+  },
+
+  async clearRecordingBuffer(): Promise<void> {
+    if (isTauri) {
+      return tauriInvoke('clear_recording_buffer');
+    }
+  },
+
   async speakText(text: string, rate: number = 1.0, voiceId?: string): Promise<void> {
     if (isTauri) {
       return tauriInvoke('speak_text', { text, rate, voiceId });

@@ -1,11 +1,14 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
 use std::io::Cursor;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 static SPEECH_GENERATION: AtomicU64 = AtomicU64::new(0);
+pub static IS_CONTINUOUS_MODE: AtomicBool = AtomicBool::new(false);
+pub static IS_AI_SPEAKING: AtomicBool = AtomicBool::new(false);
+pub static BARGE_IN_THRESHOLD: AtomicU32 = AtomicU32::new(45); // RMS 0.045
 
 /// Shared recording buffer managed as Tauri app state
 pub struct RecordingBuffer {
@@ -68,6 +71,8 @@ pub async fn start_recording(
         let last_speech_time = Arc::new(Mutex::new(None::<std::time::Instant>));
         let speech_detected_cb = Arc::clone(&speech_detected);
         let last_speech_cb = Arc::clone(&last_speech_time);
+        let consecutive_loud_frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let consecutive_loud_frames_cb = Arc::clone(&consecutive_loud_frames);
 
         let host = cpal::default_host();
         let mut device_opt = host.default_input_device();
@@ -105,6 +110,7 @@ pub async fn start_recording(
 
         let samples_clone = Arc::clone(&samples_ref);
         let is_rec_clone = Arc::clone(&is_recording_ref);
+        let app_handle_cb = app_handle.clone();
 
         let stream = match device.build_input_stream(
             &config,
@@ -112,6 +118,69 @@ pub async fn start_recording(
                 if let Ok(rec) = is_rec_clone.lock() {
                     if !*rec { return; }
                 }
+
+                let is_continuous = IS_CONTINUOUS_MODE.load(Ordering::SeqCst);
+                let is_ai_speaking = IS_AI_SPEAKING.load(Ordering::SeqCst);
+
+                // Voice Activity Detection (RMS energy)
+                let sum_sq: f32 = data.iter().map(|&x| x * x).sum();
+                let rms = (sum_sq / data.len().max(1) as f32).sqrt();
+
+                // ─── Full-Duplex VAD Barge-in Monitoring (Continuous Mode only) ───
+                if is_continuous && is_ai_speaking {
+                    let threshold = BARGE_IN_THRESHOLD.load(Ordering::SeqCst) as f32 / 1000.0;
+                    if rms >= threshold {
+                        let count = consecutive_loud_frames_cb.fetch_add(1, Ordering::SeqCst) + 1;
+                        if count >= 3 {
+                            consecutive_loud_frames_cb.store(0, Ordering::SeqCst);
+                            IS_AI_SPEAKING.store(false, Ordering::SeqCst);
+
+                            if let Ok(mut sd) = speech_detected_cb.lock() {
+                                *sd = true;
+                            }
+                            if let Ok(mut lst) = last_speech_cb.lock() {
+                                *lst = Some(std::time::Instant::now());
+                            }
+
+                            // Trim pre-barge-in speaker audio; keep only the last ~250ms (the beginning of user's utterance)
+                            if let Ok(mut buf) = samples_clone.lock() {
+                                let keep = (native_rate as usize) / 4;
+                                if buf.len() > keep {
+                                    let drop_count = buf.len() - keep;
+                                    buf.drain(0..drop_count);
+                                }
+                            }
+
+                            eprintln!("[morfeus] ⚡ Full-Duplex VAD Barge-in detected (RMS: {:.3} >= {:.3})", rms, threshold);
+                            let _ = app_handle_cb.emit("voice-barge-in-detected", ());
+                        }
+                    } else {
+                        consecutive_loud_frames_cb.store(0, Ordering::SeqCst);
+                    }
+
+                    // While AI is speaking and user has not yet barged in:
+                    // Keep buffer bounded to ~350ms rolling window so old AI speech is continually discarded
+                    let user_spoke = speech_detected_cb.lock().map(|g| *g).unwrap_or(false);
+                    if !user_spoke {
+                        if let Ok(mut buf) = samples_clone.lock() {
+                            let max_lead = (native_rate as usize) / 3;
+                            if buf.len() > max_lead {
+                                let drop_count = buf.len() - max_lead;
+                                buf.drain(0..drop_count);
+                            }
+                            if channels == 1 {
+                                buf.extend_from_slice(data);
+                            } else {
+                                for frame in data.chunks(channels) {
+                                    buf.push(frame.iter().sum::<f32>() / channels as f32);
+                                }
+                            }
+                        }
+                        return;
+                    }
+                }
+
+                // Standard recording path (user speaking alone, or post-barge-in)
                 if let Ok(mut buf) = samples_clone.lock() {
                     // Mix down to mono
                     if channels == 1 {
@@ -123,9 +192,6 @@ pub async fn start_recording(
                     }
                 }
 
-                // Voice Activity Detection (RMS energy)
-                let sum_sq: f32 = data.iter().map(|&x| x * x).sum();
-                let rms = (sum_sq / data.len().max(1) as f32).sqrt();
                 if rms > 0.010 {
                     if let Ok(mut sd) = speech_detected_cb.lock() {
                         *sd = true;
@@ -153,7 +219,7 @@ pub async fn start_recording(
             return;
         }
 
-        let start_time = std::time::Instant::now();
+        let mut start_time = std::time::Instant::now();
         let mut silence_emitted = false;
 
         loop {
@@ -162,8 +228,18 @@ pub async fn start_recording(
                 if !*rec { break; }
             }
 
-            // Check if speech was detected followed by 1600ms of silence
+            let is_continuous = IS_CONTINUOUS_MODE.load(Ordering::SeqCst);
+            let is_ai_speaking = IS_AI_SPEAKING.load(Ordering::SeqCst);
             let has_spoken = speech_detected.lock().map(|g| *g).unwrap_or(false);
+
+            // If AI is speaking in continuous mode and user has not barged in yet,
+            // refresh start_time so the 14s idle safety timeout doesn't fire during long AI responses
+            if is_continuous && is_ai_speaking && !has_spoken {
+                start_time = std::time::Instant::now();
+                continue;
+            }
+
+            // Check if speech was detected followed by 1600ms of silence
             if has_spoken && !silence_emitted {
                 let last_time = last_speech_time.lock().map(|g| *g).unwrap_or(None);
                 if let Some(t) = last_time {
@@ -401,6 +477,7 @@ pub async fn get_voices() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn stop_speaking() -> Result<(), String> {
     SPEECH_GENERATION.fetch_add(1, Ordering::SeqCst);
+    IS_AI_SPEAKING.store(false, Ordering::SeqCst);
     tokio::process::Command::new("powershell")
         .args([
             "-WindowStyle",
@@ -417,6 +494,7 @@ pub async fn stop_speaking() -> Result<(), String> {
 #[tauri::command]
 pub async fn stop_speaking() -> Result<(), String> {
     SPEECH_GENERATION.fetch_add(1, Ordering::SeqCst);
+    IS_AI_SPEAKING.store(false, Ordering::SeqCst);
     let _ = tokio::process::Command::new("killall").arg("afplay").output().await;
     let _ = tokio::process::Command::new("killall").arg("say").output().await;
     Ok(())
@@ -441,6 +519,7 @@ pub async fn get_voices() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn stop_speaking() -> Result<(), String> {
     SPEECH_GENERATION.fetch_add(1, Ordering::SeqCst);
+    IS_AI_SPEAKING.store(false, Ordering::SeqCst);
     let _ = tokio::process::Command::new("killall").arg("aplay").output().await;
     let _ = tokio::process::Command::new("spd-say").arg("-S").output().await;
     Ok(())
@@ -563,15 +642,18 @@ pub async fn kokoro_speak_native(
 
     #[cfg(target_os = "macos")]
     {
+        IS_AI_SPEAKING.store(true, Ordering::SeqCst);
         let _ = tokio::process::Command::new("afplay")
             .arg(&temp_path)
             .status()
             .await;
+        IS_AI_SPEAKING.store(false, Ordering::SeqCst);
         let _ = tokio::fs::remove_file(&temp_path).await;
     }
 
     #[cfg(target_os = "windows")]
     {
+        IS_AI_SPEAKING.store(true, Ordering::SeqCst);
         let script = format!(
             r#"(New-Object Media.SoundPlayer '{}').PlaySync()"#,
             temp_path.to_string_lossy().replace('\'', "''")
@@ -580,18 +662,48 @@ pub async fn kokoro_speak_native(
             .args(["-WindowStyle", "Hidden", "-Command", &script])
             .status()
             .await;
+        IS_AI_SPEAKING.store(false, Ordering::SeqCst);
         let _ = tokio::fs::remove_file(&temp_path).await;
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
+        IS_AI_SPEAKING.store(true, Ordering::SeqCst);
         let _ = tokio::process::Command::new("aplay")
             .arg(&temp_path)
             .status()
             .await;
+        IS_AI_SPEAKING.store(false, Ordering::SeqCst);
         let _ = tokio::fs::remove_file(&temp_path).await;
     }
 
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_continuous_mode(enabled: bool) {
+    IS_CONTINUOUS_MODE.store(enabled, Ordering::SeqCst);
+}
+
+#[tauri::command]
+pub fn set_ai_speaking(
+    speaking: bool,
+    state: tauri::State<'_, RecordingBuffer>,
+) -> Result<(), String> {
+    IS_AI_SPEAKING.store(speaking, Ordering::SeqCst);
+    if !speaking {
+        if let Ok(mut samples) = state.samples.lock() {
+            samples.clear();
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_recording_buffer(state: tauri::State<'_, RecordingBuffer>) -> Result<(), String> {
+    if let Ok(mut samples) = state.samples.lock() {
+        samples.clear();
+    }
     Ok(())
 }
 

@@ -42,7 +42,7 @@ const getSpeechRecognition = () => {
 };
 
 export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onTranscript, onAutoSend, className }) => {
-  const { status, setStatus, micAvailable, setMicAvailable, waveformData, updateWaveform } = useVoiceStore();
+  const { status, setStatus, micAvailable, setMicAvailable, waveformData, updateWaveform, isSpeaking } = useVoiceStore();
   const { settings, updateSettings } = useSettingsStore();
 
   const isContinuousActive = Boolean(settings.continuous_voice);
@@ -130,19 +130,28 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
         if (trimmed) {
           onTranscriptRef.current(trimmed);
           onAutoSendRef.current?.(trimmed);
+          // In Full-Duplex Continuous Mode:
+          // Immediately re-arm recording so mic is actively listening for VAD barge-in while AI streams & speaks
+          if (isContinuousActiveRef.current) {
+            setTimeout(() => {
+              if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+                startRecordingRef.current();
+              }
+            }, 300);
+          }
         } else if (isContinuousActiveRef.current) {
           setTimeout(() => {
             if (isContinuousActiveRef.current && statusRef.current === 'idle') {
               startRecordingRef.current();
             }
-          }, 400);
+          }, 300);
         }
       } else if (isContinuousActiveRef.current) {
         setTimeout(() => {
           if (isContinuousActiveRef.current && statusRef.current === 'idle') {
             startRecordingRef.current();
           }
-        }, 400);
+        }, 300);
       }
     } catch (err: any) {
       console.error('[VoiceButton/Mac] Native STT error:', err);
@@ -183,6 +192,13 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
 
       rec.onresult = (event: any) => {
         resetSilenceTimer();
+
+        // Full-Duplex VAD Barge-in in Continuous Mode (Windows 11)
+        if (isContinuousActiveRef.current && useVoiceStore.getState().isSpeaking) {
+          console.log('[VoiceButton/Browser] ⚡ Full-Duplex Barge-in triggered!');
+          interruptAiSpeech(true);
+        }
+
         let finalTranscript = '';
         let interimTranscript = '';
 
@@ -220,12 +236,19 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
         if (textToSend) {
           onTranscriptRef.current(textToSend);
           onAutoSendRef.current?.(textToSend);
+          if (isContinuousActiveRef.current) {
+            setTimeout(() => {
+              if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+                startRecordingRef.current();
+              }
+            }, 300);
+          }
         } else if (isContinuousActiveRef.current) {
           setTimeout(() => {
             if (isContinuousActiveRef.current && statusRef.current === 'idle') {
               startRecordingRef.current();
             }
-          }, 400);
+          }, 300);
         }
       };
 
@@ -351,16 +374,43 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
     };
   }, []);
 
+  // ─── Listen for Full-Duplex VAD Barge-in from Rust CPAL (Continuous Mode only) ─
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen('voice-barge-in-detected', () => {
+      // Full-Duplex VAD Barge-in applies strictly in Continuous Mode
+      if (!isContinuousActiveRef.current) return;
+      console.log('[VoiceButton] ⚡ Full-Duplex VAD Barge-in triggered!');
+      // 1. Immediately abort AI speech playback & chat stream
+      interruptAiSpeech(true);
+      // 2. Ensure recording state & visual waveform stay active
+      setStatus('recording');
+      startWaveform();
+    }).then((fn) => { unlisten = fn; }).catch(() => {});
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [setStatus, startWaveform]);
+
+  // ─── Keep Rust aware of Continuous Mode state ─────────────────────────────
+  useEffect(() => {
+    tauriApi.setContinuousMode(isContinuousActive).catch(() => {});
+  }, [isContinuousActive]);
+
   // ─── Listen for AI speech playback complete for Continuous Hands-Free ──────
   useEffect(() => {
     const handlePlaybackComplete = () => {
-      if (isContinuousActiveRef.current && statusRef.current === 'idle') {
-        // Natural conversational pause (400ms) before re-opening mic
-        setTimeout(() => {
-          if (isContinuousActiveRef.current && statusRef.current === 'idle') {
-            startRecordingRef.current();
-          }
-        }, 400);
+      if (isContinuousActiveRef.current) {
+        tauriApi.setAiSpeaking(false).catch(() => {});
+        // If mic is idle, re-open for the user's turn
+        if (statusRef.current === 'idle') {
+          setTimeout(() => {
+            if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+              startRecordingRef.current();
+            }
+          }, 300);
+        }
       }
     };
 
@@ -374,6 +424,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
   useEffect(() => {
     if (!settings.tts_enabled && isContinuousActive) {
       updateSettings({ continuous_voice: false });
+      tauriApi.setContinuousMode(false).catch(() => {});
       if (statusRef.current === 'recording') {
         stopRecordingRef.current();
       }
@@ -430,6 +481,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
       continuous_voice: nextVal,
       ...(nextVal ? { tts_enabled: true } : {})
     });
+    tauriApi.setContinuousMode(nextVal).catch(() => {});
 
     if (nextVal) {
       if (status === 'idle') {
@@ -471,7 +523,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
                 key={i}
                 animate={{ height: `${Math.max(4, val * 20)}px` }}
                 transition={{ duration: 0.08 }}
-                className="w-0.5 bg-violet-400 rounded-full"
+                className={cn("w-0.5 rounded-full", isContinuousActive && isSpeaking ? "bg-amber-400" : "bg-violet-400")}
                 style={{ minHeight: 4, maxHeight: 20 }}
               />
             ))}
@@ -490,7 +542,9 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
         className={cn(
           'p-2 rounded-xl transition-all duration-150',
           isRecording
-            ? 'bg-red-500/20 text-red-400 border border-red-500/40 shadow-[0_0_12px_rgba(239,68,68,0.3)] animate-pulse'
+            ? (isContinuousActive && isSpeaking
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_12px_rgba(245,158,11,0.25)] animate-pulse'
+                : 'bg-red-500/20 text-red-400 border border-red-500/40 shadow-[0_0_12px_rgba(239,68,68,0.3)] animate-pulse')
             : isTranscribing
             ? 'bg-violet-500/20 text-violet-400 border border-violet-500/40 animate-pulse-slow'
             : isContinuousActive
@@ -499,7 +553,9 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
         )}
         title={
           isRecording
-            ? (isPttMode ? 'Release to send' : 'Listening... Click to finish speaking & send')
+            ? (isContinuousActive && isSpeaking
+                ? 'Continuous Mode (Full-Duplex): AI is speaking... Speak into your mic to Barge-in & interrupt AI'
+                : (isPttMode ? 'Release to send' : 'Listening... Click to finish speaking & send'))
             : isTranscribing
             ? 'Transcribing speech…'
             : isContinuousActive
@@ -508,7 +564,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
         }
       >
         {isRecording
-          ? <Square size={17} className="fill-red-400" />
+          ? <Square size={17} className={cn(isContinuousActive && isSpeaking ? "fill-amber-300" : "fill-red-400")} />
           : isTranscribing
           ? <Mic size={17} className="animate-pulse text-violet-400" />
           : <Mic size={17} />
@@ -528,8 +584,8 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
         )}
         title={
           isContinuousActive
-            ? 'Continuous Hands-Free Mode is ACTIVE: Morfeus automatically re-arms the microphone after speaking so you can reply without clicking. Click to turn off.'
-            : 'Click to enable Continuous Hands-Free Conversation (AI waits for your response)'
+            ? 'Continuous Hands-Free + Full-Duplex VAD Barge-in is ACTIVE: You can speak at any time, even while Morfeus is speaking, to instantly barge in and interrupt. Click to turn off.'
+            : 'Click to enable Continuous Hands-Free Conversation with Full-Duplex VAD Barge-in'
         }
       >
         <InfinityIcon size={13} className={cn(isContinuousActive && 'text-emerald-400 animate-pulse')} />

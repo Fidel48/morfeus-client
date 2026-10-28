@@ -141,6 +141,7 @@ export async function kokoroSpeak(
 
   try {
     useVoiceStore.getState().setIsSpeaking(true);
+    tauriApi.setAiSpeaking(true).catch(() => {});
     // Try native Kokoro server first
     await tauriApi.kokoroSpeak(clean, voiceId, rate);
     notifyState('ready');
@@ -151,6 +152,7 @@ export async function kokoroSpeak(
     await tauriApi.speakText(clean, rate, voiceId);
   } finally {
     useVoiceStore.getState().setIsSpeaking(false);
+    tauriApi.setAiSpeaking(false).catch(() => {});
   }
 }
 
@@ -177,6 +179,7 @@ export async function kokoroPreview(
 export function kokoroStop(): void {
   speechQueue.stop();
   tauriApi.stopSpeaking().catch(() => {});
+  tauriApi.setAiSpeaking(false).catch(() => {});
   try {
     useVoiceStore.getState().setIsSpeaking(false);
   } catch {}
@@ -190,6 +193,7 @@ export function kokoroStop(): void {
 export function interruptAiSpeech(abortChat = false): void {
   speechQueue.stop();
   tauriApi.stopSpeaking().catch(() => {});
+  tauriApi.setAiSpeaking(false).catch(() => {});
   try {
     useVoiceStore.getState().setIsSpeaking(false);
   } catch {}
@@ -334,6 +338,7 @@ export class SpeechQueue {
     const currentGen = this.generation;
     try {
       useVoiceStore.getState().setIsSpeaking(true);
+      tauriApi.setAiSpeaking(true).catch(() => {});
     } catch {}
 
     while (this.queue.length > 0 && !this.aborted && this.generation === currentGen) {
@@ -357,6 +362,7 @@ export class SpeechQueue {
       this.isProcessing = false;
       try {
         useVoiceStore.getState().setIsSpeaking(false);
+        tauriApi.setAiSpeaking(false).catch(() => {});
       } catch {}
     }
 
@@ -376,6 +382,7 @@ export class SpeechQueue {
     this.isProcessing = false;
     try {
       useVoiceStore.getState().setIsSpeaking(false);
+      tauriApi.setAiSpeaking(false).catch(() => {});
     } catch {}
     tauriApi.stopSpeaking().catch(() => {});
   }

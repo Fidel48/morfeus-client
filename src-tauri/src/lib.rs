@@ -67,6 +67,9 @@ pub fn run() {
             commands::voice::speak_text,
             commands::voice::get_voices,
             commands::voice::stop_speaking,
+            commands::voice::set_continuous_mode,
+            commands::voice::set_ai_speaking,
+            commands::voice::clear_recording_buffer,
             // Web Tools
             commands::web::search_duckduckgo,
             commands::web::fetch_webpage,
