@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { tauriApi } from '@/lib/tauri';
+import { interruptAiSpeech } from '@/lib/kokoroTts';
 
 interface VoiceButtonProps {
   currentInput?: string;
@@ -302,6 +303,9 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
 
   // ─── Unified start/stop dispatch ─────────────────────────────────────────
   const startRecording = useCallback(() => {
+    // Barge-in: immediately silence the AI if it is speaking
+    interruptAiSpeech(false);
+
     if (isMacOS) {
       startMacRecording();
     } else {
@@ -404,6 +408,12 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
     if (isHandlingClick.current) return;
     isHandlingClick.current = true;
     setTimeout(() => { isHandlingClick.current = false; }, 300);
+
+    // If AI is currently speaking, clicking the voice button immediately silences it
+    if (useVoiceStore.getState().isSpeaking) {
+      interruptAiSpeech(false);
+      return;
+    }
 
     if (isRecording) {
       stopRecording();

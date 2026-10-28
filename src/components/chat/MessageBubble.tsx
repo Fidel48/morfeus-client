@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 import { Bot, User, Wrench, Globe, FileText, Search, Folder, Video, Terminal, Copy, VolumeX, Sparkles, ChevronDown, X, ZoomIn } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { tauriApi } from '@/lib/tauri';
+import { interruptAiSpeech } from '@/lib/kokoroTts';
 
 interface ParsedUserContent {
   images: { alt: string; url: string }[];
@@ -282,9 +283,9 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
                 <Copy size={12} />
               </button>
               <button
-                onClick={() => tauriApi.stopSpeaking()}
+                onClick={() => interruptAiSpeech(false)}
                 className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-white/5 rounded transition-colors"
-                title="Stop speaking"
+                title="Stop speaking (silence AI)"
               >
                 <VolumeX size={12} />
               </button>

@@ -8,7 +8,8 @@ import { useChatStore } from '@/stores/chatStore';
 import { useSettingsStore, ConfiguredModelOption, DEFAULT_PROVIDERS } from '@/stores/settingsStore';
 import { useProjectStore, projectNameFromPath } from '@/stores/projectStore';
 import { tauriApi } from '@/lib/tauri';
-import { speechQueue } from '@/lib/kokoroTts';
+import { speechQueue, interruptAiSpeech } from '@/lib/kokoroTts';
+import { useVoiceStore } from '@/stores/voiceStore';
 import { extractPdfText, renderPdfToImages } from '@/lib/pdfParser';
 import { ContentPart, Message } from '@/types';
 import { cn, bytesToBase64, isVisionModel, resizeImage } from '@/lib/utils';
@@ -52,6 +53,7 @@ const StatusBadge: React.FC<StatusBadgeProps> = ({ status }) => {
 export const ChatWindow: React.FC = () => {
   const { messages, isStreaming, streamingContent, streamingReasoning, chatStatus, sendMessage, stopStreaming } = useChat();
   const { rightPanelOpen, toggleRightPanel, chatMode, setChatMode, pendingApproval, activeConversationId } = useChatStore();
+  const isSpeaking = useVoiceStore((s) => s.isSpeaking);
   const {
     settings,
     updateSettings,
@@ -140,10 +142,33 @@ export const ChatWindow: React.FC = () => {
   // Stop speaking and clear speech queue on ChatWindow unmount
   useEffect(() => {
     return () => {
-      speechQueue.stop();
-      tauriApi.stopSpeaking().catch(() => {});
+      interruptAiSpeech(false);
     };
   }, []);
+
+  // Global Escape key listener & morfeus-interrupt-chat event
+  useEffect(() => {
+    const handleKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        const speaking = useVoiceStore.getState().isSpeaking;
+        if (isStreaming || speaking) {
+          e.preventDefault();
+          interruptAiSpeech(true);
+        }
+      }
+    };
+    const handleInterruptEvent = () => {
+      stopStreaming();
+      interruptAiSpeech(false);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('morfeus-interrupt-chat', handleInterruptEvent);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('morfeus-interrupt-chat', handleInterruptEvent);
+    };
+  }, [isStreaming, stopStreaming]);
 
   // Close model menu when clicking outside
   useEffect(() => {
@@ -789,6 +814,33 @@ export const ChatWindow: React.FC = () => {
             </div>
           )}
 
+          {/* Active speech readout banner with instant Interrupt button */}
+          <AnimatePresence>
+            {isSpeaking && (
+              <motion.div
+                initial={{ opacity: 0, y: 4, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 4, scale: 0.98 }}
+                className="flex items-center justify-between px-3 py-1.5 mb-2 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-xs text-indigo-300 shadow-md backdrop-blur-md"
+              >
+                <div className="flex items-center gap-2">
+                  <Volume2 size={14} className="text-indigo-400 animate-pulse" />
+                  <span className="font-medium">AI is speaking…</span>
+                  <span className="text-[10px] text-indigo-400/60 hidden sm:inline">(Press Esc to silence)</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => interruptAiSpeech(false)}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/40 text-[11px] font-semibold transition-all shadow-sm"
+                  title="Stop AI speech (Escape)"
+                >
+                  <Square size={10} className="fill-red-300" />
+                  <span>Interrupt</span>
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           <div className="relative flex flex-col bg-zinc-900/90 border border-white/10 focus-within:border-violet-500/50 rounded-2xl p-2.5 shadow-lg shadow-black/20 backdrop-blur-sm transition-all duration-300 gap-2">
             
             {/* Textarea */}
@@ -1073,15 +1125,16 @@ export const ChatWindow: React.FC = () => {
                     <Loader2 size={14} className="animate-spin" />
                     <span>Reading…</span>
                   </div>
-                ) : isStreaming ? (
+                ) : (isStreaming || isSpeaking) ? (
                   <motion.button
                     type="button"
                     whileTap={{ scale: 0.92 }}
-                    onClick={stopStreaming}
-                    className="p-2 rounded-xl bg-red-500/20 text-red-400 border border-red-500/40 hover:bg-red-500/30 transition-colors"
-                    title="Stop generation"
+                    onClick={() => interruptAiSpeech(true)}
+                    className="p-2 rounded-xl bg-red-500/20 text-red-400 border border-red-500/40 hover:bg-red-500/30 transition-colors flex items-center gap-1.5 px-3 shadow-[0_0_12px_rgba(239,68,68,0.25)] animate-pulse"
+                    title={isSpeaking ? "Stop AI voice (Esc)" : "Stop generation (Esc)"}
                   >
-                    <Square size={15} className="fill-red-400" />
+                    <Square size={13} className="fill-red-400" />
+                    <span className="text-xs font-semibold">{isSpeaking ? 'Interrupt' : 'Stop'}</span>
                   </motion.button>
                 ) : (
                   <motion.button

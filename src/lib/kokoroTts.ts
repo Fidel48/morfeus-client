@@ -9,6 +9,7 @@
  */
 
 import { tauriApi } from './tauri';
+import { useVoiceStore } from '@/stores/voiceStore';
 
 // ── Voice registry ─────────────────────────────────────────────────────────────
 
@@ -139,6 +140,7 @@ export async function kokoroSpeak(
   if (!clean) return;
 
   try {
+    useVoiceStore.getState().setIsSpeaking(true);
     // Try native Kokoro server first
     await tauriApi.kokoroSpeak(clean, voiceId, rate);
     notifyState('ready');
@@ -147,6 +149,8 @@ export async function kokoroSpeak(
     notifyState('error', 'Using system voice fallback');
     // Graceful fallback to OS TTS
     await tauriApi.speakText(clean, rate, voiceId);
+  } finally {
+    useVoiceStore.getState().setIsSpeaking(false);
   }
 }
 
@@ -171,7 +175,27 @@ export async function kokoroPreview(
  * Stop any currently playing audio immediately.
  */
 export function kokoroStop(): void {
+  speechQueue.stop();
   tauriApi.stopSpeaking().catch(() => {});
+  try {
+    useVoiceStore.getState().setIsSpeaking(false);
+  } catch {}
+}
+
+/**
+ * Global interruption helper: instantly stops all audio playback,
+ * purges queued speech sentences, and updates global voice store.
+ * If abortChat is true, notifies chat to cancel streaming.
+ */
+export function interruptAiSpeech(abortChat = false): void {
+  speechQueue.stop();
+  tauriApi.stopSpeaking().catch(() => {});
+  try {
+    useVoiceStore.getState().setIsSpeaking(false);
+  } catch {}
+  if (abortChat && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('morfeus-interrupt-chat'));
+  }
 }
 
 /**
@@ -308,6 +332,9 @@ export class SpeechQueue {
     if (this.isProcessing || this.aborted) return;
     this.isProcessing = true;
     const currentGen = this.generation;
+    try {
+      useVoiceStore.getState().setIsSpeaking(true);
+    } catch {}
 
     while (this.queue.length > 0 && !this.aborted && this.generation === currentGen) {
       const sentence = this.queue.shift();
@@ -328,6 +355,9 @@ export class SpeechQueue {
 
     if (this.generation === currentGen) {
       this.isProcessing = false;
+      try {
+        useVoiceStore.getState().setIsSpeaking(false);
+      } catch {}
     }
 
     if (this.isFlushed && this.queue.length === 0 && !this.aborted && this.generation === currentGen) {
@@ -344,7 +374,10 @@ export class SpeechQueue {
     this.queue = [];
     this.textBuffer = '';
     this.isProcessing = false;
-    kokoroStop();
+    try {
+      useVoiceStore.getState().setIsSpeaking(false);
+    } catch {}
+    tauriApi.stopSpeaking().catch(() => {});
   }
 
   public reset() {

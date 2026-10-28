@@ -3,6 +3,7 @@ import { VoiceStatus } from '@/types';
 
 interface VoiceStore {
   status: VoiceStatus;
+  isSpeaking: boolean;
   transcript: string;
   isAutoSpeak: boolean;
   availableVoices: string[];
@@ -12,6 +13,7 @@ interface VoiceStore {
   waveformData: number[];
 
   setStatus: (status: VoiceStatus) => void;
+  setIsSpeaking: (isSpeaking: boolean) => void;
   setTranscript: (transcript: string) => void;
   setAutoSpeak: (enabled: boolean) => void;
   setAvailableVoices: (voices: string[]) => void;
@@ -24,6 +26,7 @@ interface VoiceStore {
 
 export const useVoiceStore = create<VoiceStore>((set) => ({
   status: 'idle',
+  isSpeaking: false,
   transcript: '',
   isAutoSpeak: false,
   availableVoices: [],
@@ -33,6 +36,7 @@ export const useVoiceStore = create<VoiceStore>((set) => ({
   waveformData: new Array(20).fill(0),
 
   setStatus: (status) => set({ status }),
+  setIsSpeaking: (isSpeaking) => set({ isSpeaking }),
   setTranscript: (transcript) => set({ transcript }),
   setAutoSpeak: (isAutoSpeak) => set({ isAutoSpeak }),
   setAvailableVoices: (availableVoices) => set({ availableVoices }),
