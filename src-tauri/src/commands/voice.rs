@@ -47,6 +47,17 @@ pub async fn start_recording(
         }
     }
 
+    // Halt any active speech output when recording starts so microphone doesn't capture it
+    if IS_AI_SPEAKING.load(Ordering::SeqCst) {
+        SPEECH_GENERATION.fetch_add(1, Ordering::SeqCst);
+        IS_AI_SPEAKING.store(false, Ordering::SeqCst);
+        #[cfg(target_os = "macos")]
+        {
+            let _ = tokio::process::Command::new("killall").arg("afplay").output().await;
+            let _ = tokio::process::Command::new("killall").arg("say").output().await;
+        }
+    }
+
     {
         let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
         if *is_recording {
@@ -71,8 +82,6 @@ pub async fn start_recording(
         let last_speech_time = Arc::new(Mutex::new(None::<std::time::Instant>));
         let speech_detected_cb = Arc::clone(&speech_detected);
         let last_speech_cb = Arc::clone(&last_speech_time);
-        let consecutive_loud_frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let consecutive_loud_frames_cb = Arc::clone(&consecutive_loud_frames);
 
         let host = cpal::default_host();
         let mut device_opt = host.default_input_device();
@@ -110,7 +119,6 @@ pub async fn start_recording(
 
         let samples_clone = Arc::clone(&samples_ref);
         let is_rec_clone = Arc::clone(&is_recording_ref);
-        let app_handle_cb = app_handle.clone();
 
         let stream = match device.build_input_stream(
             &config,
@@ -119,68 +127,17 @@ pub async fn start_recording(
                     if !*rec { return; }
                 }
 
-                let is_continuous = IS_CONTINUOUS_MODE.load(Ordering::SeqCst);
-                let is_ai_speaking = IS_AI_SPEAKING.load(Ordering::SeqCst);
+                // If AI is actively vocalizing through speakers, suppress mic processing
+                // to prevent acoustic feedback loop (the assistant hearing herself).
+                if IS_AI_SPEAKING.load(Ordering::SeqCst) {
+                    return;
+                }
 
                 // Voice Activity Detection (RMS energy)
                 let sum_sq: f32 = data.iter().map(|&x| x * x).sum();
                 let rms = (sum_sq / data.len().max(1) as f32).sqrt();
 
-                // ─── Full-Duplex VAD Barge-in Monitoring (Continuous Mode only) ───
-                if is_continuous && is_ai_speaking {
-                    let threshold = BARGE_IN_THRESHOLD.load(Ordering::SeqCst) as f32 / 1000.0;
-                    if rms >= threshold {
-                        let count = consecutive_loud_frames_cb.fetch_add(1, Ordering::SeqCst) + 1;
-                        if count >= 3 {
-                            consecutive_loud_frames_cb.store(0, Ordering::SeqCst);
-                            IS_AI_SPEAKING.store(false, Ordering::SeqCst);
-
-                            if let Ok(mut sd) = speech_detected_cb.lock() {
-                                *sd = true;
-                            }
-                            if let Ok(mut lst) = last_speech_cb.lock() {
-                                *lst = Some(std::time::Instant::now());
-                            }
-
-                            // Trim pre-barge-in speaker audio; keep only the last ~250ms (the beginning of user's utterance)
-                            if let Ok(mut buf) = samples_clone.lock() {
-                                let keep = (native_rate as usize) / 4;
-                                if buf.len() > keep {
-                                    let drop_count = buf.len() - keep;
-                                    buf.drain(0..drop_count);
-                                }
-                            }
-
-                            eprintln!("[morfeus] ⚡ Full-Duplex VAD Barge-in detected (RMS: {:.3} >= {:.3})", rms, threshold);
-                            let _ = app_handle_cb.emit("voice-barge-in-detected", ());
-                        }
-                    } else {
-                        consecutive_loud_frames_cb.store(0, Ordering::SeqCst);
-                    }
-
-                    // While AI is speaking and user has not yet barged in:
-                    // Keep buffer bounded to ~350ms rolling window so old AI speech is continually discarded
-                    let user_spoke = speech_detected_cb.lock().map(|g| *g).unwrap_or(false);
-                    if !user_spoke {
-                        if let Ok(mut buf) = samples_clone.lock() {
-                            let max_lead = (native_rate as usize) / 3;
-                            if buf.len() > max_lead {
-                                let drop_count = buf.len() - max_lead;
-                                buf.drain(0..drop_count);
-                            }
-                            if channels == 1 {
-                                buf.extend_from_slice(data);
-                            } else {
-                                for frame in data.chunks(channels) {
-                                    buf.push(frame.iter().sum::<f32>() / channels as f32);
-                                }
-                            }
-                        }
-                        return;
-                    }
-                }
-
-                // Standard recording path (user speaking alone, or post-barge-in)
+                // Standard recording path (user speaking alone)
                 if let Ok(mut buf) = samples_clone.lock() {
                     // Mix down to mono
                     if channels == 1 {

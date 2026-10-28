@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { cn } from '@/lib/utils';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { useChatStore } from '@/stores/chatStore';
 import { tauriApi } from '@/lib/tauri';
 import { interruptAiSpeech } from '@/lib/kokoroTts';
 
@@ -99,7 +100,8 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
 
   // ─── macOS Path: Native Rust CoreAudio + Apple SFSpeechRecognizer ────────
   const startMacRecording = useCallback(async () => {
-    if (isStartingRef.current || statusRef.current === 'recording' || statusRef.current === 'transcribing') return;
+    const isBusy = useChatStore.getState().isStreaming || useVoiceStore.getState().isSpeaking;
+    if (isStartingRef.current || statusRef.current === 'recording' || statusRef.current === 'transcribing' || isBusy) return;
     isStartingRef.current = true;
 
     try {
@@ -128,38 +130,35 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
         const text = await tauriApi.transcribeNative(base64Wav);
         const trimmed = text ? text.trim() : '';
         if (trimmed) {
-          onTranscriptRef.current(trimmed);
+          // Send prompt to chat and clear input immediately
           onAutoSendRef.current?.(trimmed);
-          // In Full-Duplex Continuous Mode:
-          // Re-arm recording after brief 350ms dispatch pause so user can barge-in while AI speaks!
-          if (isContinuousActiveRef.current) {
-            setTimeout(() => {
-              if (isContinuousActiveRef.current && statusRef.current === 'idle') {
-                startRecordingRef.current();
-              }
-            }, 350);
-          }
+          onTranscriptRef.current('');
+          // Note: Mic stays idle while AI generates tokens & speaks response.
+          // handlePlaybackComplete will cleanly auto-arm the mic once AI finishes speaking.
         } else if (isContinuousActiveRef.current) {
-          // Empty capture (silence/ambient timeout) - seamlessly keep listening for user
+          // Empty capture (silence/ambient timeout) - seamlessly keep listening if AI is not busy
           setTimeout(() => {
-            if (isContinuousActiveRef.current && statusRef.current === 'idle' && !useVoiceStore.getState().isSpeaking) {
+            const isBusy = useChatStore.getState().isStreaming || useVoiceStore.getState().isSpeaking;
+            if (isContinuousActiveRef.current && statusRef.current === 'idle' && !isBusy) {
               startRecordingRef.current();
             }
-          }, 200);
+          }, 250);
         }
       } else if (isContinuousActiveRef.current) {
         setTimeout(() => {
-          if (isContinuousActiveRef.current && statusRef.current === 'idle' && !useVoiceStore.getState().isSpeaking) {
+          const isBusy = useChatStore.getState().isStreaming || useVoiceStore.getState().isSpeaking;
+          if (isContinuousActiveRef.current && statusRef.current === 'idle' && !isBusy) {
             startRecordingRef.current();
           }
-        }, 200);
+        }, 250);
       }
     } catch (err: any) {
       console.error('[VoiceButton/Mac] Native STT error:', err);
       tauriApi.appendSystemLog('error', `Mac STT error: ${err?.message || err}`);
       if (isContinuousActiveRef.current) {
         setTimeout(() => {
-          if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+          const isBusy = useChatStore.getState().isStreaming || useVoiceStore.getState().isSpeaking;
+          if (isContinuousActiveRef.current && statusRef.current === 'idle' && !isBusy) {
             startRecordingRef.current();
           }
         }, 400);
@@ -172,8 +171,9 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
 
   // ─── Windows Path: Browser SpeechRecognition (Chromium / Edge) ───────────
   const startBrowserRecording = useCallback(() => {
+    const isBusy = useChatStore.getState().isStreaming || useVoiceStore.getState().isSpeaking;
     const SR = getSpeechRecognition();
-    if (!SR || status !== 'idle') return;
+    if (!SR || status !== 'idle' || isBusy) return;
 
     try {
       const rec = new SR();
@@ -242,18 +242,13 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
 
         const textToSend = latestText.trim();
         if (textToSend) {
-          onTranscriptRef.current(textToSend);
           onAutoSendRef.current?.(textToSend);
-          if (isContinuousActiveRef.current) {
-            setTimeout(() => {
-              if (isContinuousActiveRef.current && statusRef.current === 'idle') {
-                startRecordingRef.current();
-              }
-            }, 300);
-          }
+          onTranscriptRef.current('');
+          // Note: Mic stays idle while AI responds. handlePlaybackComplete will cleanly re-arm once speech finishes.
         } else if (isContinuousActiveRef.current) {
           setTimeout(() => {
-            if (isContinuousActiveRef.current && statusRef.current === 'idle') {
+            const isBusy = useChatStore.getState().isStreaming || useVoiceStore.getState().isSpeaking;
+            if (isContinuousActiveRef.current && statusRef.current === 'idle' && !isBusy) {
               startRecordingRef.current();
             }
           }, 300);
@@ -408,17 +403,14 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
     const handlePlaybackComplete = () => {
       if (isContinuousActiveRef.current) {
         tauriApi.setAiSpeaking(false).catch(() => {});
-        // If mic is idle, re-open for the user's turn
-        if (statusRef.current === 'idle') {
-          setTimeout(() => {
-            if (isContinuousActiveRef.current && statusRef.current === 'idle') {
-              startRecordingRef.current();
-            }
-          }, 200);
-        } else {
-          // If mic was already active in full-duplex mode, flush residual audio from buffer
-          tauriApi.clearRecordingBuffer().catch(() => {});
-        }
+        useVoiceStore.getState().setIsSpeaking(false);
+        // Natural conversational pause: wait 300ms after AI finishes speaking, then re-open mic!
+        setTimeout(() => {
+          const isBusy = useChatStore.getState().isStreaming || useVoiceStore.getState().isSpeaking;
+          if (isContinuousActiveRef.current && statusRef.current === 'idle' && !isBusy) {
+            startRecordingRef.current();
+          }
+        }, 300);
       }
     };
 
@@ -430,22 +422,23 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
 
   // ─── Continuous Mode Auto-Arm Watchdog ────────────────────────────────────
   // Ensures that whenever Continuous Mode is active and AI is not speaking/generating,
-  // the microphone remains reliably armed and listening for the user's turn (just like LiveKit / local-voice-ai).
+  // the microphone remains reliably armed and listening for the user's turn.
   useEffect(() => {
     if (!isContinuousActive) return;
 
-    // Immediately arm if idle
-    if (statusRef.current === 'idle' && !useVoiceStore.getState().isSpeaking && !isStartingRef.current) {
-      startRecordingRef.current();
-    }
-
-    const interval = setInterval(() => {
+    const checkAndArm = () => {
       const isSpeaking = useVoiceStore.getState().isSpeaking;
-      if (isContinuousActiveRef.current && statusRef.current === 'idle' && !isSpeaking && !isStartingRef.current) {
+      const isStreaming = useChatStore.getState().isStreaming;
+      const isBusy = isSpeaking || isStreaming || isStartingRef.current;
+      if (isContinuousActiveRef.current && statusRef.current === 'idle' && !isBusy) {
         startRecordingRef.current();
       }
-    }, 1200);
+    };
 
+    // Immediately check if we should arm
+    checkAndArm();
+
+    const interval = setInterval(checkAndArm, 800);
     return () => clearInterval(interval);
   }, [isContinuousActive]);
 
@@ -489,9 +482,14 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
     isHandlingClick.current = true;
     setTimeout(() => { isHandlingClick.current = false; }, 300);
 
-    // If AI is currently speaking, clicking the voice button immediately silences it
-    if (useVoiceStore.getState().isSpeaking) {
+    // If AI is currently speaking or streaming, clicking the voice button immediately silences it and begins listening
+    if (useVoiceStore.getState().isSpeaking || useChatStore.getState().isStreaming) {
       interruptAiSpeech(true);
+      setTimeout(() => {
+        if (statusRef.current === 'idle') {
+          startRecordingRef.current();
+        }
+      }, 150);
       return;
     }
 

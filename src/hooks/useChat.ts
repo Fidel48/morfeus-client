@@ -1215,7 +1215,7 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           const liveSettings = useSettingsStore.getState().settings;
           if (liveSettings.tts_enabled && !hasToolCalls) {
             speechQueue.flush();
-          } else if (!hasToolCalls && liveSettings.continuous_voice && liveSettings.tts_enabled) {
+          } else if (!hasToolCalls && liveSettings.continuous_voice) {
             if (typeof window !== 'undefined') {
               window.dispatchEvent(new CustomEvent('speech-playback-complete'));
             }
@@ -1245,7 +1245,7 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           });
           clearStreamingContent();
           const activeSettings = useSettingsStore.getState().settings;
-          if (typeof window !== 'undefined' && activeSettings.continuous_voice && activeSettings.tts_enabled) {
+          if (typeof window !== 'undefined' && activeSettings.continuous_voice) {
             window.dispatchEvent(new CustomEvent('speech-playback-complete'));
           }
         }
