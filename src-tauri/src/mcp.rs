@@ -37,6 +37,8 @@ pub struct McpClient {
     next_id: Arc<Mutex<u64>>,
 }
 
+type PendingRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+
 impl McpClient {
     pub async fn start(command: &str, args: &[&str], envs: HashMap<String, String>) -> Result<Self, String> {
         #[cfg(target_os = "windows")]
@@ -60,7 +62,7 @@ impl McpClient {
         let (request_tx, mut request_rx) = mpsc::channel::<(JsonRpcRequest, oneshot::Sender<Result<Value, String>>)>(32);
         
         // Track pending requests
-        let pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending_requests: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let pending_requests_reader = pending_requests.clone();
 
         // Write loop
@@ -157,7 +159,7 @@ impl McpClient {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.request_tx.send((req, reply_tx)).await.map_err(|_| "Failed to send request")?;
         
-        reply_rx.await.map_err(|_| "Failed to receive response")?.map_err(|e| e)
+        reply_rx.await.map_err(|_| "Failed to receive response")?
     }
 
     pub async fn send_notification(&self, method: &str, params: Option<Value>) -> Result<(), String> {
