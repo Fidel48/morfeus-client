@@ -1125,16 +1125,16 @@ export const ChatWindow: React.FC = () => {
                     <Loader2 size={14} className="animate-spin" />
                     <span>Reading…</span>
                   </div>
-                ) : (isStreaming || isSpeaking) ? (
+                ) : (isStreaming && !isSpeaking) ? (
                   <motion.button
                     type="button"
                     whileTap={{ scale: 0.92 }}
                     onClick={() => interruptAiSpeech(true)}
                     className="p-2 rounded-xl bg-red-500/20 text-red-400 border border-red-500/40 hover:bg-red-500/30 transition-colors flex items-center gap-1.5 px-3 shadow-[0_0_12px_rgba(239,68,68,0.25)] animate-pulse"
-                    title={isSpeaking ? "Stop AI voice (Esc)" : "Stop generation (Esc)"}
+                    title="Stop generation (Esc)"
                   >
                     <Square size={13} className="fill-red-400" />
-                    <span className="text-xs font-semibold">{isSpeaking ? 'Interrupt' : 'Stop'}</span>
+                    <span className="text-xs font-semibold">Stop</span>
                   </motion.button>
                 ) : (
                   <motion.button

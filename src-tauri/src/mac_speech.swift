@@ -19,30 +19,52 @@ guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")), 
     exit(1)
 }
 
-let request = SFSpeechURLRecognitionRequest(url: fileURL)
-if #available(macOS 10.15, *) {
-    request.requiresOnDeviceRecognition = false
-}
+func transcribe(requiresOnDevice: Bool) -> (String, Bool) {
+    let request = SFSpeechURLRecognitionRequest(url: fileURL)
+    request.taskHint = .dictation
+    request.shouldReportPartialResults = false
+    if #available(macOS 10.15, *) {
+        request.requiresOnDeviceRecognition = requiresOnDevice
+    }
 
-var finished = false
-var recognizedText = ""
+    var finished = false
+    var recognizedText = ""
+    var hadError = false
 
-recognizer.recognitionTask(with: request) { result, error in
-    if let result = result {
-        recognizedText = result.bestTranscription.formattedString
-        if result.isFinal {
+    let task = recognizer.recognitionTask(with: request) { result, error in
+        if let result = result {
+            recognizedText = result.bestTranscription.formattedString
+            if result.isFinal {
+                finished = true
+            }
+        }
+        if let _ = error {
+            hadError = true
             finished = true
         }
-    } else if let error = error {
-        fputs("ERROR: \(error.localizedDescription)\n", stderr)
-        finished = true
+    }
+
+    let timeout = Date().addingTimeInterval(8.0)
+    while !finished && Date() < timeout {
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.04))
+    }
+
+    if !finished {
+        task.finish()
+    }
+
+    return (recognizedText.trimmingCharacters(in: .whitespacesAndNewlines), hadError)
+}
+
+// Prefer lightning-fast on-device Neural Engine recognition if supported by macOS
+var (text, error) = (recognizer.supportsOnDeviceRecognition) ? transcribe(requiresOnDevice: true) : ("", true)
+
+// Fallback to network speech recognition if on-device model was missing or returned empty
+if error || text.isEmpty {
+    let (netText, _) = transcribe(requiresOnDevice: false)
+    if !netText.isEmpty {
+        text = netText
     }
 }
 
-// Pump the macOS event loop to allow Apple SFSpeechRecognizer to transcribe audio natively
-let timeout = Date().addingTimeInterval(6.0)
-while !finished && Date() < timeout {
-    RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
-}
-
-print(recognizedText)
+print(text)

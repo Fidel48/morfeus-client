@@ -223,6 +223,7 @@ export class SpeechQueue {
   private isFlushed = false;
   private reachedResources = false;
   private generation = 0;
+  private hasEmittedFirstChunk = false;
 
   constructor(voice: string = DEFAULT_KOKORO_VOICE, rate: number = 1.0) {
     this.voice = voice;
@@ -305,7 +306,34 @@ export class SpeechQueue {
       return;
     }
 
-    // Split on sentence boundaries: [.!?] followed by whitespace or newline, or double newline
+    // Eager first-chunk extraction for near-zero TTFB (Time to First Byte speech):
+    // Rather than making the user wait for a 20-word sentence ending in a period,
+    // dispatch the first opening clause (comma, colon, semicolon, dash) or word boundary
+    // so speech starts vocalizing in ~400ms while the rest streams in the background.
+    if (!this.hasEmittedFirstChunk) {
+      const earlyClauseRegex = /([.!?]+(?:\s+|\n+)|[,;:—]+(?:\s+|\n+)|(?:\n+))/g;
+      const earlyMatch = earlyClauseRegex.exec(this.textBuffer);
+      if (earlyMatch && earlyMatch.index + earlyMatch[0].length >= 14) {
+        const candidate = this.textBuffer.slice(0, earlyMatch.index + earlyMatch[0].length).trim();
+        if (candidate.length >= 8 && !/\b(?:e\.g|i\.e|mr|mrs|dr|vs|v0|v1)\.$/i.test(candidate)) {
+          this.hasEmittedFirstChunk = true;
+          this.push(candidate);
+          this.textBuffer = this.textBuffer.slice(earlyMatch.index + earlyMatch[0].length);
+          return;
+        }
+      } else if (this.textBuffer.length >= 45) {
+        const lastSpace = this.textBuffer.lastIndexOf(' ', 45);
+        if (lastSpace >= 18) {
+          const candidate = this.textBuffer.slice(0, lastSpace).trim();
+          this.hasEmittedFirstChunk = true;
+          this.push(candidate);
+          this.textBuffer = this.textBuffer.slice(lastSpace);
+          return;
+        }
+      }
+    }
+
+    // Standard sentence boundaries for subsequent chunks: [.!?] or double newline
     const sentenceRegex = /([.!?]+(?:\s+|\n+)|(?:\n\n+))/g;
     let match: RegExpExecArray | null;
     let lastIndex = 0;
@@ -315,6 +343,7 @@ export class SpeechQueue {
       
       // Basic abbreviation guard: avoid splitting on "e.g.", "i.e.", "v0.", etc.
       if (candidate.length >= 3 && !/\b(?:e\.g|i\.e|mr|mrs|dr|vs|v0|v1)\.$/i.test(candidate)) {
+        this.hasEmittedFirstChunk = true;
         this.push(candidate);
         lastIndex = match.index + match[0].length;
       }
@@ -380,6 +409,7 @@ export class SpeechQueue {
     this.aborted = true;
     this.isFlushed = false;
     this.reachedResources = false;
+    this.hasEmittedFirstChunk = false;
     this.queue = [];
     this.textBuffer = '';
     this.isProcessing = false;
@@ -395,6 +425,7 @@ export class SpeechQueue {
     this.aborted = false;
     this.isFlushed = false;
     this.reachedResources = false;
+    this.hasEmittedFirstChunk = false;
     this.queue = [];
     this.textBuffer = '';
     this.isProcessing = false;

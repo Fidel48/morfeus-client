@@ -149,7 +149,8 @@ pub async fn start_recording(
                     }
                 }
 
-                if rms > 0.010 {
+                // Enhanced VAD sensitivity (0.007) to detect soft speech, quiet vowels and consonants
+                if rms > 0.007 {
                     if let Ok(mut sd) = speech_detected_cb.lock() {
                         *sd = true;
                     }
@@ -196,11 +197,12 @@ pub async fn start_recording(
                 continue;
             }
 
-            // Check if speech was detected followed by silence (850ms in continuous mode for snappy back-and-forth)
+            // Check if speech was detected followed by natural conversational silence (1400ms threshold)
+            // Allows natural thinking and breathing pauses without abruptly cutting the user off
             if has_spoken && !silence_emitted {
                 let last_time = last_speech_time.lock().map(|g| *g).unwrap_or(None);
                 if let Some(t) = last_time {
-                    let silence_threshold = if is_continuous { 850 } else { 1200 };
+                    let silence_threshold = if is_continuous { 1400 } else { 1500 };
                     if t.elapsed() >= std::time::Duration::from_millis(silence_threshold) {
                         silence_emitted = true;
                         let _ = app_handle.emit("voice-silence-detected", ());
@@ -247,12 +249,27 @@ pub async fn stop_recording(
         sample_format: hound::SampleFormat::Int,
     };
 
+    // Calculate peak amplitude and compute auto-gain scaling so quiet speech is clear and loud
+    let mut max_peak = 0.0f32;
+    for &s in samples.iter() {
+        let abs = s.abs();
+        if abs > max_peak {
+            max_peak = abs;
+        }
+    }
+    let gain = if max_peak > 0.01 {
+        (0.85 / max_peak).clamp(1.0, 3.5)
+    } else {
+        1.0
+    };
+
     let mut wav_buf: Vec<u8> = Vec::new();
     {
         let cursor = Cursor::new(&mut wav_buf);
         let mut writer = WavWriter::new(cursor, spec).map_err(|e| e.to_string())?;
         for &sample in samples.iter() {
-            let pcm = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            let normalized = (sample * gain).clamp(-1.0, 1.0);
+            let pcm = (normalized * i16::MAX as f32) as i16;
             writer.write_sample(pcm).map_err(|e| e.to_string())?;
         }
         writer.finalize().map_err(|e| e.to_string())?;
