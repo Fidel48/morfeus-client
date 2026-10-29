@@ -106,20 +106,32 @@ function cleanTextForSpeech(text: string): string {
   }
 
   let cleaned = text
-    .replace(/```[\s\S]*?```/g, '') // Remove code blocks
-    .replace(/`[^`]+`/g, '')        // Remove inline code
-    .replace(/https?:\/\/\S+/gi, '') // Strip raw URLs so they are not spoken aloud
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Links → title text only
-    .replace(/\*\*([^*]+)\*\*/g, '$1') // Bold → plain
-    .replace(/\*([^*]+)\*/g, '$1')    // Italic → plain
-    .replace(/#+\s/g, '')            // Headings → plain
-    .replace(/>\s/g, '')             // Blockquotes
-    .replace(/[-*+]\s/g, '')         // List bullets
-    .replace(/\n{2,}/g, '. ')        // Double newlines → pause
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '') // Strip raw tool calls
+    .replace(/<[^>]+>/g, ' ')                          // Strip HTML tags (<br>, <span>, etc.)
+    .replace(/```[\s\S]*?```/g, '')                    // Remove code blocks
+    .replace(/`[^`]+`/g, '')                           // Remove inline code
+    .replace(/https?:\/\/\S+/gi, '')                   // Strip raw URLs so they are not spoken aloud
+    .replace(/\[\^?\d+\]/g, '')                        // Strip citation footnotes like [1], [^1]
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')           // Links → title text only
+    .replace(/\*{3,}/g, ' ')                           // Horizontal rules / dividers *** -> space
+    .replace(/[-=_]{3,}/g, ' ')                        // Horizontal rules --- or === or ___ -> space
+    .replace(/\*\*\*([^*]+)\*\*\*/g, '$1')             // Bold italic ***text*** -> text
+    .replace(/\*\*([^*]+)\*\*/g, '$1')                 // Bold **text** -> text
+    .replace(/\*([^*]+)\*/g, '$1')                     // Italic *text* -> text
+    .replace(/~~([^~]+)~~/g, '$1')                     // Strikethrough ~~text~~ -> text
+    .replace(/_([^_]+)_/g, '$1')                       // Underscore italic _text_ -> text
+    .replace(/#+\s*/g, '')                             // Headings # -> plain
+    .replace(/>\s*/g, '')                              // Blockquotes >
+    .replace(/^[-*+]\s+/gm, '')                        // List bullets
+    .replace(/\*+/g, '')                               // Strip ANY remaining asterisks so TTS never speaks "asterisk"
+    .replace(/~+/g, '')                                // Strip remaining tildes
+    .replace(/_{2,}/g, ' ')                            // Strip remaining multiple underscores
+    .replace(/\n{2,}/g, '. ')                          // Double newlines → pause
     .replace(/\n/g, ' ')
+    .replace(/\s{2,}/g, ' ')                           // Collapse multiple spaces
     .trim();
 
-  // If after stripping URLs nothing or only punctuation/numbers remain, skip
+  // If after stripping URLs and symbols nothing or only punctuation/symbols remain, skip
   if (/^[\s\d.,:;!?()[\]{}"'\\/-]*$/.test(cleaned)) {
     return '';
   }
