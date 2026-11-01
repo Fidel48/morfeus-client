@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo, KeyboardEvent
 import { AnimatePresence, motion } from 'framer-motion';
 import { Send, Square, PanelRight, Loader2, Wrench, Paperclip, X, FileText, Image as ImageIcon, Sparkles, AlertTriangle, Check, Code2, Volume2, VolumeX, Atom, ChevronUp, RefreshCw, Settings, Search, UploadCloud, MessageSquare } from 'lucide-react';
 import { MessageBubble, StreamingMessage } from './MessageBubble';
+import { MessageErrorBoundary } from './MessageErrorBoundary';
 import { VoiceButton } from '@/components/voice/VoiceButton';
 import { useChat } from '@/hooks/useChat';
 import { useChatStore } from '@/stores/chatStore';
@@ -649,7 +650,9 @@ export const ChatWindow: React.FC = () => {
 
   // Consolidate duplicate web_search badges so only ONE Web Search indicator is shown per user turn
   const displayMessages = React.useMemo(() => {
-    const filtered = messages.filter(m => m.role !== 'tool' && m.role !== 'system');
+    const filtered = messages.filter(
+      m => (m.role !== 'tool' || (typeof m.content === 'string' && m.content.includes('data:image/'))) && m.role !== 'system'
+    );
     const result: Message[] = [];
     let seenWebSearchInTurn = false;
 
@@ -772,12 +775,16 @@ export const ChatWindow: React.FC = () => {
           <>
             {displayMessages.map((message, index) => (
               <div key={message.id} className="flex justify-center">
-                <MessageBubble message={message} index={index} />
+                <MessageErrorBoundary messageId={message.id}>
+                  <MessageBubble message={message} index={index} />
+                </MessageErrorBoundary>
               </div>
             ))}
             {isStreaming && (
               <div className="flex justify-center">
-                <StreamingMessage content={streamingContent} reasoning={streamingReasoning} />
+                <MessageErrorBoundary messageId="streaming">
+                  <StreamingMessage content={streamingContent} reasoning={streamingReasoning} />
+                </MessageErrorBoundary>
               </div>
             )}
           </>

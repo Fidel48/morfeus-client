@@ -1,34 +1,70 @@
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import { CodeBlock } from './CodeBlock';
+import { extractTextFromChildren, toDisplayString } from '@/lib/reactText';
 
 interface MarkdownRendererProps {
   content: string;
   className?: string;
 }
 
-export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
-  content,
-  className = '',
-}) => {
+// ignoreMissing: unknown ```lang fences must degrade to plain text instead of throwing.
+// detect is off: auto-detection mis-colors shell/config snippets and costs CPU while streaming.
+const REHYPE_PLUGINS: React.ComponentProps<typeof ReactMarkdown>['rehypePlugins'] = [
+  [rehypeHighlight, { ignoreMissing: true, detect: false }],
+];
+const REMARK_PLUGINS = [remarkGfm];
+
+/** Last-resort fallback: show the raw text so a message is never lost or blank. */
+class MarkdownBoundary extends React.Component<
+  { raw: string; children: React.ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(error: unknown) {
+    console.error('[Markdown] render failed, showing raw text:', error);
+  }
+  componentDidUpdate(prev: { raw: string }) {
+    // Streaming content changes constantly; retry rich rendering once content moves on.
+    if (this.state.failed && prev.raw !== this.props.raw) this.setState({ failed: false });
+  }
+  render() {
+    if (this.state.failed) {
+      return (
+        <pre className="whitespace-pre-wrap break-words text-sm font-mono text-zinc-200">
+          {this.props.raw}
+        </pre>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const MarkdownBody: React.FC<{ text: string; className: string }> = React.memo(({ text, className }) => {
   return (
     <div className={`markdown-content break-words overflow-hidden min-w-0 max-w-full ${className}`}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
         components={{
           code({ className, children, ...props }) {
-            const match = /language-(\w+)/.exec(className || '');
-            const isBlock = match !== null || String(children).includes('\n');
+            const match = /language-([\w+#.-]+)/.exec(className || '');
+            const rawCode = extractTextFromChildren(children);
+            const isBlock = match !== null || rawCode.includes('\n');
 
             if (isBlock) {
               return (
                 <CodeBlock
                   language={match ? match[1] : ''}
-                  code={String(children).replace(/\n$/, '')}
-                />
+                  code={rawCode.replace(/\n$/, '')}
+                >
+                  {children}
+                </CodeBlock>
               );
             }
             return (
@@ -114,8 +150,18 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
           },
         }}
       >
-        {content}
+        {text}
       </ReactMarkdown>
     </div>
+  );
+});
+MarkdownBody.displayName = 'MarkdownBody';
+
+export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, className = '' }) => {
+  const text = toDisplayString(content);
+  return (
+    <MarkdownBoundary raw={text}>
+      <MarkdownBody text={text} className={className} />
+    </MarkdownBoundary>
   );
 };

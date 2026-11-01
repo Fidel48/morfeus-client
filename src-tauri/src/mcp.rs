@@ -23,7 +23,8 @@ pub struct JsonRpcRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
-    pub id: u64,
+    #[serde(default)]
+    pub id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,17 +44,46 @@ impl McpClient {
     pub async fn start(command: &str, args: &[&str], envs: HashMap<String, String>) -> Result<Self, String> {
         #[cfg(target_os = "windows")]
         let cmd_to_run = if command == "npx" { "npx.cmd" } else if command == "npm" { "npm.cmd" } else { command };
+
         #[cfg(not(target_os = "windows"))]
-        let cmd_to_run = command;
+        let resolved_cmd = {
+            if !command.contains('/') {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let candidates = [
+                    format!("/opt/homebrew/bin/{}", command),
+                    format!("/usr/local/bin/{}", command),
+                    format!("{}/.cargo/bin/{}", home, command),
+                    format!("{}/.local/bin/{}", home, command),
+                ];
+                candidates
+                    .into_iter()
+                    .find(|p| std::path::Path::new(p).exists())
+                    .unwrap_or_else(|| command.to_string())
+            } else {
+                command.to_string()
+            }
+        };
+        #[cfg(not(target_os = "windows"))]
+        let cmd_to_run = resolved_cmd.as_str();
+
+        let mut final_envs = envs.clone();
+        #[cfg(not(target_os = "windows"))]
+        {
+            let current_path = std::env::var("PATH").unwrap_or_default();
+            let home = std::env::var("HOME").unwrap_or_default();
+            let extra_paths = format!("/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:{}/.cargo/bin:{}/.local/bin", home, home);
+            let merged_path = format!("{}:{}", extra_paths, current_path);
+            final_envs.entry("PATH".to_string()).or_insert(merged_path);
+        }
 
         let mut child = Command::new(cmd_to_run)
             .args(args)
-            .envs(envs)
+            .envs(final_envs)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|e| format!("Failed to spawn MCP server: {}", e))?;
+            .map_err(|e| format!("Failed to spawn MCP server '{}': {}", cmd_to_run, e))?;
 
         let mut stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -65,7 +95,7 @@ impl McpClient {
         let pending_requests: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let pending_requests_reader = pending_requests.clone();
 
-        // Write loop
+        // Write loop (standard MCP stdio transport is newline-delimited JSON)
         tokio::spawn(async move {
             while let Some((req, reply_tx)) = request_rx.recv().await {
                 if let Some(id) = req.id {
@@ -73,38 +103,58 @@ impl McpClient {
                 }
                 
                 let json = serde_json::to_string(&req).unwrap();
-                let payload = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
+                let payload = format!("{}\n", json);
                 if stdin.write_all(payload.as_bytes()).await.is_err() {
                     break;
                 }
+                let _ = stdin.flush().await;
             }
         });
 
-        // Read loop
+        // Read loop (supports both newline-delimited JSON and Content-Length framed JSON)
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
             loop {
-                let mut header = String::new();
-                if reader.read_line(&mut header).await.unwrap_or(0) == 0 {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
                     break;
                 }
-                
-                if header.starts_with("Content-Length: ") {
-                    let len_str = header.trim_start_matches("Content-Length: ").trim();
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                if trimmed.starts_with("Content-Length: ") {
+                    let len_str = trimmed.trim_start_matches("Content-Length: ").trim();
                     if let Ok(len) = len_str.parse::<usize>() {
-                        // Consume the \r\n
                         let mut empty_line = String::new();
-                        reader.read_line(&mut empty_line).await.unwrap_or(0);
-                        
+                        let _ = reader.read_line(&mut empty_line).await;
+
                         let mut buf = vec![0; len];
                         if reader.read_exact(&mut buf).await.is_ok() {
                             if let Ok(resp) = serde_json::from_slice::<JsonRpcResponse>(&buf) {
-                                if let Some(reply_tx) = pending_requests_reader.lock().await.remove(&resp.id) {
-                                    if let Some(err) = resp.error {
-                                        let _ = reply_tx.send(Err(err.to_string()));
-                                    } else {
-                                        let _ = reply_tx.send(Ok(resp.result.unwrap_or(Value::Null)));
+                                if let Some(id) = resp.id {
+                                    if let Some(reply_tx) = pending_requests_reader.lock().await.remove(&id) {
+                                        if let Some(err) = resp.error {
+                                            let _ = reply_tx.send(Err(err.to_string()));
+                                        } else {
+                                            let _ = reply_tx.send(Ok(resp.result.unwrap_or(Value::Null)));
+                                        }
                                     }
+                                }
+                            }
+                        }
+                    }
+                } else if trimmed.starts_with('{') {
+                    // Line-delimited JSON (standard MCP stdio transport)
+                    if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(trimmed) {
+                        if let Some(id) = resp.id {
+                            if let Some(reply_tx) = pending_requests_reader.lock().await.remove(&id) {
+                                if let Some(err) = resp.error {
+                                    let _ = reply_tx.send(Err(err.to_string()));
+                                } else {
+                                    let _ = reply_tx.send(Ok(resp.result.unwrap_or(Value::Null)));
                                 }
                             }
                         }
@@ -342,5 +392,21 @@ fn find_claude_desktop_config_path() -> Option<std::path::PathBuf> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires uvx and network"]
+    async fn test_mcp_start_freecad() {
+        let client = McpClient::start("uvx", &["freecad-mcp"], HashMap::new()).await;
+        assert!(client.is_ok(), "Client failed to start: {:?}", client.err());
+        let client = client.unwrap();
+        let tools = client.send_request("tools/list", None).await;
+        assert!(tools.is_ok(), "Failed to list tools: {:?}", tools.err());
+        println!("Test tools: {:?}", tools.unwrap());
+    }
 }
 

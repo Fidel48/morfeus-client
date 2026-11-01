@@ -145,7 +145,30 @@ pub async fn proxy_fetch_models(
         }
     }
 
-    Err(format!("Could not parse model list from server. Raw response: {}", &body[..body.len().min(300)]))
+    Err(format!("Could not parse model list from server. Raw response: {}", body.chars().take(300).collect::<String>()))
+}
+
+/// Registry of in-flight streams so the frontend can cancel them. Dropping the HTTP response
+/// closes the connection, which makes Ollama / LM Studio stop generating immediately instead of
+/// burning GPU on an answer nobody will read (and queueing the next request behind it).
+fn stream_registry() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Notify>>> {
+    static REG: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Notify>>>> =
+        std::sync::OnceLock::new();
+    REG.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn stream_cancel_handle(stream_id: &str) -> std::sync::Arc<tokio::sync::Notify> {
+    let mut reg = stream_registry().lock().unwrap();
+    reg.entry(stream_id.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Notify::new()))
+        .clone()
+}
+
+/// Cancel an in-flight stream. Safe to call before the stream has registered (the permit is stored).
+#[tauri::command]
+pub async fn proxy_cancel_stream(stream_id: String) -> Result<(), String> {
+    stream_cancel_handle(&stream_id).notify_one();
+    Ok(())
 }
 
 /// Stream a chat completion through the Rust backend, emitting SSE tokens as Tauri events.
@@ -163,17 +186,31 @@ pub async fn proxy_stream_chat(
 
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let client = make_client();
+    let cancel = stream_cancel_handle(&stream_id);
+    // Always unregister when this stream ends, whatever the exit path.
+    struct Unregister(String);
+    impl Drop for Unregister {
+        fn drop(&mut self) {
+            if let Ok(mut reg) = stream_registry().lock() {
+                reg.remove(&self.0);
+            }
+        }
+    }
+    let _unregister = Unregister(stream_id.clone());
 
-    let resp = client
+    let send_fut = client
         .post(&url)
         .headers(make_stream_headers(&api_key)) // includes X-Accel-Buffering: no for Cloudflare
         .body(payload)
-        .send()
-        .await
-        .map_err(|e| {
+        .send();
+
+    let resp = tokio::select! {
+        _ = cancel.notified() => return Ok(()),
+        r = send_fut => r.map_err(|e| {
             let _ = app.emit("stream-error", serde_json::json!({ "id": stream_id, "error": e.to_string() }));
             format!("Request failed: {}", e)
-        })?;
+        })?,
+    };
 
     if !resp.status().is_success() {
         let status_code = resp.status();
@@ -243,9 +280,19 @@ pub async fn proxy_stream_chat(
     }
 
     let mut stream = resp.bytes_stream();
-    let mut buffer = String::new();
+    // Buffer RAW BYTES and only decode complete lines. Decoding each network chunk separately
+    // (from_utf8_lossy) turned any multi-byte character split across two chunks (emoji, accents,
+    // CJK, box-drawing) into permanent "�" garbage in the model's output.
+    let mut buffer: Vec<u8> = Vec::new();
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = tokio::select! {
+            _ = cancel.notified() => return Ok(()), // dropping `stream` closes the connection
+            next = stream.next() => match next {
+                Some(r) => r,
+                None => break,
+            },
+        };
         let chunk = match chunk_result {
             Ok(c) => c,
             Err(e) => {
@@ -254,12 +301,12 @@ pub async fn proxy_stream_chat(
             }
         };
 
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        buffer.extend_from_slice(&chunk);
 
         // Process complete SSE lines
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].trim().to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
+        while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+            let raw: Vec<u8> = buffer.drain(..=newline_pos).collect();
+            let line = String::from_utf8_lossy(&raw[..raw.len() - 1]).trim().to_string();
 
             if line.is_empty() {
                 continue;

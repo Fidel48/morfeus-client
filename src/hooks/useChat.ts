@@ -6,6 +6,7 @@ import { useCanvasStore } from '@/stores/canvasStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { streamChat, WEB_TOOLS, FAST_CHAT_TOOLS } from '@/lib/api';
 import { tauriApi } from '@/lib/tauri';
+import { sanitizeHistory } from '@/lib/chatHistory';
 import { kokoroSpeak, kokoroStop, speechQueue } from '@/lib/kokoroTts';
 import { generateId, extractTextContent } from '@/lib/utils';
 import { Message, ContentPart, ToolDefinition, AppSettings, ToolCall } from '@/types';
@@ -17,6 +18,26 @@ const MAX_TOOL_OUTPUT_CHARS = 6000;
 function capOutput(text: string): string {
   if (text.length <= MAX_TOOL_OUTPUT_CHARS) return text;
   return text.slice(0, MAX_TOOL_OUTPUT_CHARS) + `\n\n[... output truncated at ${MAX_TOOL_OUTPUT_CHARS} chars ...]`;
+}
+
+/**
+ * Detects whether the user's input represents remote logs, containers, or non-local shell sessions
+ * where local filesystem tools should NEVER be invoked.
+ */
+export function isRemoteOrPastedLog(text: string): boolean {
+  if (!text) return false;
+  return /pi@[\w.-]+|root@[\w.-]+|[\w.-]+@[\w.-]+[:#$]|docker logs|docker exec|docker run|containerd|podman|kubectl|journalctl/i.test(text);
+}
+
+/**
+ * In Fast Chat mode, determine whether local PC file tools should be active.
+ * Only activate when the user explicitly requests local filesystem inspection.
+ */
+export function shouldEnableLocalFileToolsInFastChat(text: string): boolean {
+  if (!text || isRemoteOrPastedLog(text)) return false;
+  return /\b(find|search|locate|look for|browse|list|show)\b.*\b(file|files|folder|folders|directory|directories|pdf|document|documents|desktop|downloads)\b/i.test(text)
+    || /\b(read|open|inspect|check)\b.*\b(file|document|pdf|csv|json)\b/i.test(text)
+    || /^[~/]|[a-zA-Z]:[/\\]/i.test(text.trim());
 }
 
 // ── Agent Coder project context ──────────────────────────────────────────────
@@ -377,48 +398,65 @@ ${ctx ? `\n${ctx}\n` : ''}
           ? `\n\nCRITICAL THINKING DIRECTIVE: Thinking mode is explicitly turned OFF by the user. Do NOT output internal reasoning scratchpads, thinking tokens, or <think> tags. Answer immediately, directly, and concisely.${isQwenModel ? '\n\n/no_think' : ''}`
           : '';
 
+        const activeMcpServers = useMcpStore.getState().servers.filter(s => s.status === 'connected' && s.enabled);
+        let mcpBlock = '';
+        if (activeMcpServers.length > 0) {
+          const serverNames = activeMcpServers.map(s => s.name || s.id).join(', ');
+          mcpBlock = `\n\n[Connected integrations: ${serverNames}. Tools from these integrations are available via native function calling when relevant. Do NOT list, advertise, or recite these tools in casual conversation or greetings.]`;
+        }
+
         let systemPrompt: string;
 
         if (isFastMode) {
-          systemPrompt = `You are Morfeus in Chat mode. Be direct, clear, and concise.
+          systemPrompt = `You are Morfeus, a helpful, intelligent, and versatile AI assistant.
 
 Today's Date: ${dateStr}
 Current Time: ${timeStr}
 
 DIRECTIVES:
-1. SPEED & CLARITY: Respond immediately and articulately without unnecessary conversational filler.
-2. CONCISE CODE OUTPUT: When asked for code, output clean, self-contained code without redundant post-code tutorials or unsolicited line-by-line breakdowns. Let clean code speak for itself and conserve tokens.
-3. TOOLS AVAILABLE: You have access to web search (web_search, read_webpage) and local PC file tools (get_special_dirs, search_files, list_directory, read_local_file).
-4. FILE SUMMARIZATION: When asked to find, inspect, or summarize files on the PC, call the appropriate file tools to locate and read them, then provide a clear, structured summary.
-5. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or asked to read news stories or articles, provide a thorough, informative breakdown covering the key details (who, what, when, where, charges, facts, context). State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable Markdown source links formatted under a "### Sources" section at the very end: [Source Title](url).
-6. CODING LIMITATION: Chat mode does NOT run shell commands or edit files directly. If the user wants to execute code, run terminal commands, edit codebase files, or use MCP servers, inform them to switch to "Agent Coder" mode.${voiceDirective}${thinkDirective}`;
+1. NATURAL CONVERSATION & GREETINGS: When the user says "hi", "hey", "hello", or engages in casual chat, reply warmly, naturally, and concisely like a normal AI assistant. NEVER list your tools, active modes, capabilities, or connected MCP servers unless the user explicitly asks for them.
+2. SPEED & CLARITY: Respond immediately and articulately without unnecessary conversational filler or throat-clearing.
+3. CONCISE CODE OUTPUT: When asked for code or debugging help, provide clean, self-contained, working code directly. Let clean code speak for itself and conserve tokens. Do not add unsolicited line-by-line tutorials or filler.
+4. LOCAL HOST VS REMOTE / PASTED CONTEXT (CRITICAL):
+   - You run on the user's desktop computer. You DO NOT have access to the user's remote machines, Raspberry Pi, Docker containers, VMs, SSH hosts, or external servers.
+   - When the user pastes logs, shell output, error messages, terminal sessions (e.g. "pi@pi:~$", "docker logs", "root@server:~$"), or code snippets containing file paths (e.g. "/config/...", "/data/...", "ia.ini", ".torrent"), DO NOT search for or read those files on the user's local computer. They do not exist on the user's local host!
+   - Answer directly by analyzing the provided text and error messages. Provide the requested code, configuration, or shell commands for the user to run on their machine or container.
+   - ONLY call local file tools if the user explicitly asks to find or read a file on their own computer (e.g. "find my resume", "read file at /path").
+5. TOOL CALLING: You have access to web search and connected tools. Use them quietly when needed to satisfy a specific user request. Never recite your tools unprompted.
+6. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or asked to read news stories or articles, provide a thorough, informative breakdown covering the key details (who, what, when, where, charges, facts, context). State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable Markdown source links formatted under a "### Sources" section at the very end: [Source Title](url).
+7. CODING LIMITATION: Chat mode does not edit codebase files directly (inform the user to switch to "Agent Coder" mode if they need codebase editing).${mcpBlock}${voiceDirective}${thinkDirective}`;
         } else {
-          const basePrompt = currentSettings.system_prompt || 'You are Morfeus, a powerful, articulate, and autonomous desktop AI developer harness and assistant.';
+          const basePrompt = currentSettings.system_prompt || 'You are Morfeus, a powerful, articulate, and versatile desktop AI assistant and autonomous developer harness.';
           systemPrompt = `${basePrompt}
 
 Today's Date: ${dateStr}
 Current Time: ${timeStr}
 
-${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
-1. AUTONOMOUS ReAct LOOP: You are in Agent Coder mode with full IDE developer harness capabilities. When tasked with solving a problem, debugging, or coding, operate autonomously in a continuous ReAct (Reason, Act, Observe) loop. Do not stop at the first step—inspect files, search, run code, observe outputs, and iterate until the objective is accomplished.
-2. FULL DEVELOPER TOOL ACCESS: You have complete access to terminal commands (run_terminal_command), remote device execution over SSH (ssh_execute), background dev server & process management (spawn_background_process, read_process_logs, kill_background_process, list_background_processes), Python execution (run_python, run_python_file), package installation (install_python_packages), file creation and editing (write_to_file, delete_file), filesystem exploration, screen inspection (analyze_screen), and OS automation.
-3. EXTENSIBILITY & MCP: You have native integration with Model Context Protocol (MCP). Active MCP servers provide dynamic tools prefixed with mcp__<server>__<tool>. You can also manage servers using list_mcp_servers, connect_mcp_server, and remove_mcp_server.
-4. SURGICAL PRECISION: Always inspect files and read existing code before editing to preserve project conventions and architecture.
-5. CONVERSATIONAL BALANCE: When the user asks general questions or explanations, answer directly, concisely, and articulately without invoking unnecessary tools.
-6. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or reading news/articles, synthesize comprehensive, verified information with key details and quotes. State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS provide direct clickable markdown source links: [Source Title](url).
-7. SUMMARY ON COMPLETION: When finishing a multi-step task, provide a clear, structured summary of what was accomplished (files read/modified, tools executed, results verified).
-8. TOKEN CONSERVATION & ZERO-NOISE CODE DELIVERY:
+${projectBlock}CRITICAL DIRECTIVES:
+1. NATURAL CONVERSATION & GREETINGS: When the user greets you or makes casual conversation (e.g. "hi", "hey", "hello"), respond naturally and concisely as a general AI assistant. NEVER list your tools, dev servers, or connected MCP integrations unless explicitly asked.
+2. LOCAL WORKSPACE VS REMOTE / PASTED LOGS (CRITICAL):
+   - You run on the user's desktop computer. You DO NOT have access to the user's remote machines, Raspberry Pis, Docker containers, VMs, or external servers unless explicitly commanded via ssh_execute.
+   - When the user pastes error logs, shell snippets, or terminal output from a remote machine, Raspberry Pi, server, or Docker container (e.g. "pi@pi:~$", "docker logs", "/config/...", "/data/..."), DO NOT attempt to search for or read those files on the local machine. The local machine does NOT contain the remote container's filesystem.
+   - Answer directly: diagnose the issue from the pasted output, explain the root cause, and provide the exact code, configuration, or commands the user needs to apply.
+   - ONLY use local codebase tools (grep_search, read_file_range, replace_in_file, etc.) when working on files within the active local project workspace or when explicitly asked.
+3. AUTONOMOUS ReAct LOOP (WHEN LOCAL CODING/TASKED): When tasked with solving a problem, debugging, or coding inside the active local project, operate autonomously in a continuous ReAct (Reason, Act, Observe) loop. Do not stop at the first step—inspect files, search, run code, observe outputs, and iterate until the objective is accomplished.
+4. FULL DEVELOPER TOOL ACCESS: You have complete access to terminal commands (run_terminal_command), remote device execution over SSH (ssh_execute), background dev server & process management (spawn_background_process, read_process_logs, kill_background_process, list_background_processes), Python execution (run_python, run_python_file), package installation (install_python_packages), file creation and editing (write_to_file, delete_file), filesystem exploration, screen inspection (analyze_screen), and connected MCP integrations. Use them when relevant to solve tasks.
+5. SURGICAL PRECISION: Always inspect files and read existing code before editing to preserve project conventions and architecture.
+6. CONVERSATIONAL BALANCE: When the user asks general questions or explanations, answer directly, concisely, and articulately without invoking unnecessary tools.
+7. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or reading news/articles, synthesize comprehensive, verified information with key details and quotes. State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS provide direct clickable markdown source links: [Source Title](url).
+8. SUMMARY ON COMPLETION: When finishing a multi-step task, provide a clear, structured summary of what was accomplished (files read/modified, tools executed, results verified).
+9. TOKEN CONSERVATION & ZERO-NOISE CODE DELIVERY:
    - NO PREAMBLE: Deliver code directly without conversational throat-clearing ("Here is the complete drop-in file...", "Sure, I can help with that...").
    - ZERO UNPROMPTED EXPLANATIONS: Do NOT append unsolicited line-by-line breakdowns ("What this does"), beginner tutorials ("To use it: save as file, press F5..."), or speculative advice ("If you want 3D printing..."). The user already knows how to run their tools.
    - NO CONVERSATIONAL TRAILERS: Do NOT end with unsolicited offers ("Want me to also add a filleted version... Just say the word."). Stop generating as soon as the code/task is delivered.
    - CODE OVER NOISE: Let well-structured code with concise inline comments explain the implementation. If the user explicitly asks for an explanation, keep it to 1–2 punchy bullets highlighting key architectural decisions.
-9. NO REPEATED FILE READS (ANTI-LOOP DIRECTIVE):
+10. NO REPEATED FILE READS (ANTI-LOOP DIRECTIVE):
    - Never call read_file_range or read_local_file repeatedly on the same file in overlapping or slightly shifted chunks. Once you have read a file, its complete contents are already in your conversation context above.
    - Do NOT loop. Synthesize what you have gathered and write your response.
-10. WORKSPACE OVERVIEW PROTOCOL:
+11. WORKSPACE OVERVIEW PROTOCOL:
    - When asked to "read the workspace", "get familiar with the project", or "understand the application", inspect the key architecture/entry files ONCE, then immediately synthesize your findings into a comprehensive, structured architecture summary (Overview, Key Modules, Execution Flow, Configuration).
-11. NATIVE FUNCTION CALLING ONLY:
-   - Always invoke tools via native API function calling. NEVER output raw XML or pseudo-tags such as <tool_call>, <function=...>, or </tool_call> in plain text.${voiceDirective}${thinkDirective}`;
+12. NATIVE FUNCTION CALLING ONLY:
+   - Always invoke tools via native API function calling. NEVER output raw XML or pseudo-tags such as <tool_call>, <function=...>, or </tool_call> in plain text.${mcpBlock}${voiceDirective}${thinkDirective}`;
         }
 
         // ── Tool dedup + rate limiting: persists across all recursive depths for this turn ──
@@ -474,29 +512,16 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
                   }
                 : { role: 'assistant', content: msg.content ?? '' };
             } else if (msg.role === 'tool') {
-              if (typeof msg.content === 'string' && msg.content.startsWith('![Screenshot](data:image/png;base64,')) {
-                const match = msg.content.match(/\((data:image\/png;base64,.*?)\)/);
-                if (match && match[1]) {
-                  // Inject the image as a simulated user message *after* the tool message
-                  history.unshift({
-                    role: 'user',
-                    content: [
-                      { type: 'text', text: 'Here is the screenshot you requested:' },
-                      { type: 'image_url', image_url: { url: match[1] } }
-                    ]
-                  });
-                  apiMsg = {
-                    role: 'tool',
-                    tool_call_id: msg.tool_call_id || 'call_default',
-                    content: 'Screenshot captured successfully.',
-                  };
-                } else {
-                  apiMsg = {
-                    role: 'tool',
-                    tool_call_id: msg.tool_call_id || 'call_default',
-                    content: msg.content ?? '',
-                  };
-                }
+              if (typeof msg.content === 'string' && msg.content.includes('data:image/')) {
+                // Strip raw base64 payload from LLM context to prevent Ollama OOM / crash
+                const cleanContent = msg.content
+                  .replace(/!\[.*?\]\(data:image\/[^;]+;base64,[^)]+\)/g, '[Image displayed to user in chat UI]')
+                  .replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, '[Image base64 data omitted for efficiency]');
+                apiMsg = {
+                  role: 'tool',
+                  tool_call_id: msg.tool_call_id || 'call_default',
+                  content: capOutput(cleanContent),
+                };
               } else {
                 apiMsg = {
                   role: 'tool',
@@ -530,7 +555,7 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             });
           }
 
-          return [{ role: 'system', content: systemPrompt }, ...history];
+          return [{ role: 'system', content: systemPrompt }, ...sanitizeHistory(history)];
         };
 
         // ── Execute tool call ──
@@ -602,21 +627,29 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           } else if (name === 'search_files') {
             const found = await tauriApi.searchFiles(args.query, args.root);
             result = found.length === 0
-              ? `No files found matching "${args.query}".`
+              ? `No files found matching "${args.query}" on the local host. (Note: If this query was from pasted remote logs, Docker containers, or an external server, it does not exist locally. Please answer the user's question directly with the appropriate code or instructions).`
               : `Found ${found.length} result(s):\n${found.map(f => f.is_dir ? `📁 ${f.path}/` : `📄 ${f.path}`).join('\n')}`;
           } else if (name === 'grep_search') {
             const matches = await tauriApi.grepSearch(args.query, args.root, args.includes, args.case_insensitive);
             if (matches.length === 0) {
-              result = `No code matches found for "${args.query}".`;
+              result = `No code matches found for "${args.query}" in local workspace. (Note: If analyzing pasted logs or external code, do not continue searching locally; answer the user's question directly).`;
             } else {
               const formatted = matches.map(m => `${m.file}:${m.line_number}: ${m.line_content}`).join('\n');
               result = `Found ${matches.length} match(es) for "${args.query}":\n\`\`\`\n${formatted}\n\`\`\``;
             }
           } else if (name === 'read_file_range') {
-            const rangeRes = await tauriApi.readFileRange(args.path, Number(args.start_line) || 1, Number(args.end_line) || 100);
-            result = `File: ${rangeRes.path} (lines ${rangeRes.start_line}–${rangeRes.end_line} of ${rangeRes.total_lines}):\n\`\`\`\n${rangeRes.content}\`\`\``;
+            try {
+              const rangeRes = await tauriApi.readFileRange(args.path, Number(args.start_line) || 1, Number(args.end_line) || 100);
+              result = `File: ${rangeRes.path} (lines ${rangeRes.start_line}–${rangeRes.end_line} of ${rangeRes.total_lines}):\n\`\`\`\n${rangeRes.content}\`\`\``;
+            } catch (err) {
+              result = `Error reading file range for "${args.path}": ${String(err)}. (Note: If this path is from a remote machine, container, or external system, it cannot be read locally. Answer the user directly).`;
+            }
           } else if (name === 'read_local_file') {
-            result = await tauriApi.parseLocalFile(args.path);
+            try {
+              result = await tauriApi.parseLocalFile(args.path);
+            } catch (err) {
+              result = `Error reading local file "${args.path}": ${String(err)}. (Note: If this file is on a remote machine or container, it does not exist on the local computer. Provide the code or solution directly to the user).`;
+            }
           } else if (name === 'run_python') {
             const codeArg = typeof args.code === 'string' ? args.code : JSON.stringify(args.code);
             const pyResult = await tauriApi.runPythonCode(codeArg);
@@ -829,7 +862,31 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
               const serverId = parts[1];
               const toolName = parts.slice(2).join('__');
               const res = await tauriApi.mcpCallTool(serverId, toolName, args);
-              result = JSON.stringify(res, null, 2);
+
+              if (res && typeof res === 'object') {
+                if (Array.isArray(res.content)) {
+                  const pieces: string[] = [];
+                  for (const item of res.content) {
+                    if (item.type === 'text' && item.text) {
+                      pieces.push(item.text);
+                    } else if (item.type === 'image' && item.data) {
+                      const mime = item.mimeType || 'image/png';
+                      pieces.push(`![${toolName}](data:${mime};base64,${item.data})\n[View rendered in chat UI]`);
+                    } else {
+                      pieces.push(JSON.stringify(item));
+                    }
+                  }
+                  result = pieces.join('\n\n') || 'Tool executed successfully.';
+                } else if (res.isError) {
+                  result = `Tool Error: ${JSON.stringify(res)}`;
+                } else {
+                  result = JSON.stringify(res, null, 2);
+                }
+              } else if (typeof res === 'string') {
+                result = res;
+              } else {
+                result = JSON.stringify(res, null, 2);
+              }
             } else {
               result = `Error: Invalid MCP tool name format: ${name}`;
             }
@@ -837,11 +894,14 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             result = `Error: Unknown tool "${name}"`;
           }
 
+          if (result.includes('data:image/')) {
+            return result; // Keep base64 image data URL intact for UI rendering
+          }
           return capOutput(result);
         };
 
         // ── Main streaming loop (recursive for tool calls) ──
-        // disableTools: set after an empty-response auto-retry so we don't keep sending tools to models that ignore them
+        // disableTools: set when tools should be omitted to force the model to write its final text response
         const executeChatLoop = async (isInitialTurn: boolean, depth: number, disableTools = false): Promise<void> => {
           if (controller.signal.aborted) return;
 
@@ -851,33 +911,44 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           const isFastMode = chatMode === 'fast';
           const maxDepth = isFastMode ? 5 : 25;
           const isMaxDepth = depth >= maxDepth;
-          if (isMaxDepth) {
+          if (isMaxDepth || disableTools) {
             apiMessages.push({
               role: 'system',
-              content: 'You have reached the maximum tool call depth for this mode. DO NOT call any more tools. Write your final answer now using the information already gathered.',
+              content: 'All requested tool actions are complete. DO NOT call any more tools. Provide your final comprehensive response to the user now using the information already gathered.',
             });
           }
 
           let availableTools: ToolDefinition[] = [];
-          if (!isMaxDepth) {
+          if (!isMaxDepth && !disableTools) {
+            const mcpTools: ToolDefinition[] = [];
+            const activeTools = useMcpStore.getState().getActiveTools();
+            for (const { serverId, tool } of activeTools) {
+              mcpTools.push({
+                type: 'function',
+                function: {
+                  name: `mcp__${serverId}__${tool.name}`,
+                  description: `[MCP: ${serverId}] ${tool.description ?? ''}`,
+                  parameters: (tool.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
+                },
+              });
+            }
+
             if (isFastMode) {
-              // Chat: minimal lightweight read-only tools for instant response & low prefill latency
-              availableTools = FAST_CHAT_TOOLS;
+              // Chat: lightweight read tools + connected MCP tools
+              // If the user pasted remote logs or did not ask for local file operations, exclude local file tools
+              const enableFileTools = shouldEnableLocalFileToolsInFastChat(userDisplayContent);
+              const fastTools = enableFileTools
+                ? FAST_CHAT_TOOLS
+                : FAST_CHAT_TOOLS.filter((t) => !['search_files', 'list_directory', 'get_special_dirs', 'read_local_file'].includes(t.function.name));
+              availableTools = [...fastTools, ...mcpTools];
             } else {
               // Agent Coder: full developer suite with all built-in tools + active MCP servers
-              const mcpTools: ToolDefinition[] = [];
-              const activeTools = useMcpStore.getState().getActiveTools();
-              for (const { serverId, tool } of activeTools) {
-                mcpTools.push({
-                  type: 'function',
-                  function: {
-                    name: `mcp__${serverId}__${tool.name}`,
-                    description: `[MCP: ${serverId}] ${tool.description ?? ''}`,
-                    parameters: (tool.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
-                  },
-                });
-              }
-              availableTools = [...WEB_TOOLS, ...mcpTools];
+              // If the user pasted remote logs (docker, pi@, etc.), exclude host file search so it doesn't search local disk
+              const isRemote = isRemoteOrPastedLog(userDisplayContent);
+              const coderTools = isRemote
+                ? WEB_TOOLS.filter((t) => !['search_files', 'list_directory', 'get_special_dirs'].includes(t.function.name))
+                : WEB_TOOLS;
+              availableTools = [...coderTools, ...mcpTools];
             }
           }
 
@@ -950,8 +1021,12 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
               if (trimmed) {
                 recentTokens.push(trimmed);
                 if (recentTokens.length > 60) recentTokens.splice(0, recentTokens.length - 50);
-                // Only run detection after 200 chars to avoid false positives
-                if (totalChars > 200 && !insideCodeFence() && detectRepetition()) {
+                // Only run detection after 200 chars to avoid false positives.
+                // Markdown tables / separators are legitimately repetitive (| --- | --- |), so skip them too.
+                const liveText = useChatStore.getState().streamingContent || '';
+                const lastLine = liveText.slice(liveText.lastIndexOf('\n') + 1).trimStart();
+                const inTable = lastLine.startsWith('|') || /^[-=*_]{3,}\s*$/.test(lastLine);
+                if (totalChars > 200 && !inTable && !insideCodeFence() && detectRepetition()) {
                   console.warn('[Repetition] Loop detected — aborting stream');
                   tauriApi.appendSystemLog('warn', 'Repetition loop detected. Auto-aborting.');
                   repetitionAborted = true;
@@ -996,7 +1071,14 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           }
 
           if (repetitionAborted) {
-            finalizeStreamMessage(convId!);
+            const abortedMsg = finalizeStreamMessage(convId!);
+            useChatStore.setState((state) => ({
+              messages: state.messages.map((m) =>
+                m.id === abortedMsg.id && m.content && m.content !== '[empty response]'
+                  ? { ...m, content: `${m.content}\n\n> ⚠️ _Response stopped early: the model got stuck repeating itself. Try rephrasing, lowering Temperature, or raising Frequency Penalty in Params._` }
+                  : m
+              ),
+            }));
             return;
           }
 
@@ -1005,7 +1087,7 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           let hasToolCalls = finalMessage.tool_calls && finalMessage.tool_calls.length > 0;
 
           // ── Fallback parser for text-based tool calls (Nemotron, Qwen, Mistral) ──
-          if (!hasToolCalls && finalMessage.content && finalMessage.content.includes('<tool_call>')) {
+          if (!disableTools && !hasToolCalls && finalMessage.content && finalMessage.content.includes('<tool_call>')) {
             const { toolCalls: parsedCalls, cleanedContent } = parseTextToolCalls(finalMessage.content);
             if (parsedCalls.length > 0) {
               finalMessage = {
@@ -1056,6 +1138,19 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             return;
           }
 
+          // ── Reply cut off by the token limit (not a thinking-only truncation) ──
+          // Without this the user sees half a code block / sentence and assumes the model is broken.
+          if (finishReason === 'length' && !isEmptyContent && noToolCalls && !controller.signal.aborted) {
+            tauriApi.appendSystemLog('warn', 'Reply truncated: finish_reason=length. Raise Max Tokens / Context Length.');
+            useChatStore.setState((state) => ({
+              messages: state.messages.map((m) =>
+                m.id === finalMessage.id
+                  ? { ...m, content: `${m.content ?? ''}\n\n> ⚠️ _Reply was cut off at the Max Tokens limit. Raise **Max Tokens** (and Context Length) in Params, or ask me to continue._` }
+                  : m
+              ),
+            }));
+          }
+
           // ── Auto-retry without tools if model returned an empty response ──
           // This happens when GGUF/Ollama models don't support function calling:
           // they receive the tools array, get confused, and return nothing.
@@ -1080,12 +1175,15 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
           if (hasToolCalls && !isMaxDepth && !toolBudgetExhausted) {
             setChatStatus('calling-tool');
 
+            let executedAnyNewTool = false;
+            let encounteredDuplicate = false;
+
             // Execute at most 2 tool calls per depth to keep things fast
             for (const tc of finalMessage.tool_calls!.slice(0, 2)) {
               if (controller.signal.aborted) break;
               if (tc.type !== 'function') continue;
 
-              // Hard cap: if we've already run 5 tool calls this turn, stop
+              // Hard cap: if we've already run MAX_TOTAL_TOOLS tool calls this turn, stop
               if (totalToolCalls >= MAX_TOTAL_TOOLS) {
                 tauriApi.appendSystemLog('warn', `Tool budget exhausted (${MAX_TOTAL_TOOLS} calls). Forcing final answer.`);
                 addMessage({
@@ -1096,22 +1194,33 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
                   tool_call_id: tc.id,
                   created_at: Date.now(),
                 });
+                encounteredDuplicate = true;
                 break;
               }
 
-              const toolKey = `${tc.function?.name}::${tc.function?.arguments}`;
               const toolName = tc.function?.name ?? '';
-              const toolArgs = (() => { try { return JSON.parse(tc.function?.arguments || '{}'); } catch { return {}; } })();
+              let toolArgs: Record<string, unknown> = {};
+              try {
+                toolArgs = typeof tc.function?.arguments === 'string'
+                  ? JSON.parse(tc.function.arguments)
+                  : (tc.function?.arguments || {});
+              } catch {
+                toolArgs = {};
+              }
+              const normalizedArgs = JSON.stringify(toolArgs, Object.keys(toolArgs).sort());
+              const toolKey = `${toolName}::${normalizedArgs}`;
 
               // Cross-depth dedup: skip if this exact call already ran this turn
               if (calledToolKeys.has(toolKey)) {
+                totalToolCalls++;
+                encounteredDuplicate = true;
                 console.log(`[Dedup] Blocked repeated tool call: ${toolKey}`);
-                tauriApi.appendSystemLog('warn', `Duplicate blocked: ${toolName}`);
+                tauriApi.appendSystemLog('warn', `Duplicate blocked: ${toolName}. Forcing final response.`);
                 addMessage({
                   id: generateId(),
                   conversation_id: convId!,
                   role: 'tool',
-                  content: `[NOTICE]: "${toolName}" with these exact arguments was already called. You already have its result. Write your final answer now.`,
+                  content: `[NOTICE]: "${toolName}" with these exact arguments was already executed. You already have its result. Stop calling tools and write your final response to the user now.`,
                   tool_call_id: tc.id,
                   created_at: Date.now(),
                 });
@@ -1129,6 +1238,8 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
                     const fileName = rawPath.split(/[/\\]/).pop() || rawPath;
                     console.log(`[Throttling] Blocked repeated reads of ${fileName} (${count} prior reads)`);
                     tauriApi.appendSystemLog('warn', `Throttling repeated reads of ${fileName} (${count} prior reads)`);
+                    totalToolCalls++;
+                    encounteredDuplicate = true;
                     addMessage({
                       id: generateId(),
                       conversation_id: convId!,
@@ -1144,6 +1255,7 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
               }
 
               totalToolCalls++;
+              executedAnyNewTool = true;
 
               tauriApi.appendSystemLog('info', `Tool Call: ${toolName}(${tc.function?.arguments})`);
 
@@ -1178,8 +1290,14 @@ ${projectBlock}CRITICAL AGENT CODER DIRECTIVES (IDE DEVELOPER HARNESS):
             if (controller.signal.aborted) return;
             setChatStatus('thinking');
             clearStreamingContent();
+
+            // Loop breaker: if no new tools were executed (all were duplicates/throttled)
+            // or if tool budget is exhausted, immediately disable tools on the next iteration so the
+            // model is forced to output its final answer rather than looping.
+            const forceDisableTools = (!executedAnyNewTool && encounteredDuplicate) || (totalToolCalls >= MAX_TOTAL_TOOLS);
+
             try {
-              await executeChatLoop(false, depth + 1);
+              await executeChatLoop(false, depth + 1, forceDisableTools);
             } catch (err: unknown) {
               console.error('[Stream error on turn 2]:', err);
               addMessage({

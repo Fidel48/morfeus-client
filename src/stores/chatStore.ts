@@ -354,8 +354,11 @@ export const useChatStore = create<ChatStore>()(
       partialize: (state) => ({
         conversations: state.conversations,
         messages: state.messages.map(m => {
-          if (m.role === 'tool' && m.content && m.content.startsWith('![Screenshot](data:image/png;base64,')) {
-            return { ...m, content: '![Screenshot](image_removed_from_storage)' };
+          if (m.role === 'tool' && typeof m.content === 'string' && m.content.includes('data:image/')) {
+            return {
+              ...m,
+              content: m.content.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, 'image_removed_from_storage')
+            };
           }
           return m;
         }),

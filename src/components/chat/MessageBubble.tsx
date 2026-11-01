@@ -97,8 +97,25 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
     return parseUserMessageContent(message.content);
   }, [isUser, message.content]);
 
-  // Hide tool result messages completely from the chat timeline
+  // Hide non-visual tool result messages from the chat timeline, but render visual image outputs (e.g. FreeCAD 3D rendering)
   if (message.role === 'tool') {
+    if (typeof message.content === 'string' && message.content.includes('data:image/')) {
+      return (
+        <motion.div
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="flex gap-3 w-full max-w-3xl ml-11 my-1"
+        >
+          <div className="flex flex-col gap-2 p-3.5 rounded-2xl bg-zinc-900/90 border border-violet-500/30 max-w-xl shadow-lg">
+            <div className="flex items-center gap-2 text-xs text-violet-300 font-mono font-medium">
+              <Wrench size={13} className="text-violet-400" />
+              <span>Tool Visual Output</span>
+            </div>
+            <MarkdownRenderer content={message.content} />
+          </div>
+        </motion.div>
+      );
+    }
     return null;
   }
 
@@ -196,16 +213,20 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
                   {message.content && <MarkdownRenderer content={message.content} />}
                   {message.tool_calls.map((tc, idx) => {
                     const toolName = tc.function?.name;
+                    const rawArgs: unknown = tc.function?.arguments;
+                    const argsText =
+                      typeof rawArgs === 'string' ? rawArgs : rawArgs == null ? '' : (() => { try { return JSON.stringify(rawArgs); } catch { return ''; } })();
                     let text = `Tool: ${toolName || 'unknown'}`;
                     let Icon = Wrench;
                     
                     if (toolName === 'web_search' || toolName === 'read_webpage') {
                       let queryDisplay = '';
                       try {
-                        const parsed = JSON.parse(tc.function?.arguments || '{}');
-                        queryDisplay = parsed.query || parsed.url || '';
+                        const parsed = JSON.parse(argsText || '{}');
+                        const q = parsed?.query || parsed?.url || '';
+                        queryDisplay = typeof q === 'string' ? q : JSON.stringify(q);
                       } catch {
-                        queryDisplay = tc.function?.arguments || '';
+                        queryDisplay = argsText;
                       }
 
                       return (
@@ -245,16 +266,16 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
                       <div key={idx} className="flex items-center gap-2 text-xs text-violet-300 bg-violet-950/40 px-3 py-1.5 rounded-full border border-violet-500/20 w-fit shadow-sm">
                         <Icon size={12} className="text-violet-400" />
                         <span className="font-mono text-[11px] font-semibold">{text}</span>
-                        {tc.function?.arguments && (
+                        {argsText && (
                           <span className="text-[10px] text-zinc-400 max-w-xs truncate border-l border-white/10 pl-2">
-                            {tc.function.arguments}
+                            {argsText}
                           </span>
                         )}
                       </div>
                     );
                   })}
                 </div>
-              ) : message.content ? (
+              ) : message.content && message.content.trim() !== '[empty response]' ? (
                 <MarkdownRenderer content={message.content} />
               ) : (
                 <div className="flex flex-col items-center gap-2 text-zinc-400 py-2">

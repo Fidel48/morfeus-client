@@ -4,7 +4,9 @@ import {
   X, Server, Mic, Volume2, Check, AlertCircle,
   Loader2, RefreshCw, ChevronDown, ChevronUp, Zap, Bug, FolderOpen, Terminal, Copy, FileText,
   Plug, Plus, Trash2, PlugZap, ChevronRight, WifiOff, Play, Square, Atom, HelpCircle, Search, Sparkles,
+  Layers, Database, Globe, Brain, Box,
 } from 'lucide-react';
+import { MCP_PRESETS, McpPreset } from '@/lib/mcpPresets';
 import { useSettingsStore, PROVIDER_PRESETS, DEFAULT_PROVIDERS, ConfiguredModelOption } from '@/stores/settingsStore';
 import { useMcpStore } from '@/stores/mcpStore';
 import { useVoiceStore } from '@/stores/voiceStore';
@@ -1472,9 +1474,13 @@ const StatusDot: React.FC<{ status?: string }> = ({ status = 'disabled' }) => (
 );
 
 const McpTab: React.FC = () => {
-  const { servers, addServer, removeServer, setEnabled, connectServer, disconnectServer, refreshServerTools, importFromClaudeDesktop } = useMcpStore();
+  const { servers, addServer, updateServer, removeServer, setEnabled, connectServer, disconnectServer, refreshServerTools, importFromClaudeDesktop } = useMcpStore();
 
   const [showAdd, setShowAdd] = useState(false);
+  const [showPresets, setShowPresets] = useState(false);
+  const [showJsonModal, setShowJsonModal] = useState(false);
+  const [jsonText, setJsonText] = useState('');
+  const [jsonError, setJsonError] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
@@ -1489,6 +1495,74 @@ const McpTab: React.FC = () => {
   });
   const [addError, setAddError] = useState('');
 
+  const handleOpenJson = () => {
+    const mcpServers: Record<string, any> = {};
+    for (const s of servers) {
+      mcpServers[s.id] = {
+        command: s.command,
+        args: s.args,
+        ...(s.env && Object.keys(s.env).length > 0 ? { env: s.env } : {}),
+      };
+    }
+    // If empty, offer a standard starter template
+    if (Object.keys(mcpServers).length === 0) {
+      mcpServers['memory'] = {
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-memory'],
+      };
+    }
+    setJsonText(JSON.stringify({ mcpServers }, null, 2));
+    setJsonError('');
+    setShowJsonModal(true);
+    setShowAdd(false);
+    setShowPresets(false);
+  };
+
+  const handleApplyJson = async () => {
+    setJsonError('');
+    try {
+      const parsed = JSON.parse(jsonText);
+      const mcpServers = parsed.mcpServers || parsed;
+      if (typeof mcpServers !== 'object' || mcpServers === null) {
+        throw new Error('Expected a JSON object with server definitions or {"mcpServers": { ... }}.');
+      }
+      const entries = Object.entries(mcpServers);
+      if (entries.length === 0) {
+        throw new Error('No server configurations found in JSON.');
+      }
+
+      let count = 0;
+      for (const [id, val] of entries) {
+        if (typeof val !== 'object' || !val) continue;
+        const s = val as any;
+        const command = s.command;
+        if (!command) continue;
+        const args = Array.isArray(s.args) ? s.args.map(String) : [];
+        const env = s.env && typeof s.env === 'object' ? s.env : {};
+
+        const existing = servers.find((srv) => srv.id === id);
+        if (existing) {
+          updateServer(id, { command, args, env, enabled: true });
+          await connectServer(id);
+        } else {
+          addServer({
+            id,
+            name: id.charAt(0).toUpperCase() + id.slice(1).replace(/-/g, ' '),
+            command,
+            args,
+            env,
+            enabled: true,
+          });
+        }
+        count++;
+      }
+      setShowJsonModal(false);
+      setImportMessage({ type: 'ok', text: `Saved and applied ${count} MCP server(s) from JSON.` });
+    } catch (err: any) {
+      setJsonError(err.message || 'Invalid JSON syntax');
+    }
+  };
+
   const handleImportClaude = async () => {
     setImporting(true);
     setImportMessage(null);
@@ -1499,10 +1573,10 @@ const McpTab: React.FC = () => {
       } else if (res.imported === 0 && res.skipped > 0) {
         setImportMessage({ type: 'ok', text: `All ${res.skipped} server(s) from Claude Desktop are already configured.` });
       } else {
-        setImportMessage({ type: 'ok', text: `Imported ${res.imported} server(s) from Claude Desktop (${res.names.join(', ')}). Connecting...` });
+        setImportMessage({ type: 'ok', text: `Imported ${res.imported} server(s) (${res.names.join(', ')}). Connecting...` });
       }
     } catch (err: any) {
-      setImportMessage({ type: 'err', text: `Claude config not found or unreadable: ${err?.message || err}` });
+      setImportMessage({ type: 'err', text: `Could not read Claude config: ${err?.message || err}` });
     } finally {
       setImporting(false);
     }
@@ -1532,37 +1606,61 @@ const McpTab: React.FC = () => {
     setShowAdd(false);
   };
 
+  const applyPresetToForm = (p: McpPreset) => {
+    setForm({
+      name: p.name,
+      id: p.id,
+      command: p.command,
+      args: p.args.join(' '),
+      envRaw: p.env ? Object.entries(p.env).map(([k, v]) => `${k}=${v}`).join(', ') : '',
+    });
+    setAddError('');
+  };
+
   return (
     <div className="space-y-3">
       {/* Header row */}
       <div className="flex items-center justify-between">
         <div>
           <p className="text-xs font-semibold text-zinc-200">MCP Server Manager</p>
-          <p className="text-[10px] text-zinc-600 mt-0.5">
+          <p className="text-[10px] text-zinc-500 mt-0.5">
             {servers.filter((s) => s.status === 'connected').length} of {servers.length} servers connected
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <button
-            onClick={handleImportClaude}
-            disabled={importing}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-amber-500/10 text-amber-300 border border-amber-500/25 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
-            title="Import MCP servers configured in Claude Desktop (claude_desktop_config.json)"
+            onClick={() => { setShowPresets(!showPresets); setShowAdd(false); setShowJsonModal(false); }}
+            className={cn(
+              'flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg border transition-colors',
+              showPresets
+                ? 'bg-violet-600/30 text-violet-200 border-violet-500/50'
+                : 'bg-white/5 text-zinc-300 border-white/10 hover:bg-white/10 hover:text-white'
+            )}
+            title="Browse standard MCP server catalog"
           >
-            <Sparkles size={12} className={importing ? 'animate-spin' : 'text-amber-400'} />
-            <span>{importing ? 'Importing...' : 'Import from Claude'}</span>
+            <Layers size={12} className="text-violet-400" />
+            <span>Presets</span>
           </button>
           <button
-            onClick={() => setShowAdd(!showAdd)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-violet-600/20 text-violet-300 border border-violet-500/30 hover:bg-violet-600/30 transition-colors"
+            onClick={handleOpenJson}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg bg-white/5 text-zinc-300 border border-white/10 hover:bg-white/10 hover:text-white transition-colors"
+            title="Edit raw MCP JSON configuration"
+          >
+            <FileText size={12} className="text-zinc-400" />
+            <span className="hidden sm:inline">Direct JSON</span>
+            <span className="sm:hidden">JSON</span>
+          </button>
+          <button
+            onClick={() => { setShowAdd(!showAdd); setShowPresets(false); setShowJsonModal(false); }}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg bg-violet-600/20 text-violet-300 border border-violet-500/30 hover:bg-violet-600/30 transition-colors"
           >
             <Plus size={12} />
-            Add Server
+            <span>Add Server</span>
           </button>
         </div>
       </div>
 
-      {/* Claude Import Feedback */}
+      {/* Import Feedback */}
       {importMessage && (
         <div className={cn(
           'px-3 py-2 rounded-lg text-xs flex items-center justify-between border',
@@ -1577,6 +1675,141 @@ const McpTab: React.FC = () => {
         </div>
       )}
 
+      {/* Built-in Presets Catalog Drawer */}
+      <AnimatePresence>
+        {showPresets && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="p-3 bg-zinc-950/90 rounded-xl border border-violet-500/30 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <Layers size={13} className="text-violet-400" />
+                  <span className="text-xs font-semibold text-zinc-200">Built-in MCP Server Catalog</span>
+                </div>
+                <span className="text-[10px] text-zinc-500">1-click install standard Model Context Protocol servers</span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-1">
+                {MCP_PRESETS.map((preset) => {
+                  const isInstalled = servers.some((s) => s.id === preset.id);
+                  return (
+                    <div
+                      key={preset.id}
+                      className="p-2.5 rounded-lg bg-white/3 border border-white/8 hover:border-violet-500/30 transition-colors flex flex-col justify-between gap-2"
+                    >
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs font-medium text-zinc-200">{preset.name}</span>
+                          <span className="text-[9px] px-1.5 py-0.2 rounded bg-white/5 text-zinc-400 border border-white/10 uppercase">
+                            {preset.category}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-zinc-400 leading-snug line-clamp-2">
+                          {preset.description}
+                        </p>
+                        <p className="text-[9px] font-mono text-zinc-600 mt-1 truncate">
+                          {preset.command} {preset.args.join(' ')}
+                        </p>
+                      </div>
+                      <button
+                        disabled={isInstalled}
+                        onClick={() => {
+                          addServer({
+                            id: preset.id,
+                            name: preset.name,
+                            command: preset.command,
+                            args: [...preset.args],
+                            env: preset.env ? { ...preset.env } : {},
+                            enabled: true,
+                          });
+                          setImportMessage({ type: 'ok', text: `Added and started "${preset.name}".` });
+                        }}
+                        className={cn(
+                          'w-full py-1 text-[11px] font-medium rounded transition-colors flex items-center justify-center gap-1',
+                          isInstalled
+                            ? 'bg-zinc-800 text-zinc-500 cursor-default'
+                            : 'bg-violet-600/30 text-violet-200 hover:bg-violet-600 hover:text-white border border-violet-500/30'
+                        )}
+                      >
+                        {isInstalled ? <Check size={11} /> : <Plus size={11} />}
+                        <span>{isInstalled ? 'Installed' : 'Install Server'}</span>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Raw JSON Config Editor Modal/Drawer */}
+      <AnimatePresence>
+        {showJsonModal && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="space-y-2 p-3 bg-zinc-950/90 rounded-xl border border-violet-500/30">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <FileText size={13} className="text-violet-400" />
+                  <span className="text-xs font-semibold text-zinc-200">Direct MCP JSON Configuration</span>
+                </div>
+                <span className="text-[10px] text-zinc-500">Edit or paste <code>mcpServers</code> object</span>
+              </div>
+
+              <textarea
+                value={jsonText}
+                onChange={(e) => setJsonText(e.target.value)}
+                rows={9}
+                className="w-full px-3 py-2 text-xs font-mono bg-black/60 border border-white/10 rounded-lg text-emerald-300 placeholder-zinc-600 outline-none focus:border-violet-500/50 leading-relaxed resize-y"
+                placeholder={`{\n  "mcpServers": {\n    "memory": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-memory"]\n    }\n  }\n}`}
+              />
+
+              {jsonError && (
+                <p className="text-[10px] text-red-400 flex items-center gap-1">
+                  <AlertCircle size={10} /> {jsonError}
+                </p>
+              )}
+
+              <div className="flex items-center justify-between pt-1">
+                <button
+                  type="button"
+                  onClick={handleImportClaude}
+                  disabled={importing}
+                  className="text-[10px] text-zinc-500 hover:text-amber-400 underline underline-offset-2 transition-colors disabled:opacity-50"
+                  title="Optionally read existing servers from local Claude Desktop configuration if installed"
+                >
+                  {importing ? 'Importing from Claude...' : 'Import from Claude Desktop config (optional)'}
+                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setShowJsonModal(false); setJsonError(''); }}
+                    className="px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleApplyJson}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-violet-600 hover:bg-violet-500 text-white rounded-lg transition-colors font-medium shadow-sm"
+                  >
+                    <Check size={12} />
+                    Save & Apply
+                  </button>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Add-server form */}
       <AnimatePresence>
         {showAdd && (
@@ -1586,8 +1819,26 @@ const McpTab: React.FC = () => {
             exit={{ opacity: 0, height: 0 }}
             className="overflow-hidden"
           >
-            <div className="space-y-2 p-3 bg-white/3 rounded-xl border border-white/8">
-              <p className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">New MCP Server</p>
+            <div className="space-y-2.5 p-3.5 bg-white/3 rounded-xl border border-white/8">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">New MCP Server</p>
+                <span className="text-[10px] text-zinc-500">Custom command or stdio process</span>
+              </div>
+
+              {/* Preset quick-chips */}
+              <div className="flex items-center gap-1.5 flex-wrap pb-1">
+                <span className="text-[10px] text-zinc-500 mr-0.5">Quick templates:</span>
+                {MCP_PRESETS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => applyPresetToForm(p)}
+                    className="px-2 py-0.5 text-[10px] bg-white/5 hover:bg-violet-600/20 hover:text-violet-300 text-zinc-400 border border-white/8 rounded transition-colors"
+                  >
+                    {p.name.split(' ')[0]}
+                  </button>
+                ))}
+              </div>
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
@@ -1595,7 +1846,7 @@ const McpTab: React.FC = () => {
                   <input
                     value={form.name}
                     onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                    placeholder="FreeCAD MCP"
+                    placeholder="e.g. Memory, Filesystem, GitHub"
                     className="w-full px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
                   />
                 </div>
@@ -1604,7 +1855,7 @@ const McpTab: React.FC = () => {
                   <input
                     value={form.id}
                     onChange={(e) => setForm((f) => ({ ...f, id: e.target.value }))}
-                    placeholder="freecad"
+                    placeholder="e.g. memory, filesystem"
                     className="w-full px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
                   />
                 </div>
@@ -1615,7 +1866,7 @@ const McpTab: React.FC = () => {
                 <input
                   value={form.command}
                   onChange={(e) => setForm((f) => ({ ...f, command: e.target.value }))}
-                  placeholder="python  or  npx  or  node"
+                  placeholder="npx  or  uvx  or  python  or  node"
                   className="w-full px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
                 />
               </div>
@@ -1625,7 +1876,7 @@ const McpTab: React.FC = () => {
                 <input
                   value={form.args}
                   onChange={(e) => setForm((f) => ({ ...f, args: e.target.value }))}
-                  placeholder="-m freecad_mcp  or  -y @modelcontextprotocol/server-github"
+                  placeholder="-y @modelcontextprotocol/server-...  or  path/to/script.py"
                   className="w-full px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
                 />
               </div>
@@ -1635,7 +1886,7 @@ const McpTab: React.FC = () => {
                 <input
                   value={form.envRaw}
                   onChange={(e) => setForm((f) => ({ ...f, envRaw: e.target.value }))}
-                  placeholder="GITHUB_TOKEN=ghp_xxx, API_KEY=..."
+                  placeholder="API_KEY=..., GITHUB_TOKEN=ghp_..."
                   className="w-full px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50"
                 />
               </div>
@@ -1671,7 +1922,7 @@ const McpTab: React.FC = () => {
         <div className="text-center py-8 text-zinc-600">
           <Plug size={28} className="mx-auto mb-2 opacity-40" />
           <p className="text-xs">No MCP servers configured.</p>
-          <p className="text-[10px] mt-1">Click "Add Server" to connect your first MCP.</p>
+          <p className="text-[10px] mt-1">Click "Presets" or "Add Server" to connect your first MCP server.</p>
         </div>
       ) : (
         <div className="space-y-1.5">
@@ -1696,10 +1947,28 @@ const McpTab: React.FC = () => {
                   <p className="text-[10px] text-zinc-600 font-mono truncate mt-0.5">
                     {srv.command} {srv.args.join(' ')}
                   </p>
+                  {srv.status === 'error' && srv.errorMessage && (
+                    <p className="text-[10px] text-red-400/90 truncate mt-0.5 flex items-center gap-1">
+                      <AlertCircle size={10} className="flex-shrink-0" />
+                      <span className="truncate">{srv.errorMessage}</span>
+                    </p>
+                  )}
                 </div>
 
                 {/* Actions */}
-                <div className="flex items-center gap-1 flex-shrink-0">
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  {/* Inline Retry if in error */}
+                  {srv.status === 'error' && (
+                    <button
+                      onClick={() => connectServer(srv.id)}
+                      className="px-2 py-0.5 text-[10px] bg-red-500/20 text-red-300 border border-red-500/30 hover:bg-red-500/30 rounded flex items-center gap-1 transition-colors"
+                      title="Retry connecting to server"
+                    >
+                      <RefreshCw size={9} />
+                      <span>Retry</span>
+                    </button>
+                  )}
+
                   {/* Enable/disable toggle */}
                   <button
                     onClick={() => setEnabled(srv.id, !srv.enabled)}
@@ -1717,7 +1986,7 @@ const McpTab: React.FC = () => {
                   </button>
 
                   {/* Reconnect */}
-                  {srv.enabled && (
+                  {srv.enabled && srv.status !== 'error' && (
                     <button
                       onClick={() => connectServer(srv.id)}
                       title="Reconnect"

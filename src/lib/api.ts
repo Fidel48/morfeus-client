@@ -76,7 +76,7 @@ export const WEB_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'list_directory',
-      description: "List the files and folders inside a directory on the user's local computer. Use this to browse the filesystem, explore folders like Downloads or Documents, and find files by name. Always call get_special_dirs first if you need to find standard folders like Home, Downloads, or Documents.",
+      description: "List the files and folders inside a directory on the user's local computer. ONLY use this when the user explicitly asks to browse or view a local folder on their computer or within their active workspace. NEVER use this on paths from pasted remote logs, Docker containers, or external systems.",
       parameters: {
         type: 'object',
         properties: {
@@ -93,7 +93,7 @@ export const WEB_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'get_special_dirs',
-      description: "Get the absolute paths to the user's standard directories: Home, Downloads, Documents, and Desktop. Always call this first before trying to browse the filesystem so you know the correct paths for this user's operating system.",
+      description: "Get the absolute paths to the user's standard directories: Home, Downloads, Documents, and Desktop. ONLY call this when the user asks to browse or locate files in standard system directories.",
       parameters: {
         type: 'object',
         properties: {},
@@ -105,7 +105,7 @@ export const WEB_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'search_files',
-      description: "Recursively search for files or folders by name anywhere inside the user's home directory. Use this when the user asks to 'find', 'look for', or 'locate' a file by name. Much faster than browsing folder by folder. After finding a file, use read_local_file to read its content (supports .txt, .md, .pdf, .docx, .csv, .json, code files, etc.).",
+      description: "Recursively search for files or folders by name on the user's local host computer. ONLY use this when the user explicitly asks to find or locate a file on their own computer (e.g. 'find my report', 'where is file X'). NEVER use this tool when the user pastes remote logs (e.g. Raspberry Pi, Docker, SSH, server logs), stack traces, or asks general coding/debugging questions.",
       parameters: {
         type: 'object',
         properties: {
@@ -126,7 +126,7 @@ export const WEB_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'read_local_file',
-      description: "Read the text content of a file on the user's local computer by its absolute path. Supports text files, code files, Markdown, PDF, DOCX, CSV, JSON, etc. Use this after finding a file path with search_files or list_directory, or when given a file path.",
+      description: "Read the text content of a file on the user's local computer by its absolute path. ONLY use this for existing local files when explicitly requested by the user or when inspecting active local project files. NEVER use this to look up paths from pasted remote logs, Docker containers, or external systems.",
       parameters: {
         type: 'object',
         properties: {
@@ -360,7 +360,7 @@ export const WEB_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'grep_search',
-      description: "Fast codebase search across workspace files. Searches file contents line-by-line for symbols, function definitions, variable names, or patterns. Skips build/dependency directories (node_modules, target, etc.). Returns file path, line numbers, and matching lines.",
+      description: "Fast codebase search across workspace files. Searches file contents line-by-line for symbols, function definitions, variable names, or patterns. Skips build/dependency directories (node_modules, target, etc.). ONLY use this when searching the active local project codebase. NEVER use this on paths from pasted remote logs, Docker containers, or external systems.",
       parameters: {
         type: 'object',
         properties: {
@@ -390,7 +390,7 @@ export const WEB_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'read_file_range',
-      description: "Read a specific line range from a text file with line numbers (e.g. lines 40 to 120). Use this instead of reading whole files to conserve tokens and inspect precise function implementations.",
+      description: "Read a specific line range from a text file on the local computer with line numbers (e.g. lines 40 to 120). ONLY use this for files in the active local project workspace or when explicitly requested by the user. NEVER use this on remote or container paths.",
       parameters: {
         type: 'object',
         properties: {
@@ -665,7 +665,9 @@ export async function* streamChat(
     top_p: settings.top_p,
     max_tokens: settings.max_tokens,
     frequency_penalty: settings.frequency_penalty,
-    repetition_penalty: 1.1,
+    // NOTE: no hardcoded repetition_penalty. Code and shell commands are legitimately repetitive
+    // (docker exec ... docker exec ...), and a global penalty makes local models mangle flags/paths.
+    // Users can still tune frequency_penalty in settings.
     stream: true,
     think: isThink,
     reasoning_effort: isThink ? 'medium' : (isLocalServer ? 'none' : 'low'),
@@ -750,7 +752,13 @@ export async function* streamChat(
   // Handle abort
   let abortHandler: (() => void) | null = null;
   if (signal) {
-    abortHandler = () => { if (!streamDone) push({ done: true, error: 'Aborted' }); };
+    abortHandler = () => {
+      if (streamDone) return;
+      push({ done: true, error: 'Aborted' });
+      // Actually stop the upstream generation (closes the HTTP connection in Rust) so the
+      // local model doesn't keep computing and block the next request.
+      invoke('proxy_cancel_stream', { streamId }).catch(() => {});
+    };
     signal.addEventListener('abort', abortHandler);
   }
 
@@ -784,7 +792,17 @@ export async function* streamChat(
         throw new LLMApiError(item.error);
       }
       if (item.done) break;
-      if (item.chunk) yield item.chunk;
+      if (item.chunk) {
+        // Some servers report failures as a data frame: {"error": {...}}. Don't swallow it as an empty reply.
+        const errPayload = (item.chunk as unknown as { error?: unknown }).error;
+        if (errPayload && !item.chunk.choices) {
+          const msg = typeof errPayload === 'string'
+            ? errPayload
+            : (errPayload as { message?: string })?.message ?? JSON.stringify(errPayload);
+          throw new LLMApiError(msg);
+        }
+        yield item.chunk;
+      }
     }
   } finally {
     cleanup();

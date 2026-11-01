@@ -120,25 +120,27 @@ export const useMcpStore = create<McpStore>()(
         const srv = get().servers.find((s) => s.id === id);
         if (!srv) return;
 
-        get()._setServerRuntime(id, 'connecting');
+        get()._setServerRuntime(id, 'connecting', undefined, undefined);
         try {
+          try { await tauriApi.mcpStopServer(id); } catch { /* ignore */ }
           await tauriApi.mcpStartServer(id, srv.command, srv.args, srv.env ?? {});
           const res = await Promise.race([
             tauriApi.mcpListTools(id),
             new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error('timeout')), 10_000)
+              setTimeout(() => reject(new Error('Connection timed out waiting for tools response (10s)')), 10_000)
             ),
           ]);
           const tools: McpToolInfo[] = res?.tools ?? [];
-          get()._setServerRuntime(id, 'connected', tools);
+          get()._setServerRuntime(id, 'connected', tools, undefined);
         } catch (err: any) {
+          console.error(`[MCP] Failed to connect server "${id}":`, err);
           get()._setServerRuntime(id, 'error', [], String(err?.message ?? err));
         }
       },
 
       disconnectServer: async (id) => {
         try { await tauriApi.mcpStopServer(id); } catch { /* ignore */ }
-        get()._setServerRuntime(id, 'disabled', []);
+        get()._setServerRuntime(id, 'disabled', [], undefined);
       },
 
       refreshServerTools: async (id) => {

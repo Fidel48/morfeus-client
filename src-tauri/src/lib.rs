@@ -28,6 +28,8 @@ pub fn run() {
         )
         .manage(RecordingBuffer::default())
         .manage(commands::process::ProcessState::default())
+        .manage(mcp::McpState::default())
+        .manage(lsp::LspState::default())
         .setup(|_app| {
             // Auto-start Kokoro neural TTS server on app boot
             tauri::async_runtime::spawn(async {
@@ -58,6 +60,7 @@ pub fn run() {
             commands::llm::proxy_test_connection,
             commands::llm::proxy_fetch_models,
             commands::llm::proxy_stream_chat,
+            commands::llm::proxy_cancel_stream,
             // Voice / STT
             commands::voice::start_recording,
             commands::voice::stop_recording,

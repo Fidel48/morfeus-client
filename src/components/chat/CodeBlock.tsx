@@ -6,9 +6,10 @@ import { useChatStore } from '@/stores/chatStore';
 interface CodeBlockProps {
   language: string;
   code: string;
+  children?: React.ReactNode;
 }
 
-export const CodeBlock: React.FC<CodeBlockProps> = ({ language, code }) => {
+export const CodeBlock: React.FC<CodeBlockProps> = ({ language, code, children }) => {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -64,7 +65,7 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ language, code }) => {
 
       {/* Code */}
       <pre className="overflow-x-auto p-4 text-sm leading-relaxed">
-        <code className={language ? `language-${language}` : ''}>{code}</code>
+        <code className={language ? `language-${language}` : ''}>{children || code}</code>
       </pre>
     </div>
   );
