@@ -16,6 +16,7 @@ export interface Message {
   conversation_id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
   content?: string;
+  api_content?: string | any[];
   reasoning?: string;
   tool_calls?: ToolCall[];
   tool_call_id?: string;

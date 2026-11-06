@@ -333,6 +333,7 @@ export function useChat() {
         conversation_id: convId,
         role: 'user',
         content: userDisplayContent,
+        api_content: apiContent !== userDisplayContent ? apiContent : undefined,
         created_at: Date.now(),
       };
       addMessage(userMessage);
@@ -584,7 +585,7 @@ ${projectBlock}CRITICAL DIRECTIVES:
                 };
               }
             } else {
-              apiMsg = { role: msg.role, content: msg.content ?? '' };
+              apiMsg = { role: msg.role, content: msg.api_content || msg.content || '' };
             }
 
             // On the initial user turn, swap in the real apiContent (may include images)
@@ -1025,19 +1026,21 @@ ${projectBlock}CRITICAL DIRECTIVES:
 
           const detectRepetition = (): boolean => {
             const len = recentTokens.length;
-            if (len < 15) return false;
 
-            // Pattern 1: same token 15 times in a row
-            const tail = recentTokens.slice(-15);
-            if (tail.every(t => t === tail[0])) return true;
+            // Pattern 1: same token 12 times in a row
+            if (len >= 12) {
+              const tail = recentTokens.slice(-12);
+              if (tail.every(t => t === tail[0])) return true;
+            }
 
-            // Pattern 2: cycling pattern of period 2–4
-            for (const period of [2, 3, 4]) {
-              const needed = period * 5;
-              if (len < needed) continue;
-              const window = recentTokens.slice(-needed);
-              const cycle = window.slice(0, period);
-              if (window.every((t, i) => t === cycle[i % period])) return true;
+            // Pattern 2: cycling pattern of token period 2–8
+            for (const period of [2, 3, 4, 5, 6, 7, 8]) {
+              const needed = period * 4;
+              if (len >= needed) {
+                const window = recentTokens.slice(-needed);
+                const cycle = window.slice(0, period);
+                if (window.every((t, i) => t === cycle[i % period])) return true;
+              }
             }
 
             // Pattern 3: repeated multi-word phrase in recent 30 tokens
@@ -1046,8 +1049,19 @@ ${projectBlock}CRITICAL DIRECTIVES:
               if (chunk.length >= 40) {
                 for (let subLen = 5; subLen <= 20; subLen++) {
                   const sub = chunk.slice(-subLen);
-                  if ((chunk.split(sub).length - 1) >= 6) return true;
+                  if ((chunk.split(sub).length - 1) >= 5) return true;
                 }
+              }
+            }
+
+            // Pattern 4: character-level repetition in streaming text (catches runaway URLs / base64 cycles like I2V2Z3...)
+            const live = useChatStore.getState().streamingContent || '';
+            if (live.length >= 60) {
+              const tailChars = live.slice(-200);
+              for (let period = 3; period <= 24; period++) {
+                const sub = tailChars.slice(-period);
+                // Check if tailChars ends with at least 5 repetitions of `sub`
+                if (tailChars.endsWith(sub.repeat(5))) return true;
               }
             }
 

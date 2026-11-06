@@ -16,6 +16,7 @@ import type { ToolCall } from '@/types';
 export type Msg = {
   role: string;
   content?: unknown;
+  api_content?: unknown;
   tool_calls?: ToolCall[] | Array<{ id?: string; type?: string; function?: { name?: string; arguments?: unknown } }>;
   tool_call_id?: string;
 };
@@ -66,7 +67,7 @@ export function trimHistoryToContext<T extends Msg>(
   for (let i = allMsgs.length - 1; i >= 0; i--) {
     const msg = allMsgs[i];
     const isCurrentTurn = activeTurnUserIdx >= 0 ? i >= activeTurnUserIdx : i === allMsgs.length - 1;
-    const tokCost = 20 + estimateTokenCount(msg.content) + (msg.tool_calls ? 50 : 0);
+    const tokCost = 20 + estimateTokenCount(msg.api_content || msg.content) + (msg.tool_calls ? 50 : 0);
 
     if (!isCurrentTurn && budget + tokCost > maxContext) {
       oldestFitIdx = i + 1;
