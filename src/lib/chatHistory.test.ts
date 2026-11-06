@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeHistory } from '@/lib/chatHistory';
+import { sanitizeHistory, trimHistoryToContext } from '@/lib/chatHistory';
 
 describe('sanitizeHistory', () => {
   it('drops error cards and empty placeholders', () => {
@@ -53,5 +53,67 @@ describe('sanitizeHistory', () => {
       { role: 'user', content: img },
     ]);
     expect(out).toHaveLength(2);
+  });
+});
+
+describe('trimHistoryToContext', () => {
+  const options = {
+    systemPrompt: 'System instructions', // ~5 tokens
+    contextLength: 1000,
+    maxTokens: 500,
+  };
+
+  it('keeps all messages when history fits within budget', () => {
+    const msgs = [
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Hi there' },
+      { role: 'user', content: 'Can you search the web?' },
+    ];
+    const trimmed = trimHistoryToContext(msgs, options);
+    expect(trimmed).toEqual(msgs);
+  });
+
+  it('never truncates active turn tool calls or tool results even when context budget is tight', () => {
+    const largeToolResult = 'x'.repeat(2400); // ~600 tokens
+    const msgs = [
+      { role: 'user', content: 'Old question 1' },
+      { role: 'assistant', content: 'Old answer 1' },
+      { role: 'user', content: 'Old question 2' },
+      { role: 'assistant', content: 'Old answer 2' },
+      // Active turn starts here:
+      { role: 'user', content: 'Can you confirm that by doing a simple web searching' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', function: { name: 'web_search' } }] },
+      { role: 'tool', tool_call_id: 'call_1', content: largeToolResult },
+    ];
+
+    // Tight context: 800 tokens maxContext
+    const trimmed = trimHistoryToContext(msgs, {
+      systemPrompt: 'You are an AI assistant.',
+      contextLength: 800,
+      maxTokens: 256,
+    });
+
+    // Older questions must be trimmed, but the entire active turn (user, tool call, tool result) MUST be kept!
+    expect(trimmed.map((m) => m.role)).toEqual(['user', 'assistant', 'tool']);
+    expect(trimmed[0].content).toBe('Can you confirm that by doing a simple web searching');
+    expect(trimmed[1].tool_calls).toBeDefined();
+    expect(trimmed[2].role).toBe('tool');
+  });
+
+  it('aligns to multiple of 4 for KV-cache prefix stability without encroaching on active turn', () => {
+    const msgs: Array<{ role: string; content: string }> = [];
+    for (let i = 0; i < 16; i++) {
+      msgs.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: `Message ${i}` });
+    }
+    msgs.push({ role: 'user', content: 'Final question' });
+
+    const trimmed = trimHistoryToContext(msgs, {
+      systemPrompt: 'System',
+      contextLength: 300,
+      maxTokens: 100,
+    });
+
+    const activeUser = trimmed[trimmed.length - 1];
+    expect(activeUser.content).toBe('Final question');
   });
 });

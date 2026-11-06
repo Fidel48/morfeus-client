@@ -6,7 +6,7 @@ import { useCanvasStore } from '@/stores/canvasStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { streamChat, WEB_TOOLS, FAST_CHAT_TOOLS } from '@/lib/api';
 import { tauriApi } from '@/lib/tauri';
-import { sanitizeHistory } from '@/lib/chatHistory';
+import { sanitizeHistory, trimHistoryToContext } from '@/lib/chatHistory';
 import { kokoroSpeak, kokoroStop, speechQueue } from '@/lib/kokoroTts';
 import { generateId, extractTextContent } from '@/lib/utils';
 import { Message, ContentPart, ToolDefinition, AppSettings, ToolCall } from '@/types';
@@ -527,9 +527,6 @@ ${projectBlock}CRITICAL DIRECTIVES:
 
         // ── Build API-formatted message history ──
         const buildApiMessages = (isInitialTurn: boolean) => {
-          const estimateTokens = (s: string) => Math.ceil(s.length / 4);
-          let budget = estimateTokens(systemPrompt) + settings.max_tokens;
-
           const allMsgs = useChatStore.getState().messages.filter(
             m => m.conversation_id === convId
           );
@@ -537,38 +534,17 @@ ${projectBlock}CRITICAL DIRECTIVES:
           // Find the active user query for this current interaction
           const lastUserMsg = [...allMsgs].reverse().find(m => m.role === 'user');
 
-          // In Continuous Voice or TTS mode, keep history agile (<= 3500 tokens) to guarantee
-          // fast, fluid turnaround on local/remote LLM servers.
-          const isVoiceActive = useSettingsStore.getState().settings.tts_enabled;
-          const isContinuous = Boolean(useSettingsStore.getState().settings.continuous_voice);
-          const maxContext = (isVoiceActive || isContinuous)
-            ? Math.min(settings.context_length, 3500)
-            : settings.context_length;
-
-          // Determine the oldest message that fits within the token budget
-          let oldestFitIdx = 0;
-          for (let i = allMsgs.length - 1; i >= 0; i--) {
-            const msg = allMsgs[i];
-            const isCurrentTurnUser = msg === lastUserMsg;
-            const tokCost = 20 + estimateTokens(msg.content ?? '') + (msg.tool_calls ? 50 : 0);
-
-            if (!isCurrentTurnUser && budget + tokCost > maxContext) {
-              oldestFitIdx = i + 1;
-              break;
-            }
-            budget += tokCost;
-          }
-
-          // KV-Cache Prefix Alignment: Snap the starting message index down to a multiple of 4
-          // so that consecutive turns share the exact same leading message prefix instead of
-          // shifting by 1 on every turn and invalidating the entire LLM prompt cache.
-          if (oldestFitIdx > 0 && oldestFitIdx < allMsgs.length - 2) {
-            oldestFitIdx = Math.max(0, Math.floor(oldestFitIdx / 4) * 4);
-          }
+          // Trim older turns to fit within context window while strictly preserving
+          // the active turn (user query + tool calls + tool results).
+          const fittedMsgs = trimHistoryToContext(allMsgs, {
+            systemPrompt,
+            contextLength: effectiveSettings.context_length || settings.context_length || 8192,
+            maxTokens: effectiveSettings.max_tokens || settings.max_tokens || 2048,
+          });
 
           const history: any[] = [];
-          for (let i = oldestFitIdx; i < allMsgs.length; i++) {
-            const msg = allMsgs[i];
+          for (let i = 0; i < fittedMsgs.length; i++) {
+            const msg = fittedMsgs[i];
 
             // Format each role correctly for the OpenAI API spec
             let apiMsg: any;
@@ -577,8 +553,8 @@ ${projectBlock}CRITICAL DIRECTIVES:
                 ? {
                     role: 'assistant',
                     content: msg.content ?? null,
-                    tool_calls: msg.tool_calls.map((tc, idx) => ({
-                      id: tc.id || `call_${Date.now()}_${idx}`,
+                    tool_calls: msg.tool_calls.map((tc: any, idx: number) => ({
+                      id: tc.id || `call_${idx}`,
                       type: tc.type || 'function',
                       function: {
                         name: tc.function?.name || '',
@@ -597,13 +573,13 @@ ${projectBlock}CRITICAL DIRECTIVES:
                   .replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, '[Image base64 data omitted for efficiency]');
                 apiMsg = {
                   role: 'tool',
-                  tool_call_id: msg.tool_call_id || 'call_default',
+                  tool_call_id: msg.tool_call_id || 'call_0',
                   content: capOutput(cleanContent),
                 };
               } else {
                 apiMsg = {
                   role: 'tool',
-                  tool_call_id: msg.tool_call_id || 'call_default',
+                  tool_call_id: msg.tool_call_id || 'call_0',
                   content: typeof msg.content === 'string' ? capOutput(msg.content) : (msg.content ?? ''),
                 };
               }
@@ -612,7 +588,7 @@ ${projectBlock}CRITICAL DIRECTIVES:
             }
 
             // On the initial user turn, swap in the real apiContent (may include images)
-            if (isInitialTurn && i === allMsgs.length - 1) {
+            if (isInitialTurn && i === fittedMsgs.length - 1) {
               apiMsg.content = apiContent;
             }
 
@@ -1247,9 +1223,9 @@ ${projectBlock}CRITICAL DIRECTIVES:
           const isEmptyResponse = isEmptyContent;
           const hasNoToolCalls = noToolCalls;
 
-          if (isEmptyResponse && hasNoToolCalls && depth === 0 && !disableTools) {
-            console.warn('[Chat] Empty response received — model may not support function calling. Retrying without tools.');
-            tauriApi.appendSystemLog('warn', 'Empty response from model — retrying without tools array (model may not support function calling).');
+          if (isEmptyResponse && hasNoToolCalls && depth <= 2 && !disableTools) {
+            console.warn('[Chat] Empty response received — model may need tools omitted to write text. Retrying with tools disabled.');
+            tauriApi.appendSystemLog('warn', 'Empty response from model — retrying with tools disabled to force text response.');
             // Remove the empty message we just finalized
             useChatStore.setState((state) => ({
               messages: state.messages.filter((m) => m.id !== finalMessage.id),

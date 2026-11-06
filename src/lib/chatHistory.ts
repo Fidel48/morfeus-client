@@ -11,13 +11,84 @@
  *  - consecutive same-role messages (after a failed turn) -> "roles must alternate" template errors.
  */
 
-type Msg = {
+import type { ToolCall } from '@/types';
+
+export type Msg = {
   role: string;
   content?: unknown;
-  tool_calls?: Array<{ id?: string; [k: string]: unknown }>;
+  tool_calls?: ToolCall[] | Array<{ id?: string; type?: string; function?: { name?: string; arguments?: unknown } }>;
   tool_call_id?: string;
-  [k: string]: unknown;
 };
+
+export interface TrimContextOptions {
+  systemPrompt: string;
+  contextLength?: number;
+  maxTokens?: number;
+}
+
+export function estimateTokenCount(text: unknown): number {
+  if (typeof text === 'string') {
+    return Math.ceil(text.length / 4);
+  }
+  if (text == null) return 0;
+  return Math.ceil(JSON.stringify(text).length / 4);
+}
+
+/**
+ * Trims message history to fit within the model's context budget while strictly
+ * preserving the entire active interaction (the latest user prompt and any
+ * assistant tool calls + tool results belonging to the current turn).
+ */
+export function trimHistoryToContext<T extends Msg>(
+  allMsgs: T[],
+  options: TrimContextOptions
+): T[] {
+  if (!allMsgs.length) return [];
+
+  const maxContext = options.contextLength && options.contextLength > 0 ? options.contextLength : 8192;
+  const completionHeadroom = Math.min(
+    options.maxTokens && options.maxTokens > 0 ? options.maxTokens : 2048,
+    Math.max(128, Math.floor(maxContext * 0.25)),
+    1024
+  );
+  let budget = estimateTokenCount(options.systemPrompt) + completionHeadroom;
+
+  // Identify the start of the active turn (the latest user message)
+  let activeTurnUserIdx = -1;
+  for (let i = allMsgs.length - 1; i >= 0; i--) {
+    if (allMsgs[i].role === 'user') {
+      activeTurnUserIdx = i;
+      break;
+    }
+  }
+
+  let oldestFitIdx = 0;
+  for (let i = allMsgs.length - 1; i >= 0; i--) {
+    const msg = allMsgs[i];
+    const isCurrentTurn = activeTurnUserIdx >= 0 ? i >= activeTurnUserIdx : i === allMsgs.length - 1;
+    const tokCost = 20 + estimateTokenCount(msg.content) + (msg.tool_calls ? 50 : 0);
+
+    if (!isCurrentTurn && budget + tokCost > maxContext) {
+      oldestFitIdx = i + 1;
+      break;
+    }
+    budget += tokCost;
+  }
+
+  // Ensure oldestFitIdx never cuts into the active turn (user query, tool calls, tool results)
+  if (activeTurnUserIdx >= 0 && oldestFitIdx > activeTurnUserIdx) {
+    oldestFitIdx = activeTurnUserIdx;
+  }
+
+  // KV-Cache Prefix Alignment: Snap starting message index down to a multiple of 4
+  // so that consecutive turns share the exact same leading message prefix instead of
+  // shifting by 1 on every turn and invalidating the entire LLM prompt cache.
+  if (oldestFitIdx > 0 && activeTurnUserIdx > 0 && oldestFitIdx < activeTurnUserIdx) {
+    oldestFitIdx = Math.max(0, Math.floor(oldestFitIdx / 4) * 4);
+  }
+
+  return allMsgs.slice(oldestFitIdx);
+}
 
 const EMPTY_SENTINEL = '[empty response]';
 
