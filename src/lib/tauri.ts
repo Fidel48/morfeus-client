@@ -50,6 +50,10 @@ export const tauriApi = {
     return tauriInvoke<string>('stop_recording');
   },
 
+  async stopAndTranscribe(): Promise<string> {
+    return tauriInvoke<string>('stop_and_transcribe');
+  },
+
   async checkMicrophone(): Promise<boolean> {
     return tauriInvoke<boolean>('check_microphone');
   },

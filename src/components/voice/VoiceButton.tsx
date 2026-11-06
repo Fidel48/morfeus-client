@@ -61,6 +61,24 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
   const waveformIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const usingNativeRef = useRef(false);
   const currentInputRef = useRef(currentInput);
+  // Guards against stopMacRecording running twice for one utterance (duplicate silence events,
+  // leaked listeners, or manual stop racing the silence detector) which sends the text twice.
+  const isStoppingRef = useRef(false);
+  const lastTranscriptRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });
+
+  // Dispatch a finished transcript to chat exactly once (drops identical repeats within 1s).
+  const dispatchTranscript = (text: string) => {
+    const now = Date.now();
+    const last = lastTranscriptRef.current;
+    if (text === last.text && now - last.at < 1000) {
+      console.warn('[VoiceButton] Dropped duplicate transcript within 1s window.');
+      return false;
+    }
+    lastTranscriptRef.current = { text, at: now };
+    onAutoSendRef.current?.(text);
+    onTranscriptRef.current('');
+    return true;
+  };
 
   const onTranscriptRef = useRef(onTranscript);
   const onAutoSendRef = useRef(onAutoSend);
@@ -121,30 +139,26 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
   }, [setStatus, startWaveform, stopWaveform]);
 
   const stopMacRecording = useCallback(async () => {
+    if (isStoppingRef.current) return;
+    isStoppingRef.current = true;
     stopWaveform();
     setStatus('transcribing');
 
     try {
-      const base64Wav = await tauriApi.stopRecording();
-      if (base64Wav) {
-        const text = await tauriApi.transcribeNative(base64Wav);
-        const trimmed = text ? text.trim() : '';
-        if (trimmed) {
-          // Send prompt to chat and clear input immediately
-          onAutoSendRef.current?.(trimmed);
-          onTranscriptRef.current('');
-          // Note: Mic stays idle while AI generates tokens & speaks response.
-          // handlePlaybackComplete will cleanly auto-arm the mic once AI finishes speaking.
-        } else if (isContinuousActiveRef.current) {
-          // Empty capture (silence/ambient timeout) - seamlessly keep listening if AI is not busy
-          setTimeout(() => {
-            const isBusy = useChatStore.getState().isStreaming || useVoiceStore.getState().isSpeaking;
-            if (isContinuousActiveRef.current && statusRef.current === 'idle' && !isBusy) {
-              startRecordingRef.current();
-            }
-          }, 250);
-        }
+      const text = await Promise.race([
+        tauriApi.stopAndTranscribe(),
+        new Promise<string>((_, reject) =>
+          setTimeout(() => reject(new Error('Transcription timed out after 10s')), 10000)
+        )
+      ]);
+      const trimmed = text ? text.trim() : '';
+      if (trimmed) {
+        // Send prompt to chat and clear input immediately
+        dispatchTranscript(trimmed);
+        // Note: Mic stays idle while AI generates tokens & speaks response.
+        // handlePlaybackComplete will cleanly auto-arm the mic once AI finishes speaking.
       } else if (isContinuousActiveRef.current) {
+        // Empty capture (silence/ambient timeout) - seamlessly keep listening if AI is not busy
         setTimeout(() => {
           const isBusy = useChatStore.getState().isStreaming || useVoiceStore.getState().isSpeaking;
           if (isContinuousActiveRef.current && statusRef.current === 'idle' && !isBusy) {
@@ -166,6 +180,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
     } finally {
       setStatus('idle');
       usingNativeRef.current = false;
+      isStoppingRef.current = false;
     }
   }, [setStatus, stopWaveform]);
 
@@ -242,8 +257,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
 
         const textToSend = latestText.trim();
         if (textToSend) {
-          onAutoSendRef.current?.(textToSend);
-          onTranscriptRef.current('');
+          dispatchTranscript(textToSend);
           // Note: Mic stays idle while AI responds. handlePlaybackComplete will cleanly re-arm once speech finishes.
         } else if (isContinuousActiveRef.current) {
           setTimeout(() => {
@@ -363,13 +377,18 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
   // ─── Listen for hardware silence detection from Rust CPAL (macOS) ─────────
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
     listen('voice-silence-detected', () => {
-      if (statusRef.current === 'recording') {
+      if (statusRef.current === 'recording' && !isStoppingRef.current) {
         stopRecordingRef.current();
       }
-    }).then((fn) => { unlisten = fn; }).catch(() => {});
+    }).then((fn) => {
+      // If cleanup already ran (HMR / StrictMode), unlisten immediately instead of leaking.
+      if (cancelled) fn(); else unlisten = fn;
+    }).catch(() => {});
 
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }, []);
@@ -377,6 +396,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
   // ─── Listen for Full-Duplex VAD Barge-in from Rust CPAL (Continuous Mode only) ─
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
     listen('voice-barge-in-detected', () => {
       // Full-Duplex VAD Barge-in applies strictly in Continuous Mode
       if (!isContinuousActiveRef.current) return;
@@ -386,9 +406,12 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
       // 2. Ensure recording state & visual waveform stay active
       setStatus('recording');
       startWaveform();
-    }).then((fn) => { unlisten = fn; }).catch(() => {});
+    }).then((fn) => {
+      if (cancelled) fn(); else unlisten = fn;
+    }).catch(() => {});
 
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }, [setStatus, startWaveform]);

@@ -64,6 +64,7 @@ pub fn run() {
             // Voice / STT
             commands::voice::start_recording,
             commands::voice::stop_recording,
+            commands::voice::stop_and_transcribe,
             commands::voice::check_microphone,
             commands::voice::get_audio_devices,
             commands::voice::transcribe_native,

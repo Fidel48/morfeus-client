@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isRemoteOrPastedLog, shouldEnableLocalFileToolsInFastChat } from './useChat';
+import { isRemoteOrPastedLog, shouldEnableLocalFileToolsInFastChat, isMcpServerRelevant } from './useChat';
 
 describe('useChat tool gating heuristics', () => {
   it('correctly detects remote logs and docker sessions', () => {
@@ -31,5 +31,29 @@ No connection adapters were found for 'rgsx+torrent://download?source=https%3A%2
     expect(shouldEnableLocalFileToolsInFastChat('write me a python script to download torrents')).toBe(false);
     expect(shouldEnableLocalFileToolsInFastChat('what is the capital of France?')).toBe(false);
     expect(shouldEnableLocalFileToolsInFastChat('how does Docker networking work?')).toBe(false);
+  });
+
+  it('correctly gates specialized MCP servers like FreeCAD', () => {
+    const freecadServer = { id: 'freecad', name: 'FreeCAD 3D CAD', category: 'cad' };
+    const postgresServer = { id: 'postgres', name: 'PostgreSQL Database', category: 'database' };
+
+    // General questions / web searches must NEVER include FreeCAD or Postgres tools
+    expect(isMcpServerRelevant(freecadServer, 'what are the rules for the North Carolina DMV road pre-test?')).toBe(false);
+    expect(isMcpServerRelevant(freecadServer, 'search the web for weather in Miami')).toBe(false);
+    expect(isMcpServerRelevant(postgresServer, 'how do I cook lasagna?')).toBe(false);
+    expect(isMcpServerRelevant(freecadServer, 'the official PDF is a bit of a beast')).toBe(false);
+
+    // CAD-related queries MUST include FreeCAD tools
+    expect(isMcpServerRelevant(freecadServer, 'create a 3D box in FreeCAD')).toBe(true);
+    expect(isMcpServerRelevant(freecadServer, 'extrude this sketch by 15mm')).toBe(true);
+    expect(isMcpServerRelevant(freecadServer, 'export part to stl mesh')).toBe(true);
+    expect(isMcpServerRelevant(freecadServer, 'what 3d models are in my project?')).toBe(true);
+
+    // Database-related queries MUST include Postgres tools
+    expect(isMcpServerRelevant(postgresServer, 'run query on users table in postgres')).toBe(true);
+    expect(isMcpServerRelevant(postgresServer, 'show me the sql schema')).toBe(true);
+
+    // Multi-turn context preservation (hasPriorServerCalls)
+    expect(isMcpServerRelevant(freecadServer, 'now make it 20mm wider', true)).toBe(true);
   });
 });

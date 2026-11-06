@@ -3,10 +3,11 @@ import { motion } from 'framer-motion';
 import { Message } from '@/types';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { cn } from '@/lib/utils';
-import { Bot, User, Wrench, Globe, FileText, Search, Folder, Video, Terminal, Copy, VolumeX, Sparkles, ChevronDown, X, ZoomIn } from 'lucide-react';
+import { Bot, User, Wrench, Globe, FileText, Search, Folder, Video, Terminal, Copy, Volume2, VolumeX, Sparkles, ChevronDown, X, ZoomIn } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { useVoiceStore } from '@/stores/voiceStore';
 import { tauriApi } from '@/lib/tauri';
-import { interruptAiSpeech } from '@/lib/kokoroTts';
+import { interruptAiSpeech, speechQueue } from '@/lib/kokoroTts';
 
 interface ParsedUserContent {
   images: { alt: string; url: string }[];
@@ -96,6 +97,25 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
     if (!isUser) return { images: [], text: message.content || '' };
     return parseUserMessageContent(message.content);
   }, [isUser, message.content]);
+
+  const isSpeaking = useVoiceStore((s) => s.isSpeaking);
+
+  const handleToggleSpeech = () => {
+    if (isSpeaking) {
+      interruptAiSpeech(false);
+    } else {
+      const clean = (message.content || '')
+        .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
+        .trim();
+      if (!clean) return;
+      speechQueue.reset();
+      const currentSettings = useSettingsStore.getState().settings;
+      speechQueue.setVoice(currentSettings.tts_voice || 'af_heart');
+      speechQueue.setRate(currentSettings.tts_rate || 1.0);
+      speechQueue.push(clean);
+      speechQueue.flush();
+    }
+  };
 
   // Hide non-visual tool result messages from the chat timeline, but render visual image outputs (e.g. FreeCAD 3D rendering)
   if (message.role === 'tool') {
@@ -304,11 +324,16 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
                 <Copy size={12} />
               </button>
               <button
-                onClick={() => interruptAiSpeech(false)}
-                className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-white/5 rounded transition-colors"
-                title="Stop speaking (silence AI)"
+                onClick={handleToggleSpeech}
+                className={cn(
+                  "p-1 rounded transition-colors",
+                  isSpeaking
+                    ? "text-violet-400 bg-violet-500/15 hover:bg-violet-500/25"
+                    : "text-zinc-500 hover:text-zinc-300 hover:bg-white/5"
+                )}
+                title={isSpeaking ? "Stop speaking (silence AI)" : "Read message aloud"}
               >
-                <VolumeX size={12} />
+                {isSpeaking ? <VolumeX size={12} /> : <Volume2 size={12} />}
               </button>
             </div>
           )}

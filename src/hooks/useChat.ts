@@ -40,6 +40,49 @@ export function shouldEnableLocalFileToolsInFastChat(text: string): boolean {
     || /^[~/]|[a-zA-Z]:[/\\]/i.test(text.trim());
 }
 
+/**
+ * Determines whether a connected MCP server is relevant to the user's turn.
+ * Gating prevents domain-specific servers (e.g. FreeCAD 3D CAD, PostgreSQL) from polluting general
+ * web searches or casual chat, avoiding tool confusion like FreeCAD's `list_documents` firing for a DMV query.
+ */
+export function isMcpServerRelevant(
+  server: { id: string; name?: string; category?: string },
+  userText: string,
+  hasPriorServerCalls = false
+): boolean {
+  if (hasPriorServerCalls) return true;
+  if (!userText) return false;
+  const text = userText.toLowerCase();
+  const id = server.id.toLowerCase();
+  const name = (server.name || '').toLowerCase();
+
+  // Explicit mention of server id, name, or generic "mcp"
+  if (text.includes(id) || (name && text.includes(name)) || /\b(mcp|integration|integrations)\b/i.test(text)) {
+    return true;
+  }
+
+  // Domain-specific keyword matching based on server category/id
+  if (id.includes('freecad') || id.includes('cad') || server.category === 'cad') {
+    return /\b(freecad|cad|3d|mesh|stl|step|iges|obj|part|sketch|extrude|fillet|chamfer|loft|pocket|pad|parametric|solid|geometry|model(?:ing)?|render(?:ing)?)\b/i.test(text);
+  }
+
+  if (id.includes('postgres') || id.includes('sql') || id.includes('sqlite') || id.includes('db') || server.category === 'database') {
+    return /\b(postgres|postgresql|mysql|sqlite|database|db|sql|query|schema|table|tables|rows|select|insert|update|delete|migration)\b/i.test(text);
+  }
+
+  if (id.includes('github') || id.includes('git') || server.category === 'git') {
+    return /\b(github|repo|repository|pull request|pr|issue|issues|commit|commits|branch|branches|workflow|actions)\b/i.test(text);
+  }
+
+  if (id.includes('puppeteer') || id.includes('browser') || server.category === 'web') {
+    return /\b(puppeteer|headless|navigate|screenshot|browser automation|scrape|playwright)\b/i.test(text);
+  }
+
+  // For other custom MCP servers, match on words in the server's name/id
+  const keywords = [...id.split(/[-_]/), ...name.split(/\s+/)].filter(k => k.length >= 3);
+  return keywords.some(k => text.includes(k.toLowerCase()));
+}
+
 // ── Agent Coder project context ──────────────────────────────────────────────
 const IGNORED_TOP_LEVEL = new Set([
   'node_modules', 'target', 'dist', 'build', '.git', '.next', '.venv', 'venv', '__pycache__', '.DS_Store',
@@ -206,6 +249,12 @@ function parseTextToolCalls(content: string): { toolCalls: ToolCall[]; cleanedCo
   return { toolCalls, cleanedContent };
 }
 
+// ── Send serialization (shared across every useChat() instance) ──────────────
+let sendInFlight = false;
+let lastSentText = '';
+let lastSentAt = 0;
+const DUPLICATE_SEND_WINDOW_MS = 1000;
+
 export function useChat() {
   const {
     messages,
@@ -229,9 +278,9 @@ export function useChat() {
 
   const { settings } = useSettingsStore();
 
-  const sendMessage = useCallback(
+  const sendMessageUnsafe = useCallback(
     async (content: string) => {
-      if (isStreaming || !content.trim()) return;
+      if (!content.trim()) return;
       const currentSettings = useSettingsStore.getState().settings;
       const mode = useChatStore.getState().chatMode || 'fast';
       const activeModel = mode === 'fast'
@@ -398,10 +447,21 @@ ${ctx ? `\n${ctx}\n` : ''}
           ? `\n\nCRITICAL THINKING DIRECTIVE: Thinking mode is explicitly turned OFF by the user. Do NOT output internal reasoning scratchpads, thinking tokens, or <think> tags. Answer immediately, directly, and concisely.${isQwenModel ? '\n\n/no_think' : ''}`
           : '';
 
+        const conversationMsgs = useChatStore.getState().messages.filter(m => m.conversation_id === convId);
         const activeMcpServers = useMcpStore.getState().servers.filter(s => s.status === 'connected' && s.enabled);
+        
+        // Filter MCP servers by relevance so domain-specific tools (e.g. FreeCAD 3D CAD, PostgreSQL)
+        // do not hijack general web searches, casual conversation, or driving test queries.
+        const relevantMcpServers = activeMcpServers.filter(srv => {
+          const hasPriorCalls = conversationMsgs.some(m =>
+            m.tool_calls?.some(tc => tc.function?.name?.startsWith(`mcp__${srv.id}__`))
+          );
+          return isMcpServerRelevant(srv, userDisplayContent, hasPriorCalls);
+        });
+
         let mcpBlock = '';
-        if (activeMcpServers.length > 0) {
-          const serverNames = activeMcpServers.map(s => s.name || s.id).join(', ');
+        if (relevantMcpServers.length > 0) {
+          const serverNames = relevantMcpServers.map(s => s.name || s.id).join(', ');
           mcpBlock = `\n\n[Connected integrations: ${serverNames}. Tools from these integrations are available via native function calling when relevant. Do NOT list, advertise, or recite these tools in casual conversation or greetings.]`;
         }
 
@@ -411,7 +471,6 @@ ${ctx ? `\n${ctx}\n` : ''}
           systemPrompt = `You are Morfeus, a helpful, intelligent, and versatile AI assistant.
 
 Today's Date: ${dateStr}
-Current Time: ${timeStr}
 
 DIRECTIVES:
 1. NATURAL CONVERSATION & GREETINGS: When the user says "hi", "hey", "hello", or engages in casual chat, reply warmly, naturally, and concisely like a normal AI assistant. NEVER list your tools, active modes, capabilities, or connected MCP servers unless the user explicitly asks for them.
@@ -424,13 +483,13 @@ DIRECTIVES:
    - ONLY call local file tools if the user explicitly asks to find or read a file on their own computer (e.g. "find my resume", "read file at /path").
 5. TOOL CALLING: You have access to web search and connected tools. Use them quietly when needed to satisfy a specific user request. Never recite your tools unprompted.
 6. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or asked to read news stories or articles, provide a thorough, informative breakdown covering the key details (who, what, when, where, charges, facts, context). State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable Markdown source links formatted under a "### Sources" section at the very end: [Source Title](url).
-7. CODING LIMITATION: Chat mode does not edit codebase files directly (inform the user to switch to "Agent Coder" mode if they need codebase editing).${mcpBlock}${voiceDirective}${thinkDirective}`;
+7. DIRECT QUIZ & EXAM PROCTORING: When the user asks to be quizzed, practice for an exam, or take a mock test (e.g. asking for "one question at a time"), act directly as the exam proctor. Immediately present the actual subject-matter question with multiple-choice options (A, B, C, D). NEVER ask meta-questions about the user's feelings, confidence level, or session goals. Wait for the user's answer before providing the answer key and moving to the next question.
+8. CODING LIMITATION: Chat mode does not edit codebase files directly (inform the user to switch to "Agent Coder" mode if they need codebase editing).${mcpBlock}${voiceDirective}${thinkDirective}`;
         } else {
           const basePrompt = currentSettings.system_prompt || 'You are Morfeus, a powerful, articulate, and versatile desktop AI assistant and autonomous developer harness.';
           systemPrompt = `${basePrompt}
 
 Today's Date: ${dateStr}
-Current Time: ${timeStr}
 
 ${projectBlock}CRITICAL DIRECTIVES:
 1. NATURAL CONVERSATION & GREETINGS: When the user greets you or makes casual conversation (e.g. "hi", "hey", "hello"), respond naturally and concisely as a general AI assistant. NEVER list your tools, dev servers, or connected MCP integrations unless explicitly asked.
@@ -478,19 +537,38 @@ ${projectBlock}CRITICAL DIRECTIVES:
           // Find the active user query for this current interaction
           const lastUserMsg = [...allMsgs].reverse().find(m => m.role === 'user');
 
-          const history: any[] = [];
-          // Walk backwards, newest first, until context budget is exhausted
+          // In Continuous Voice or TTS mode, keep history agile (<= 3500 tokens) to guarantee
+          // fast, fluid turnaround on local/remote LLM servers.
+          const isVoiceActive = useSettingsStore.getState().settings.tts_enabled;
+          const isContinuous = Boolean(useSettingsStore.getState().settings.continuous_voice);
+          const maxContext = (isVoiceActive || isContinuous)
+            ? Math.min(settings.context_length, 3500)
+            : settings.context_length;
+
+          // Determine the oldest message that fits within the token budget
+          let oldestFitIdx = 0;
           for (let i = allMsgs.length - 1; i >= 0; i--) {
             const msg = allMsgs[i];
             const isCurrentTurnUser = msg === lastUserMsg;
             const tokCost = 20 + estimateTokens(msg.content ?? '') + (msg.tool_calls ? 50 : 0);
 
-            // Never truncate the current user query even if budget is tight
-            if (!isCurrentTurnUser && budget + tokCost > settings.context_length) {
-              console.log('[Context] Truncated older messages to fit context window.');
+            if (!isCurrentTurnUser && budget + tokCost > maxContext) {
+              oldestFitIdx = i + 1;
               break;
             }
             budget += tokCost;
+          }
+
+          // KV-Cache Prefix Alignment: Snap the starting message index down to a multiple of 4
+          // so that consecutive turns share the exact same leading message prefix instead of
+          // shifting by 1 on every turn and invalidating the entire LLM prompt cache.
+          if (oldestFitIdx > 0 && oldestFitIdx < allMsgs.length - 2) {
+            oldestFitIdx = Math.max(0, Math.floor(oldestFitIdx / 4) * 4);
+          }
+
+          const history: any[] = [];
+          for (let i = oldestFitIdx; i < allMsgs.length; i++) {
+            const msg = allMsgs[i];
 
             // Format each role correctly for the OpenAI API spec
             let apiMsg: any;
@@ -538,7 +616,7 @@ ${projectBlock}CRITICAL DIRECTIVES:
               apiMsg.content = apiContent;
             }
 
-            history.unshift(apiMsg);
+            history.push(apiMsg);
           }
 
           // Clean up any leading orphaned tool messages
@@ -905,6 +983,14 @@ ${projectBlock}CRITICAL DIRECTIVES:
         const executeChatLoop = async (isInitialTurn: boolean, depth: number, disableTools = false): Promise<void> => {
           if (controller.signal.aborted) return;
 
+          // Re-arm speech queue for this turn so post-tool synthesis responses are spoken aloud
+          const liveSettings = useSettingsStore.getState().settings;
+          if (liveSettings.tts_enabled) {
+            speechQueue.reset();
+            speechQueue.setVoice(liveSettings.tts_voice || 'af_heart');
+            speechQueue.setRate(liveSettings.tts_rate || 1.0);
+          }
+
           const apiMessages = buildApiMessages(isInitialTurn);
 
           // At max depth, stop passing tools so model must respond with text
@@ -921,16 +1007,19 @@ ${projectBlock}CRITICAL DIRECTIVES:
           let availableTools: ToolDefinition[] = [];
           if (!isMaxDepth && !disableTools) {
             const mcpTools: ToolDefinition[] = [];
-            const activeTools = useMcpStore.getState().getActiveTools();
-            for (const { serverId, tool } of activeTools) {
-              mcpTools.push({
-                type: 'function',
-                function: {
-                  name: `mcp__${serverId}__${tool.name}`,
-                  description: `[MCP: ${serverId}] ${tool.description ?? ''}`,
-                  parameters: (tool.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
-                },
-              });
+            for (const srv of relevantMcpServers) {
+              if (srv.tools) {
+                for (const tool of srv.tools) {
+                  mcpTools.push({
+                    type: 'function',
+                    function: {
+                      name: `mcp__${srv.id}__${tool.name}`,
+                      description: `[MCP: ${srv.id}] ${tool.description ?? ''}`,
+                      parameters: (tool.inputSchema as Record<string, unknown>) ?? { type: 'object', properties: {} },
+                    },
+                  });
+                }
+              }
             }
 
             if (isFastMode) {
@@ -1330,10 +1419,10 @@ ${projectBlock}CRITICAL DIRECTIVES:
           }
 
           // ── Final response: Flush speechQueue if TTS enabled ──
-          const liveSettings = useSettingsStore.getState().settings;
-          if (liveSettings.tts_enabled && !hasToolCalls) {
+          const finalSettings = useSettingsStore.getState().settings;
+          if (finalSettings.tts_enabled && !hasToolCalls) {
             speechQueue.flush();
-          } else if (!hasToolCalls && liveSettings.continuous_voice) {
+          } else if (!hasToolCalls && finalSettings.continuous_voice) {
             if (typeof window !== 'undefined') {
               window.dispatchEvent(new CustomEvent('speech-playback-complete'));
             }
@@ -1388,6 +1477,39 @@ ${projectBlock}CRITICAL DIRECTIVES:
       setAbortController,
       updateConversation,
     ]
+  );
+
+  /**
+   * Public entry point. Serializes sends with a synchronous module-level lock (React state
+   * closures are stale between renders, so `isStreaming` alone lets two near-simultaneous voice
+   * transcripts start two parallel streams) and drops identical re-sends fired back-to-back.
+   */
+  const sendMessage = useCallback(
+    async (content: string) => {
+      const text = (content ?? '').trim();
+      if (!text) return;
+
+      const now = Date.now();
+      if (sendInFlight || useChatStore.getState().isStreaming) {
+        console.warn('[Chat] Ignored send: a response is already in progress.');
+        return;
+      }
+      if (text === lastSentText && now - lastSentAt < DUPLICATE_SEND_WINDOW_MS) {
+        console.warn('[Chat] Ignored duplicate send of identical text.');
+        return;
+      }
+
+      sendInFlight = true;
+      lastSentText = text;
+      lastSentAt = now;
+      try {
+        await sendMessageUnsafe(content);
+      } finally {
+        sendInFlight = false;
+        lastSentAt = Date.now();
+      }
+    },
+    [sendMessageUnsafe]
   );
 
   const handleStopStreaming = useCallback(() => {

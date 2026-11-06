@@ -74,6 +74,7 @@ pub async fn start_recording(
     let is_recording_ref = Arc::clone(&state.is_recording);
     let sample_rate_ref = Arc::clone(&state.sample_rate);
     let app_handle = app.clone();
+    let app_handle_cb = app.clone();
 
     let _ = app.emit("recording-started", ());
 
@@ -127,17 +128,34 @@ pub async fn start_recording(
                     if !*rec { return; }
                 }
 
-                // If AI is actively vocalizing through speakers, suppress mic processing
-                // to prevent acoustic feedback loop (the assistant hearing herself).
-                if IS_AI_SPEAKING.load(Ordering::SeqCst) {
-                    return;
-                }
+                let is_continuous = IS_CONTINUOUS_MODE.load(Ordering::SeqCst);
+                let is_ai_speaking = IS_AI_SPEAKING.load(Ordering::SeqCst);
 
                 // Voice Activity Detection (RMS energy)
                 let sum_sq: f32 = data.iter().map(|&x| x * x).sum();
                 let rms = (sum_sq / data.len().max(1) as f32).sqrt();
 
-                // Standard recording path (user speaking alone)
+                // If AI is actively vocalizing through speakers:
+                if is_ai_speaking {
+                    let barge_thresh = BARGE_IN_THRESHOLD.load(Ordering::SeqCst) as f32 / 1000.0;
+                    if is_continuous && rms > barge_thresh {
+                        // User barged in with voice louder than speaker output!
+                        eprintln!("[morfeus] ⚡ Full-Duplex VAD Barge-in detected! (rms: {:.4} > {:.4})", rms, barge_thresh);
+                        IS_AI_SPEAKING.store(false, Ordering::SeqCst);
+                        SPEECH_GENERATION.fetch_add(1, Ordering::SeqCst);
+                        let _ = app_handle_cb.emit("voice-barge-in-detected", ());
+                        #[cfg(target_os = "macos")]
+                        {
+                            let _ = std::process::Command::new("killall").arg("afplay").output();
+                            let _ = std::process::Command::new("killall").arg("say").output();
+                        }
+                    } else {
+                        // Suppress speaker audio echo from being recorded into samples
+                        return;
+                    }
+                }
+
+                // Standard recording path (user speaking)
                 if let Ok(mut buf) = samples_clone.lock() {
                     // Mix down to mono
                     if channels == 1 {
@@ -219,6 +237,95 @@ pub async fn start_recording(
     });
 
     Ok(())
+}
+
+/// Stop recording and transcribe directly in Rust, avoiding multi-megabyte base64 IPC roundtrips
+#[tauri::command]
+pub async fn stop_and_transcribe(
+    app: AppHandle,
+    state: tauri::State<'_, RecordingBuffer>,
+) -> Result<String, String> {
+    {
+        let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
+        *is_recording = false;
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+    let samples = {
+        let mut s = state.samples.lock().map_err(|e| e.to_string())?;
+        std::mem::take(&mut *s)
+    };
+    let sample_rate = *state.sample_rate.lock().map_err(|e| e.to_string())?;
+
+    let _ = app.emit("recording-stopped", ());
+
+    if samples.is_empty() {
+        return Ok(String::new());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        tokio::task::spawn_blocking(move || {
+            let spec = WavSpec {
+                channels: 1,
+                sample_rate,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+
+            // Calculate peak amplitude and compute auto-gain scaling so quiet speech is clear and loud
+            let mut max_peak = 0.0f32;
+            for &s in samples.iter() {
+                let abs = s.abs();
+                if abs > max_peak {
+                    max_peak = abs;
+                }
+            }
+            let gain = if max_peak > 0.01 {
+                (0.85 / max_peak).clamp(1.0, 3.5)
+            } else {
+                1.0
+            };
+
+            let temp_dir = std::env::temp_dir();
+            let file_id = uuid::Uuid::new_v4().to_string();
+            let temp_wav = temp_dir.join(format!("morfeus_audio_{}.wav", file_id));
+
+            {
+                let mut writer = WavWriter::create(&temp_wav, spec).map_err(|e| e.to_string())?;
+                for &sample in samples.iter() {
+                    let normalized = (sample * gain).clamp(-1.0, 1.0);
+                    let pcm = (normalized * i16::MAX as f32) as i16;
+                    writer.write_sample(pcm).map_err(|e| e.to_string())?;
+                }
+                writer.finalize().map_err(|e| e.to_string())?;
+            }
+
+            let mac_speech_bin = env!("MAC_SPEECH_BIN");
+            let output = std::process::Command::new(mac_speech_bin)
+                .arg(&temp_wav)
+                .output()
+                .map_err(|e| format!("Failed to execute Apple Speech recognizer: {}", e))?;
+
+            let _ = std::fs::remove_file(&temp_wav);
+
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if text.is_empty() {
+                let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if !err.is_empty() && !err.contains("timed out") {
+                    return Err(format!("Apple Speech error: {}", err));
+                }
+            }
+
+            Ok(text)
+        }).await.map_err(|e| e.to_string())?
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(String::new())
+    }
 }
 
 /// Stop recording and return base64-encoded PCM WAV at the device's native sample rate
