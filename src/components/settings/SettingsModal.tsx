@@ -1048,17 +1048,40 @@ const ParametersTab: React.FC<{
     </Field>
 
     <Field label="Max Output Tokens" hint="Maximum tokens the model is allowed to generate per response.">
-      <Input
-        type="number"
-        value={settings.max_tokens || ''}
-        onChange={(e) => updateSettings({ max_tokens: parseInt(e.target.value) || 0 })}
-        placeholder="2048"
-        onBlur={(e) => {
-          if (!settings.max_tokens || settings.max_tokens < 256) {
-            updateSettings({ max_tokens: 2048 });
-          }
-        }}
-      />
+      <div className="space-y-2">
+        <Input
+          type="number"
+          value={settings.max_tokens || ''}
+          onChange={(e) => updateSettings({ max_tokens: parseInt(e.target.value) || 0 })}
+          placeholder="2048"
+          onBlur={(e) => {
+            if (!settings.max_tokens || settings.max_tokens < 256) {
+              updateSettings({ max_tokens: 2048 });
+            }
+          }}
+        />
+        <div className="flex gap-2">
+          {[
+            { label: '2048 (Standard)', value: 2048 },
+            { label: '4096 (Long Answers)', value: 4096 },
+            { label: '8192 (Max Output)', value: 8192 },
+          ].map((preset) => (
+            <button
+              key={preset.value}
+              type="button"
+              onClick={() => updateSettings({ max_tokens: preset.value })}
+              className={cn(
+                'px-2.5 py-1 text-[11px] rounded-md transition-all cursor-pointer border',
+                settings.max_tokens === preset.value
+                  ? 'bg-violet-600/25 text-violet-300 border-violet-500/40 font-medium'
+                  : 'bg-white/5 text-zinc-400 hover:text-zinc-200 border-white/8 hover:bg-white/8'
+              )}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+      </div>
     </Field>
 
     {/* Thinking Mode Toggle */}
