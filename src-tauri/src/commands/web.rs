@@ -93,6 +93,86 @@ fn broaden_search_query(query: &str) -> Option<String> {
     }
 }
 
+fn parse_bing_news_rss(body: &str, results: &mut Vec<SearchResult>) {
+    let doc = Html::parse_document(body);
+    let item_selector = Selector::parse("item").unwrap();
+    let title_selector = Selector::parse("title").unwrap();
+    let desc_selector = Selector::parse("description").unwrap();
+    let pubdate_selector = Selector::parse("pubdate").unwrap();
+
+    for item in doc.select(&item_selector).take(6) {
+        let title = item
+            .select(&title_selector)
+            .next()
+            .map(|t| t.text().collect::<Vec<_>>().join("").trim().to_string())
+            .unwrap_or_default();
+
+        let item_str = item.inner_html();
+        let raw_link = if let Some(start) = item_str.find("<link>") {
+            let rest = &item_str[start + 6..];
+            if let Some(end) = rest.find("</link>") {
+                rest[..end].trim().to_string()
+            } else if let Some(end) = rest.find('<') {
+                rest[..end].trim().to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        // Bing News RSS wraps the real article URL inside `...&url=https%3a%2f%2f...&c=...`
+        let unescaped_link = raw_link.replace("&amp;", "&");
+        let mut clean_url = unescaped_link.clone();
+        if let Some(idx) = unescaped_link.find("url=") {
+            let after = &unescaped_link[idx + 4..];
+            let encoded = after.split('&').next().unwrap_or(after);
+            if let Ok(decoded) = urlencoding::decode(encoded) {
+                if decoded.starts_with("http://") || decoded.starts_with("https://") {
+                    clean_url = decoded.to_string();
+                }
+            }
+        }
+
+        let pub_date = item
+            .select(&pubdate_selector)
+            .next()
+            .map(|p| p.text().collect::<Vec<_>>().join("").trim().to_string())
+            .unwrap_or_default();
+
+        let desc = item
+            .select(&desc_selector)
+            .next()
+            .map(|d| {
+                let raw = d.text().collect::<Vec<_>>().join(" ");
+                let fragment = Html::parse_fragment(&raw);
+                fragment
+                    .root_element()
+                    .text()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_else(|| title.clone());
+
+        let snippet = if !pub_date.is_empty() {
+            format!("[Published: {}] {}", pub_date, desc)
+        } else {
+            desc
+        };
+
+        if !title.is_empty() && !clean_url.is_empty() {
+            results.push(SearchResult {
+                title,
+                url: clean_url,
+                snippet,
+            });
+        }
+    }
+}
+
 fn parse_google_news_rss(body: &str, results: &mut Vec<SearchResult>) {
     let doc = Html::parse_document(body);
     let item_selector = Selector::parse("item").unwrap();
@@ -150,9 +230,23 @@ fn parse_google_news_rss(body: &str, results: &mut Vec<SearchResult>) {
 
 async fn search_wikipedia(client: &Client, query: &str, results: &mut Vec<SearchResult>) {
     let cleaned = normalize_search_query(query);
+    let stop_words = [
+        "latest", "lastes", "lates", "breaking", "recent", "current", "today", "todays",
+        "news", "headlines", "update", "updates", "about", "in", "from", "on", "for", "the",
+    ];
+    let entity_cleaned: String = cleaned
+        .split_whitespace()
+        .filter(|w| !stop_words.contains(&w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let wiki_query = if entity_cleaned.trim().len() >= 2 {
+        entity_cleaned.trim()
+    } else {
+        cleaned.as_str()
+    };
     let wiki_url = format!(
         "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={}&utf8=&format=json&srlimit=4",
-        urlencoding::encode(&cleaned)
+        urlencoding::encode(wiki_query)
     );
     let mut found_titles: Vec<(String, String)> = Vec::new();
     if let Ok(resp) = client.get(&wiki_url).send().await {
@@ -644,27 +738,68 @@ pub async fn search_duckduckgo(query: String) -> Result<Vec<SearchResult>, Strin
         }
     }
 
-    // 4. Fallback to Google News RSS + Wikipedia Knowledge Extracts if DuckDuckGo gave 0 results (e.g. anti-bot anomaly)
+    // 4. Fallback to Bing News RSS (full article URLs + multi-sentence descriptions) + Google News RSS + Wikipedia Knowledge Extracts
     if results.len() == live_feed_count {
-        let news_url = format!("https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en", urlencoding::encode(&effective_query));
-        if let Ok(resp) = client.get(&news_url).send().await {
+        let bing_news_url = format!(
+            "https://www.bing.com/news/search?q={}&format=rss",
+            urlencoding::encode(&effective_query)
+        );
+        if let Ok(resp) = client.get(&bing_news_url).send().await {
             if resp.status().is_success() {
                 if let Ok(body) = resp.text().await {
-                    parse_google_news_rss(&body, &mut results);
+                    parse_bing_news_rss(&body, &mut results);
                 }
             }
         }
-        search_wikipedia(&client, &effective_query, &mut results).await;
+
+        if results.len() == live_feed_count {
+            let news_url = format!(
+                "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en",
+                urlencoding::encode(&effective_query)
+            );
+            if let Ok(resp) = client.get(&news_url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(body) = resp.text().await {
+                        parse_google_news_rss(&body, &mut results);
+                    }
+                }
+            }
+        }
+        // Only append encyclopedic Wikipedia results when news/web returned 0 results
+        // or when the query is a study/reference lookup (not a breaking/latest news query)
+        let is_news_query = {
+            let lq = effective_query.to_lowercase();
+            lq.contains("news") || lq.contains("headlines") || lq.contains("breaking")
+        };
+        if results.len() == live_feed_count || (!is_news_query && results.len() < 3) {
+            search_wikipedia(&client, &effective_query, &mut results).await;
+        }
     }
 
     // 5. Automatic Query Broadening + Wikipedia API fallback if specific codes/jargon yielded 0 results
     if results.len() == live_feed_count {
         if let Some(broadened) = broaden_search_query(&effective_query) {
-            let news_url = format!("https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en", urlencoding::encode(&broadened));
-            if let Ok(resp) = client.get(&news_url).send().await {
+            let bing_news_url = format!(
+                "https://www.bing.com/news/search?q={}&format=rss",
+                urlencoding::encode(&broadened)
+            );
+            if let Ok(resp) = client.get(&bing_news_url).send().await {
                 if resp.status().is_success() {
                     if let Ok(body) = resp.text().await {
-                        parse_google_news_rss(&body, &mut results);
+                        parse_bing_news_rss(&body, &mut results);
+                    }
+                }
+            }
+            if results.len() == live_feed_count {
+                let news_url = format!(
+                    "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en",
+                    urlencoding::encode(&broadened)
+                );
+                if let Ok(resp) = client.get(&news_url).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(body) = resp.text().await {
+                            parse_google_news_rss(&body, &mut results);
+                        }
                     }
                 }
             }
@@ -723,6 +858,12 @@ pub async fn fetch_webpage(url: String) -> Result<String, String> {
 
         let text = element.text().collect::<Vec<_>>().join(" ");
         let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if cleaned.starts_with("Search Query for Search the web")
+            || cleaned.starts_with("Return to HomepageTop Stories")
+            || cleaned.starts_with("Skip to main")
+        {
+            continue;
+        }
         if cleaned.len() > 30 {
             // Deduplicate lede/meta repetition
             let first_words = cleaned.chars().take(50).collect::<String>();
@@ -798,5 +939,17 @@ mod tests {
         assert!(!wx.is_empty());
         assert!(wx[0].snippet.contains("[LIVE VERIFIED DATA]"));
         println!("Weather Top Result: {} -> {}", wx[0].title, wx[0].snippet);
+
+        let haiti = search_duckduckgo("latest news Haiti".into())
+            .await
+            .expect("haiti news search should succeed");
+        assert!(!haiti.is_empty());
+        println!("Haiti News Top Result: {} ({}) -> {}", haiti[0].title, haiti[0].url, haiti[0].snippet);
+
+        let salvador = search_duckduckgo("why did the el salavdor deploy those troops Haiti".into())
+            .await
+            .expect("el salvador haiti search should succeed");
+        assert!(!salvador.is_empty());
+        println!("Salvador Follow-up Top Result: {} ({}) -> {}", salvador[0].title, salvador[0].url, salvador[0].snippet);
     }
 }

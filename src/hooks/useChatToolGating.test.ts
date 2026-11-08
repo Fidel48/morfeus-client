@@ -5,6 +5,7 @@ import {
   isMcpServerRelevant,
   isMandatoryWebSearchQuery,
   extractCleanSearchQuery,
+  buildContextualSearchQuery,
 } from './useChat';
 
 describe('useChat tool gating heuristics', () => {
@@ -76,9 +77,17 @@ No connection adapters were found for 'rgsx+torrent://download?source=https%3A%2
     expect(isMandatoryWebSearchQuery('what is the latest news about SpaceX?')).toBe(true);
     expect(isMandatoryWebSearchQuery('search the web for North Carolina insurance licensing updates')).toBe(true);
 
-    // Current officeholders, versions, regulations
+    // Current officeholders, versions, regulations, and geopolitical/military developments
     expect(isMandatoryWebSearchQuery('who is the current CEO of Intel?')).toBe(true);
     expect(isMandatoryWebSearchQuery('what are the requirements for a North Carolina driver\'s license?')).toBe(true);
+    expect(isMandatoryWebSearchQuery('can you tell me the latest news about haiti')).toBe(true);
+    expect(isMandatoryWebSearchQuery('an you tell me that lates news in heat?')).toBe(true);
+    expect(isMandatoryWebSearchQuery('why did the el salavdor deploy those troops')).toBe(true);
+    expect(isMandatoryWebSearchQuery('why did that happen?', true)).toBe(true);
+    expect(isMandatoryWebSearchQuery('i am sorry i meant to say haiti', true)).toBe(true);
+    expect(isMandatoryWebSearchQuery('sorry i meant ethereum', true)).toBe(true);
+    expect(isMandatoryWebSearchQuery('what about in haiti?', true)).toBe(true);
+    expect(isMandatoryWebSearchQuery('thanks!', true)).toBe(false);
 
     // Non-mandatory queries (coding, general knowledge, attached docs, local files)
     expect(isMandatoryWebSearchQuery('write a python script to fetch the current price of bitcoin')).toBe(false);
@@ -87,8 +96,21 @@ No connection adapters were found for 'rgsx+torrent://download?source=https%3A%2
     expect(isMandatoryWebSearchQuery('[Attached Document: exam.pdf]\nWhat is the current price of bitcoin?')).toBe(false);
   });
 
-  it('strips conversational filler when extracting clean search queries', () => {
+  it('strips conversational filler and enriches follow-up queries & typo corrections with prior search context', () => {
     expect(extractCleanSearchQuery('Can you tell me what is the current price of bitcoin?')).toBe('current price of bitcoin');
     expect(extractCleanSearchQuery('Hey Morfeus, please tell me what is the weather in Miami right now!')).toBe('weather in Miami right now');
+    expect(extractCleanSearchQuery('an you tell me that lates news in heat?')).toBe('latest news in heat');
+    expect(
+      buildContextualSearchQuery('i am sorry i meant to say haiti', ['latest news in heat'])
+    ).toBe('latest news in haiti');
+    expect(
+      buildContextualSearchQuery('sorry i meant ethereum', ['current price of bitcoin'])
+    ).toBe('current price of ethereum');
+    expect(
+      buildContextualSearchQuery('haiti', ['latest news in heat'])
+    ).toBe('latest news in haiti');
+    expect(
+      buildContextualSearchQuery('why did the el salavdor deploy those troops', ['latest news Haiti'])
+    ).toBe('why did the el salavdor deploy those troops Haiti');
   });
 });

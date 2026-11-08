@@ -12,8 +12,8 @@ import { generateId, extractTextContent } from '@/lib/utils';
 import { Message, ContentPart, ToolDefinition, AppSettings, ToolCall } from '@/types';
 
 // Max chars returned from any single file/page tool call.
-// Keeps local 14B model context from being flooded.
-const MAX_TOOL_OUTPUT_CHARS = 6000;
+// Sized at 12,000 chars so multi-article web_search extracts + SYNTHESIS DIRECTIVE never get truncated.
+const MAX_TOOL_OUTPUT_CHARS = 12000;
 
 function capOutput(text: string): string {
   if (text.length <= MAX_TOOL_OUTPUT_CHARS) return text;
@@ -45,7 +45,13 @@ export function shouldEnableLocalFileToolsInFastChat(text: string): boolean {
  * so `web_search` receives a clean, high-signal search query.
  */
 export function extractCleanSearchQuery(text: string): string {
-  let s = (text || '').trim().replace(/[?.!]+$/g, '').trim();
+  let s = (text || '')
+    .trim()
+    .replace(/[?.!]+$/g, '')
+    .replace(/^(?:an|ca|cn)\s+you\s+/i, 'can you ')
+    .replace(/\b(?:lates|lastes|latets|lastest)\s+news\b/gi, 'latest news')
+    .replace(/\bthat\s+(latest|breaking|current)\s+news\b/gi, 'the $1 news')
+    .trim();
   const prefixes = [
     /^hey morfeus[, ]+/i,
     /^hi morfeus[, ]+/i,
@@ -55,14 +61,14 @@ export function extractCleanSearchQuery(text: string): string {
     /^please (?:tell me|check|search(?: the web)? for|look up)\s+/i,
     /^(?:tell me|do you know)\s+/i,
     /^(?:search the web for|search online for|look up online|look up)\s+/i,
-    /^(?:what is the|what's the|whats the|what are the)\s+/i,
+    /^(?:what is the|what's the|whats the|what are the|the)\s+/i,
   ];
   let changed = true;
   while (changed) {
     changed = false;
     for (const rx of prefixes) {
       const m = s.match(rx);
-      if (m && s.length > m[0].length + 3) {
+      if (m && s.length > m[0].length + 2) {
         s = s.slice(m[0].length).trim();
         changed = true;
         break;
@@ -73,6 +79,113 @@ export function extractCleanSearchQuery(text: string): string {
 }
 
 /**
+ * Detects if a follow-up turn is correcting or swapping the subject entity of the prior search
+ * (e.g. "i am sorry i meant to say haiti", "sorry i meant ethereum", "not heat, haiti", "what about haiti?").
+ */
+export function extractCorrectionTarget(userText: string, allowBareEntity = false): string | null {
+  const raw = (userText || '').trim().replace(/[?.!]+$/g, '').trim();
+  if (!raw || raw.length > 160) return null;
+
+  const isCorrectionPattern =
+    /\b(?:i\s+meant(?:\s+to\s+say)?|i\s+mean|meant\s+to\s+say|sorry|apologies|my\s+bad|oops|typo|i\s+was\s+(?:asking|talking)\s+about|instead\s+of)\b/i.test(raw) ||
+    /^(?:no[, ]+)?not\s+[a-z0-9_-]+[, ]+/i.test(raw) ||
+    /^(?:what\s+about|how\s+about|and\s+(?:what\s+about|in|for|about))\s+/i.test(raw);
+
+  if (!isCorrectionPattern) {
+    if (
+      allowBareEntity &&
+      raw.split(/\s+/).length <= 2 &&
+      !/\b(why|how|who|when|where|what|which|explain|details|more|those|these|that|they|them|their|news|price|weather|stock|score|forecast)\b/i.test(raw)
+    ) {
+      return raw.replace(/^(?:in|for|about|of)\s+/i, '').trim() || null;
+    }
+    return null;
+  }
+
+  let target = raw;
+  const stripPasses = [
+    /^(?:no|oh|uh|um|wait|oops|my\s+bad|i\s+am\s+sorry|i'?m\s+sorry|im\s+sorry|sorry|apologies|excuse\s+me)[,!.:\s-]*/i,
+    /^not\s+[a-z0-9_-]+(?:[,:\s]+(?:i\s+meant(?:\s+to\s+say)?\s+)?|\s+)/i,
+    /^(?:actually|instead)?[,:\s]*(?:i\s+meant(?:\s+to\s+(?:say|ask|type|write))?|i\s+mean|meant(?:\s+to\s+say)?|i\s+was\s+(?:asking|talking)\s+about|i\s+said|it\s+was\s+supposed\s+to\s+be|what\s+about|how\s+about|and\s+(?:what\s+about|in|for|about)?)[,:\s-]*/i,
+    /\s+(?:instead(?:\s+of\s+[a-z0-9_-]+)?|please|now|today)$/i,
+  ];
+
+  let loop = true;
+  while (loop) {
+    loop = false;
+    for (const rx of stripPasses) {
+      const next = target.replace(rx, '').trim();
+      if (next && next !== target) {
+        target = next;
+        loop = true;
+      }
+    }
+  }
+
+  target = extractCleanSearchQuery(target);
+  return target.length >= 2 ? target : null;
+}
+
+/**
+ * Enriches a follow-up search query:
+ * 1. If the user is correcting or swapping the subject entity (e.g. "i am sorry i meant to say haiti"
+ *    after "latest news in heat"), applies the prior search's intent frame ("latest news in") to the
+ *    corrected target ("haiti") -> "latest news in haiti".
+ * 2. Otherwise, for drill-down follow-up questions (e.g. "why did el salvador deploy those troops"
+ *    after "latest news Haiti"), appends the prior search's topic entity ("Haiti") if missing.
+ */
+export function buildContextualSearchQuery(userText: string, priorSearchQueries: string[] = []): string {
+  const cleaned = extractCleanSearchQuery(userText);
+  if (!priorSearchQueries.length) return cleaned;
+
+  const lastQuery = priorSearchQueries[priorSearchQueries.length - 1] || '';
+
+  // Case 1: Correction or entity-swap follow-up (e.g. "i am sorry i meant to say haiti", or bare "haiti")
+  const correctedTarget = extractCorrectionTarget(userText, true);
+  if (correctedTarget) {
+    // If the corrected target already includes an explicit intent phrase, use it directly
+    if (/\b(news|price|weather|temperature|forecast|stock|score|who|why|how|when|where|what)\b/i.test(correctedTarget)) {
+      return correctedTarget;
+    }
+    // Extract the leading intent frame from the prior search query (e.g. "latest news in", "current price of", "weather in")
+    const frameMatch = lastQuery.match(
+      /^(.*?\b(?:la(?:test|stes|tes)\s+news(?:\s+(?:in|about|from|on|for))?|breaking\s+news(?:\s+(?:in|about|from|on|for))?|current\s+news(?:\s+(?:in|about|from|on|for))?|recent\s+news(?:\s+(?:in|about|from|on|for))?|news(?:\s+(?:in|about|from|on|for))?|current\s+price\s+of|price\s+of|stock\s+price\s+of|current\s+weather\s+in|weather\s+in|temperature\s+in|forecast\s+(?:in|for)|who\s+is\s+the\s+(?:current\s+)?(?:ceo|president|prime\s+minister|leader|governor|mayor)\s+of))\b/i
+    );
+    if (frameMatch && frameMatch[1]) {
+      const normalizedFrame = frameMatch[1].replace(/\b(?:lates|lastes|latets|lastest)\s+news\b/gi, 'latest news').trim();
+      return `${normalizedFrame} ${correctedTarget}`.trim();
+    }
+    // Or preserve trailing intent keywords from the prior query (e.g. "bitcoin current price" -> "ethereum current price")
+    const INTENT_WORDS = ['latest', 'breaking', 'current', 'news', 'price', 'stock', 'weather', 'forecast', 'temperature', 'score'];
+    const priorIntents = lastQuery
+      .split(/\s+/)
+      .filter((w) => INTENT_WORDS.includes(w.toLowerCase()));
+    if (priorIntents.length > 0) {
+      return `${priorIntents.join(' ')} ${correctedTarget}`.trim();
+    }
+    return correctedTarget;
+  }
+
+  // Case 2: Drill-down follow-up question (e.g. "why did el salvador deploy those troops" after "latest news Haiti")
+  const GENERIC_WORDS = new Set([
+    'latest', 'lates', 'lastes', 'breaking', 'current', 'today', 'todays', 'recent', 'news', 'update', 'updates',
+    'event', 'events', 'happening', 'situation', 'story', 'stories', 'headline', 'headlines',
+    'what', 'whats', 'who', 'why', 'how', 'when', 'where', 'is', 'are', 'was', 'were', 'did', 'does',
+    'the', 'for', 'about', 'in', 'of', 'on', 'to', 'and', 'or', 'from', 'with', 'price', 'weather',
+    'tell', 'me', 'search', 'web', 'online', 'happened', 'going', 'right', 'now', 'this', 'that', 'these', 'those',
+  ]);
+
+  const lowerCleaned = cleaned.toLowerCase();
+  const topicTokens = lastQuery
+    .replace(/[^\w\s-]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !GENERIC_WORDS.has(w.toLowerCase()) && !lowerCleaned.includes(w.toLowerCase()));
+
+  if (topicTokens.length === 0) return cleaned;
+  return `${cleaned} ${topicTokens.slice(0, 3).join(' ')}`.trim();
+}
+
+/**
  * Detects queries that strictly require real-time web grounding (`web_search`) before answering
  * to complement a local LLM's limited/static built-in world knowledge:
  * - Explicit requests to search the web / look up online / fact-check
@@ -80,9 +193,10 @@ export function extractCleanSearchQuery(text: string): string {
  * - Current weather, temperature, or forecast
  * - Breaking / latest / today's news, current events, sports scores/schedules
  * - Current officeholders, CEOs, leaders, net worth, release dates, software versions
- * - Specific state/federal laws, DMV/insurance/tax regulations, or recent-year (2024–2027) facts
+ * - Geopolitical, military, government, court, crime, or real-world event questions
+ * - Follow-up questions, corrections ("i meant to say haiti"), or topic switches in a conversation with prior web searches
  */
-export function isMandatoryWebSearchQuery(text: string): boolean {
+export function isMandatoryWebSearchQuery(text: string, hasPriorWebSearch = false): boolean {
   if (!text) return false;
   const trimmed = text.trim();
   if (!trimmed || trimmed.length > 500) return false;
@@ -112,19 +226,38 @@ export function isMandatoryWebSearchQuery(text: string): boolean {
     return true;
   }
 
-  // 4. Breaking / latest / today's news, sports scores, schedules, & current events
-  if (/\b(latest news|breaking news|today'?s news|current news|recent news|what happened (?:today|recently|to)|top news|news about|who won the|score of the|standings|next game)\b/i.test(trimmed)) {
+  // 4. Breaking / latest / today's news (including common typos like "lates news" / "lastes news"), sports scores, schedules, & current events
+  if (/\b(la(?:test|stes|tes|tets|stest)\s+news|breaking news|today'?s news|current news|recent news|what happened (?:today|recently|to|in)|what is happening (?:now|in)|top news|news (?:wise|about|in|from|on|for)|who won the|score of the|standings|next game)\b/i.test(trimmed)) {
     return true;
   }
 
   // 5. Current officeholders, CEOs, leaders, versions, release dates, & recent years (2024–2027)
-  if (/\b(who is the current|who is the ceo of|who is the president of|who is the governor of|who is the mayor of|latest version of|release date of|when does .* come out|in 202[4-9])\b/i.test(trimmed)) {
+  if (/\b(who is the current|who is the ceo of|who is the president of|who is the governor of|who is the mayor of|who is the prime minister of|latest version of|release date of|when does .* come out|in 202[4-9])\b/i.test(trimmed)) {
     return true;
   }
 
   // 6. Real-world regulatory, state law, DMV, licensing, or tax rules (when no local document is attached)
   if (/\b(what are the (?:rules|requirements|laws|regulations) for|dmv|driver'?s license|insurance (?:commissioner|regulation|requirement|licensing)|state law in|tax rate in)\b/i.test(trimmed)) {
     return true;
+  }
+
+  // 7. Geopolitical, military, government, court, crime, or real-world event questions (e.g. "why did el salvador deploy those troops")
+  if (/\b(troops|military|soldiers|deploy(?:ed|ment)?|drone strike|gang(?:s)?|cartel|kidnap(?:ped|ping)?|supreme court|prime minister|president|election(?:s)?|sanctions|ceasefire|treaty|embassy|airstrike|hostage(?:s)?)\b/i.test(trimmed)) {
+    return true;
+  }
+
+  // 8. In a conversation that has already used `web_search`, ANY correction ("i am sorry i meant to say haiti"),
+  // topic switch ("what about haiti?"), or factual follow-up question must trigger `web_search` so the local LLM
+  // never hallucinates fake facts or fake URLs on turn 2+.
+  if (hasPriorWebSearch) {
+    if (extractCorrectionTarget(trimmed) !== null) {
+      return true;
+    }
+    const isPureAcknowledgement =
+      /^(?:thanks|thank you|thx|ty|ok|okay|k|got it|cool|great|awesome|perfect|nice|good|makes sense|understood|bye|goodbye|hello|hi|hey|yes|no|yep|nope)[.!?\s]*$/i.test(trimmed);
+    if (!isPureAcknowledgement && trimmed.length >= 3) {
+      return true;
+    }
   }
 
   return false;
@@ -616,6 +749,29 @@ ${projectBlock}CRITICAL DIRECTIVES:
         let consecutiveErrors = 0;    // if 2 errors in a row, stop and answer from what we know
         const MAX_TOTAL_TOOLS = 20;
 
+        // Collect prior `web_search` queries from this conversation so follow-up questions
+        // (e.g. "why did el salvador deploy those troops" after "latest news Haiti") inherit topic context.
+        const priorWebSearchQueries: string[] = [];
+        for (const msg of conversationMsgs) {
+          if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+            for (const tc of msg.tool_calls) {
+              if (tc.function?.name === 'web_search') {
+                try {
+                  const parsedArgs = typeof tc.function.arguments === 'string'
+                    ? JSON.parse(tc.function.arguments)
+                    : (tc.function.arguments || {});
+                  if (typeof parsedArgs?.query === 'string' && parsedArgs.query.trim()) {
+                    priorWebSearchQueries.push(parsedArgs.query.trim());
+                  }
+                } catch {
+                  // ignore malformed args
+                }
+              }
+            }
+          }
+        }
+        const webSearchSourcesThisTurn: Array<{ title: string; url: string }> = [];
+
         // ── Build API-formatted message history ──
         const buildApiMessages = (isInitialTurn: boolean) => {
           const allMsgs = useChatStore.getState().messages.filter(
@@ -717,7 +873,45 @@ ${projectBlock}CRITICAL DIRECTIVES:
           }
 
           if (name === 'web_search') {
-            const q = (args.query || '').trim();
+            let q = (args.query || '').trim();
+            if (
+              q &&
+              !q.startsWith('http://') &&
+              !q.startsWith('https://') &&
+              priorWebSearchQueries.length > 0
+            ) {
+              // If the user turn was a correction ("i am sorry i meant to say haiti"), or the model passed
+              // a bare 1-2 word entity ("haiti") or follow-up pronouns ("those troops"), construct the full contextual query
+              const userCorrection = extractCorrectionTarget(userDisplayContent);
+              const queryCorrection = extractCorrectionTarget(q);
+              const isBareEntityWithoutIntent =
+                q.split(/\s+/).length <= 2 &&
+                !/\b(news|price|weather|stock|score|forecast|who|why|how|when|where|what)\b/i.test(q);
+              const hasFollowUpPronouns =
+                /\b(this|those|these|that|they|them|their|there|the troops|the gang|the strike)\b/i.test(q);
+
+              if (userCorrection || queryCorrection) {
+                q = buildContextualSearchQuery(userCorrection ? userDisplayContent : q, priorWebSearchQueries);
+              } else if (isBareEntityWithoutIntent || hasFollowUpPronouns) {
+                q = buildContextualSearchQuery(q, priorWebSearchQueries);
+              }
+              if (q !== (args.query || '').trim()) {
+                useChatStore.setState((state) => ({
+                  messages: state.messages.map((m) =>
+                    m.conversation_id === convId && Array.isArray(m.tool_calls)
+                      ? {
+                          ...m,
+                          tool_calls: m.tool_calls.map((tc) =>
+                            tc.id === callId
+                              ? { ...tc, function: { ...tc.function, arguments: JSON.stringify({ query: q }) } }
+                              : tc
+                          ),
+                        }
+                      : m
+                  ),
+                }));
+              }
+            }
             if (q.startsWith('http://') || q.startsWith('https://')) {
               result = await tauriApi.fetchWebpage(q);
             } else {
@@ -728,6 +922,19 @@ ${projectBlock}CRITICAL DIRECTIVES:
                 console.warn('[web_search] Backend search returned error:', err);
               }
               if (Array.isArray(res) && res.length > 0) {
+                priorWebSearchQueries.push(q);
+                for (const r of res.slice(0, 5)) {
+                  const title = String(r?.title || '').trim();
+                  const url = String(r?.url || '').trim();
+                  if (
+                    title &&
+                    (url.startsWith('http://') || url.startsWith('https://')) &&
+                    !webSearchSourcesThisTurn.some((s) => s.url === url)
+                  ) {
+                    webSearchSourcesThisTurn.push({ title, url });
+                  }
+                }
+
                 // Auto-fetch top readable article content so the local LLM has deep context (like Gemini/Perplexity).
                 // Skip bare publisher homepages (e.g. "https://www.reuters.com") and structured live-ticker endpoints
                 // whose authoritative figures are already embedded in `[LIVE VERIFIED DATA]` snippets.
@@ -747,23 +954,31 @@ ${projectBlock}CRITICAL DIRECTIVES:
                 };
 
                 const scrapeTargets = res.filter(isScrapeCandidate).slice(0, 2);
+                const scrapedBlocks: string[] = [];
                 for (const target of scrapeTargets) {
                   try {
                     const pageText = await tauriApi.fetchWebpage(target.url);
                     if (pageText && !pageText.startsWith('[Webpage Notice]') && pageText.length > 120) {
-                      topArticleContent = `\n\n═══════════════════════════════════════════════════\nFULL ARTICLE CONTENT (From Source: "${target.title}" | ${target.url}):\n═══════════════════════════════════════════════════\n${pageText}\n═══════════════════════════════════════════════════`;
-                      break;
+                      const clippedPage = pageText.length > 3200 ? `${pageText.slice(0, 3200)}...` : pageText;
+                      scrapedBlocks.push(
+                        `═══════════════════════════════════════════════════\nFULL ARTICLE CONTENT (From Source: "${target.title}" | ${target.url}):\n═══════════════════════════════════════════════════\n${clippedPage}\n═══════════════════════════════════════════════════`
+                      );
                     }
                   } catch (e) {
                     console.warn('[web_search] Could not auto-scrape article:', e);
                   }
+                }
+                if (scrapedBlocks.length > 0) {
+                  topArticleContent = `\n\n${scrapedBlocks.join('\n\n')}`;
                 }
 
                 const searchSnippets = res.map((r, i) =>
                   `[Source ${i + 1}]: "${r.title}"\nURL: ${r.url}\nSnippet: ${r.snippet}`
                 ).join('\n\n');
 
-                result = `Search Results for query "${q}":\n\n${searchSnippets}${topArticleContent}\n\nSYNTHESIS DIRECTIVE (100% FACTUAL GROUNDING): Synthesize an accurate, well-structured response strictly grounded in the verified search results and article content above. If a "[LIVE VERIFIED DATA]" entry is present above, treat its exact figures (price, temperature, market quote) as 100% authoritative over any older news headlines. NEVER guess or invent facts, numbers, or URLs from training memory. State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable markdown source links at the end: [${topResult?.title || 'Source'}](${topResult?.url || ''}).`;
+                const directive = `SYNTHESIS DIRECTIVE (100% FACTUAL GROUNDING): Synthesize an accurate, comprehensive response strictly grounded in the verified search results and article content here. Detail the specific WHO, WHAT, WHEN, WHERE, and WHY (exact names, triggers, missing/kidnapped individuals, casualties, and numbers reported in the sources). NEVER invent speculative motives, connections, or narratives that are not explicitly stated in the sources. If a "[LIVE VERIFIED DATA]" entry is present, treat its exact figures as 100% authoritative. State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable markdown source links at the end: [${topResult?.title || 'Source'}](${topResult?.url || ''}).`;
+
+                result = `${directive}\n\nSearch Results for query "${q}":\n\n${searchSnippets}${topArticleContent}\n\n${directive}`;
               } else {
                 result = `No direct web search results matched the exact query "${q}". Do NOT repeat the same narrow query—either try a broader 2–3 word search term without internal codes, or answer the user's request directly using your domain knowledge and state the current date/time ("As of ${dateStr} at ${timeStr}...").`;
               }
@@ -1132,12 +1347,13 @@ ${projectBlock}CRITICAL DIRECTIVES:
             depth === 0 &&
             !disableTools &&
             hasWebSearchTool &&
-            isMandatoryWebSearchQuery(userDisplayContent);
+            isMandatoryWebSearchQuery(userDisplayContent, priorWebSearchQueries.length > 0);
 
           if (mustForceWebSearch) {
+            const contextualQueryHint = buildContextualSearchQuery(userDisplayContent, priorWebSearchQueries);
             apiMessages.push({
               role: 'system',
-              content: `MANDATORY TOOL CALL: The user is asking for real-time/current information ("${userDisplayContent.slice(0, 140)}"). You MUST invoke the \`web_search\` tool right now before writing any answer. Do NOT guess prices, news, weather, or URLs from training memory.`,
+              content: `MANDATORY TOOL CALL: The user is asking for real-time/current information ("${contextualQueryHint.slice(0, 140)}"). You MUST invoke the \`web_search\` tool right now before writing any answer. Do NOT guess prices, news, events, weather, or URLs from training memory.`,
             });
           }
 
@@ -1342,7 +1558,7 @@ ${projectBlock}CRITICAL DIRECTIVES:
 
           // ── Deterministic fallback: synthesize `web_search` if model skipped tool call on mandatory real-time query ──
           if (mustForceWebSearch && !hasToolCalls && !controller.signal.aborted) {
-            const cleanedQuery = extractCleanSearchQuery(userDisplayContent);
+            const cleanedQuery = buildContextualSearchQuery(userDisplayContent, priorWebSearchQueries);
             const syntheticCall: ToolCall = {
               id: `call_${generateId().slice(0, 8)}`,
               type: 'function',
@@ -1615,6 +1831,42 @@ ${projectBlock}CRITICAL DIRECTIVES:
             setChatStatus('thinking');
             await executeChatLoop(false, depth + 1, true); // Force final answer without tools
             return;
+          }
+
+          // ── Deterministic post-stream compliance for web_search responses ──
+          // Guarantee that every turn utilizing `web_search` includes the exact Current Date & Time
+          // ("As of ...") and clickable Markdown source links (`[Source Title](url)`), even if a smaller
+          // local LLM omits them during final synthesis.
+          if (
+            !hasToolCalls &&
+            webSearchSourcesThisTurn.length > 0 &&
+            finalMessage.content &&
+            finalMessage.content !== '[empty response]' &&
+            !controller.signal.aborted
+          ) {
+            let updatedContent = finalMessage.content;
+            const hasTimestamp = /\bAs of\b/i.test(updatedContent) || updatedContent.includes(dateStr);
+            const hasMarkdownSourceLinks = /\[[^\]]+\]\(https?:\/\/[^\s)]+\)/.test(updatedContent);
+
+            if (!hasTimestamp) {
+              updatedContent = `*As of ${dateStr} at ${timeStr}:*\n\n${updatedContent}`;
+            }
+            if (!hasMarkdownSourceLinks) {
+              const sourceLines = webSearchSourcesThisTurn
+                .slice(0, 4)
+                .map((s) => `- [${s.title.replace(/[\[\]]/g, '')}](${s.url})`)
+                .join('\n');
+              updatedContent = `${updatedContent.trimEnd()}\n\n### Sources\n${sourceLines}`;
+            }
+
+            if (updatedContent !== finalMessage.content) {
+              finalMessage = { ...finalMessage, content: updatedContent };
+              useChatStore.setState((state) => ({
+                messages: state.messages.map((m) =>
+                  m.id === finalMessage.id ? { ...m, content: updatedContent } : m
+                ),
+              }));
+            }
           }
 
           // ── Final response: Flush speechQueue if TTS enabled ──
