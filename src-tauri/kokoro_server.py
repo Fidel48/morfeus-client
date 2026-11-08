@@ -8,12 +8,64 @@ Runs on port 8880.
 import io
 import os
 import sys
+import urllib.request
 from pathlib import Path
 
-# Locate model files
-BASE_DIR = Path(__file__).resolve().parent.parent
-MODEL_PATH = BASE_DIR / "models" / "kokoro" / "kokoro-v1.0.onnx"
-VOICES_PATH = BASE_DIR / "models" / "kokoro" / "voices-v1.0.bin"
+MODEL_FILENAME = "kokoro-v1.0.onnx"
+VOICES_FILENAME = "voices-v1.0.bin"
+MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
+
+
+def resolve_kokoro_model_paths() -> tuple[Path, Path]:
+    home = Path.home()
+    candidates: list[Path] = []
+
+    env_dir = os.environ.get("MORFEUS_KOKORO_MODEL_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    script_base = Path(__file__).resolve().parent.parent
+    candidates.extend([
+        script_base / "models" / "kokoro",
+        Path(__file__).resolve().parent / "models" / "kokoro",
+        home / ".morfeus" / "models" / "kokoro",
+        home / "Library" / "Application Support" / "com.morfeus.app" / "models" / "kokoro",
+        home / "Documents" / "projects" / "morfeus" / "models" / "kokoro",
+        home / "projects" / "morfeus" / "models" / "kokoro",
+        home / "Desktop" / "morfeus" / "models" / "kokoro",
+    ])
+
+    for folder in candidates:
+        m_path = folder / MODEL_FILENAME
+        v_path = folder / VOICES_FILENAME
+        if m_path.exists() and v_path.exists():
+            return m_path, v_path
+
+    # Fallback: auto-download model files into ~/.morfeus/models/kokoro for standalone packaged installs
+    target_dir = home / ".morfeus" / "models" / "kokoro"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    m_path = target_dir / MODEL_FILENAME
+    v_path = target_dir / VOICES_FILENAME
+
+    try:
+        if not m_path.exists():
+            print(f"[Kokoro Server] Downloading {MODEL_FILENAME} to {m_path}...", file=sys.stderr)
+            tmp_m = target_dir / f"{MODEL_FILENAME}.part"
+            urllib.request.urlretrieve(MODEL_URL, str(tmp_m))
+            tmp_m.replace(m_path)
+        if not v_path.exists():
+            print(f"[Kokoro Server] Downloading {VOICES_FILENAME} to {v_path}...", file=sys.stderr)
+            tmp_v = target_dir / f"{VOICES_FILENAME}.part"
+            urllib.request.urlretrieve(VOICES_URL, str(tmp_v))
+            tmp_v.replace(v_path)
+    except Exception as dl_err:
+        print(f"[Kokoro Server] Failed to auto-download Kokoro model files: {dl_err}", file=sys.stderr)
+
+    return m_path, v_path
+
+
+MODEL_PATH, VOICES_PATH = resolve_kokoro_model_paths()
 
 if not MODEL_PATH.exists() or not VOICES_PATH.exists():
     print(f"[Kokoro Server] Error: Model files not found at {MODEL_PATH} or {VOICES_PATH}", file=sys.stderr)

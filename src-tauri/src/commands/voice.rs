@@ -33,6 +33,44 @@ extern "C" {
     fn check_and_request_mic_permission() -> i32;
 }
 
+/// Embedded compiled `mac_speech` Mach-O binary so installed `.app` / `.dmg` bundles
+/// built on remote CI runners (where compile-time `OUT_DIR` does not exist on the user's Mac)
+/// always have the native Apple `SFSpeechRecognizer` helper available.
+#[cfg(target_os = "macos")]
+const MAC_SPEECH_EMBEDDED: &[u8] = include_bytes!(env!("MAC_SPEECH_BIN"));
+
+#[cfg(target_os = "macos")]
+fn resolve_mac_speech_bin() -> Result<std::path::PathBuf, String> {
+    let compiled_path = std::path::Path::new(env!("MAC_SPEECH_BIN"));
+    if compiled_path.exists() {
+        return Ok(compiled_path.to_path_buf());
+    }
+
+    let target_path = std::env::temp_dir().join("morfeus_mac_speech_bin");
+    let needs_extract = match std::fs::metadata(&target_path) {
+        Ok(meta) => meta.len() != MAC_SPEECH_EMBEDDED.len() as u64,
+        Err(_) => true,
+    };
+
+    if needs_extract {
+        use std::os::unix::fs::PermissionsExt;
+        let stage_path = std::env::temp_dir().join(format!(
+            "morfeus_mac_speech_stage_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&stage_path, MAC_SPEECH_EMBEDDED)
+            .map_err(|e| format!("Failed to extract Apple Speech binary: {}", e))?;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&stage_path, perms)
+            .map_err(|e| format!("Failed to set permissions on Apple Speech binary: {}", e))?;
+        let _ = std::fs::remove_file(&target_path);
+        std::fs::rename(&stage_path, &target_path)
+            .map_err(|e| format!("Failed to finalize Apple Speech binary: {}", e))?;
+    }
+
+    Ok(target_path)
+}
+
 /// Start recording audio from the default microphone.
 /// Uses the device's native sample rate to avoid StreamConfigNotSupported.
 #[tauri::command]
@@ -92,8 +130,11 @@ pub async fn start_recording(
     std::thread::spawn(move || {
         let speech_detected = Arc::new(Mutex::new(false));
         let last_speech_time = Arc::new(Mutex::new(None::<std::time::Instant>));
+        let speech_onset_samples = Arc::new(Mutex::new(0usize));
         let speech_detected_cb = Arc::clone(&speech_detected);
         let last_speech_cb = Arc::clone(&last_speech_time);
+        let speech_onset_cb = Arc::clone(&speech_onset_samples);
+        let stream_opened_at = std::time::Instant::now();
 
         let host = cpal::default_host();
         let mut device_opt = host.default_input_device();
@@ -131,6 +172,9 @@ pub async fn start_recording(
 
         let samples_clone = Arc::clone(&samples_ref);
         let is_rec_clone = Arc::clone(&is_recording_ref);
+        // Require ~35ms of cumulative voice energy before flipping `speech_detected = true`
+        // so tiny transients/clicks are ignored while normal conversational speech is caught immediately.
+        let min_onset_samples = ((native_rate as usize) * 35) / 1000;
 
         let stream = match device.build_input_stream(
             &config,
@@ -142,8 +186,14 @@ pub async fn start_recording(
                 let is_continuous = IS_CONTINUOUS_MODE.load(Ordering::SeqCst);
                 let is_ai_speaking = IS_AI_SPEAKING.load(Ordering::SeqCst);
 
-                // Voice Activity Detection (RMS energy)
-                let sum_sq: f32 = data.iter().map(|&x| x * x).sum();
+                // Voice Activity Detection (RMS energy + Peak amplitude)
+                let mut peak = 0.0f32;
+                let mut sum_sq = 0.0f32;
+                for &x in data {
+                    let a = x.abs();
+                    if a > peak { peak = a; }
+                    sum_sq += a * a;
+                }
                 let rms = (sum_sq / data.len().max(1) as f32).sqrt();
 
                 // If AI is actively vocalizing through speakers:
@@ -166,6 +216,8 @@ pub async fn start_recording(
                     }
                 }
 
+                let mono_frames = data.len() / channels.max(1);
+
                 // Standard recording path (user speaking)
                 if let Ok(mut buf) = samples_clone.lock() {
                     // Mix down to mono
@@ -178,14 +230,38 @@ pub async fn start_recording(
                     }
                 }
 
-                // VAD with hysteresis: require 0.012 RMS to trigger speech onset (ignoring room/fan noise)
-                // and 0.009 RMS to sustain active speech so silence detection reliably fires after speaking.
-                if let Ok(mut sd) = speech_detected_cb.lock() {
-                    let thresh = if *sd { 0.009 } else { 0.012 };
-                    if rms > thresh {
-                        *sd = true;
-                        if let Ok(mut lst) = last_speech_cb.lock() {
-                            *lst = Some(std::time::Instant::now());
+                // VAD with hysteresis + peak detection calibrated for macOS laptop/headset hardware:
+                // Ambient fan/mic noise floor measures up to 0.0077 RMS / 0.013 Peak.
+                // True voice articulation onset requires energy cleanly above the room noise:
+                let is_voice = (rms > 0.0115 && peak > 0.022) || peak > 0.038;
+                // Sustaining active syllables requires voice energy distinctly above ambient noise floor:
+                let is_sustain = rms > 0.0098 || peak > 0.020;
+
+                if stream_opened_at.elapsed() >= std::time::Duration::from_millis(80) {
+                    if let Ok(mut sd) = speech_detected_cb.lock() {
+                        if *sd {
+                            if is_sustain {
+                                if let Ok(mut lst) = last_speech_cb.lock() {
+                                    *lst = Some(std::time::Instant::now());
+                                }
+                            }
+                        } else if is_voice {
+                            if let Ok(mut onset) = speech_onset_cb.lock() {
+                                *onset += mono_frames;
+                                if *onset >= min_onset_samples {
+                                    *sd = true;
+                                    let _ = crate::logger::log_to_file(
+                                        &app_handle_cb,
+                                        "info",
+                                        &format!("🎤 Voice onset detected (rms: {:.4}, peak: {:.4})", rms, peak),
+                                    );
+                                    if let Ok(mut lst) = last_speech_cb.lock() {
+                                        *lst = Some(std::time::Instant::now());
+                                    }
+                                }
+                            }
+                        } else if let Ok(mut onset) = speech_onset_cb.lock() {
+                            *onset = onset.saturating_sub(mono_frames / 2);
                         }
                     }
                 }
@@ -240,20 +316,43 @@ pub async fn start_recording(
                 continue;
             }
 
-            // Check if speech was detected followed by natural conversational silence (1300ms threshold)
+            // Check if speech was detected followed by natural conversational silence (1100ms threshold)
             // Allows natural thinking and breathing pauses without abruptly cutting the user off
             if has_spoken {
                 let last_time = last_speech_time.lock().map(|g| *g).unwrap_or(None);
                 if let Some(t) = last_time {
-                    let silence_threshold = if is_continuous { 1300 } else { 1450 };
+                    let silence_threshold = if is_continuous { 1100 } else { 1350 };
                     if t.elapsed() >= std::time::Duration::from_millis(silence_threshold) {
                         silence_emitted_at = Some(std::time::Instant::now());
+                        let _ = crate::logger::log_to_file(
+                            &app_handle,
+                            "info",
+                            &format!("Silence detected after speech ({}ms) -> emitting voice-silence-detected", silence_threshold),
+                        );
                         let _ = app_handle.emit("voice-silence-detected", ());
                     }
                 }
             }
 
-            // Idle safety timeout: if mic stays open with no speech for 14s, auto-stop
+            // In Continuous Mode, while waiting for the user to speak (`!has_spoken`),
+            // maintain a rolling 1.5-second pre-roll buffer so memory stays bounded and the
+            // microphone stays steadily open without blinking off/on every 14 seconds.
+            if is_continuous && !has_spoken {
+                let onset_active = speech_onset_samples.lock().map(|g| *g > 0).unwrap_or(false);
+                if !onset_active {
+                    if let Ok(mut buf) = samples_ref.lock() {
+                        let max_preroll = ((native_rate as usize) * 15) / 10;
+                        if buf.len() > max_preroll * 2 {
+                            let drain_count = buf.len() - max_preroll;
+                            buf.drain(0..drain_count);
+                        }
+                    }
+                }
+                start_time = std::time::Instant::now();
+                continue;
+            }
+
+            // Idle safety timeout (manual one-shot mode only): if mic stays open with no speech for 14s, auto-stop
             if !has_spoken && start_time.elapsed() >= std::time::Duration::from_secs(14) {
                 silence_emitted_at = Some(std::time::Instant::now());
                 let _ = app_handle.emit("voice-silence-detected", ());
@@ -307,8 +406,8 @@ pub async fn stop_and_transcribe(
                     max_peak = abs;
                 }
             }
-            let gain = if max_peak > 0.01 {
-                (0.85 / max_peak).clamp(1.0, 3.5)
+            let gain = if max_peak > 0.005 {
+                (0.85 / max_peak).clamp(1.0, 8.0)
             } else {
                 1.0
             };
@@ -327,8 +426,8 @@ pub async fn stop_and_transcribe(
                 writer.finalize().map_err(|e| e.to_string())?;
             }
 
-            let mac_speech_bin = env!("MAC_SPEECH_BIN");
-            let output = std::process::Command::new(mac_speech_bin)
+            let mac_speech_bin = resolve_mac_speech_bin()?;
+            let output = std::process::Command::new(&mac_speech_bin)
                 .arg(&temp_wav)
                 .output()
                 .map_err(|e| format!("Failed to execute Apple Speech recognizer: {}", e))?;
@@ -336,6 +435,11 @@ pub async fn stop_and_transcribe(
             let _ = std::fs::remove_file(&temp_wav);
 
             let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let _ = crate::logger::log_to_file(
+                &app,
+                "info",
+                &format!("Apple Speech transcribed: '{}' (stderr: '{}')", text, String::from_utf8_lossy(&output.stderr).trim()),
+            );
             if text.is_empty() {
                 let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 if !err.is_empty() && !err.contains("timed out") {
@@ -463,8 +567,8 @@ pub async fn transcribe_native(base64_wav: String) -> Result<String, String> {
         
         std::fs::write(&temp_wav, &wav_bytes).map_err(|e| format!("Failed to save temp WAV: {}", e))?;
 
-        let mac_speech_bin = env!("MAC_SPEECH_BIN");
-        let output = std::process::Command::new(mac_speech_bin)
+        let mac_speech_bin = resolve_mac_speech_bin()?;
+        let output = std::process::Command::new(&mac_speech_bin)
             .arg(&temp_wav)
             .output()
             .map_err(|e| format!("Failed to execute Apple Speech recognizer: {}", e))?;
@@ -636,6 +740,8 @@ pub async fn stop_speaking() -> Result<(), String> {
 
 // ─── Kokoro Neural TTS Server & Playback ──────────────────────────────────────
 
+const KOKORO_SERVER_SCRIPT: &str = include_str!("../../kokoro_server.py");
+
 static KOKORO_STARTING: AtomicBool = AtomicBool::new(false);
 
 struct KokoroStartGuard;
@@ -647,6 +753,68 @@ impl Drop for KokoroStartGuard {
 
 fn is_kokoro_port_in_use() -> bool {
     std::net::TcpListener::bind("127.0.0.1:8880").is_err()
+}
+
+fn ensure_kokoro_server_script() -> Result<std::path::PathBuf, String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let morfeus_dir = std::path::PathBuf::from(home).join(".morfeus");
+    let _ = std::fs::create_dir_all(&morfeus_dir);
+    let target = morfeus_dir.join("kokoro_server.py");
+    let _ = std::fs::write(&target, KOKORO_SERVER_SCRIPT);
+    Ok(target)
+}
+
+fn resolve_uv_binary() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates = [
+        "/opt/homebrew/bin/uv".to_string(),
+        "/usr/local/bin/uv".to_string(),
+        format!("{}/.local/bin/uv", home),
+        format!("{}/.cargo/bin/uv", home),
+        "C:\\Users\\Default\\.cargo\\bin\\uv.exe".to_string(),
+    ];
+
+    for c in &candidates {
+        let p = std::path::Path::new(c);
+        if p.exists() {
+            return Some(p.to_path_buf());
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("which").arg("uv").output() {
+        if output.status.success() {
+            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path_str.is_empty() && std::path::Path::new(&path_str).exists() {
+                return Some(std::path::PathBuf::from(path_str));
+            }
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("uv").arg("--version").output() {
+        if output.status.success() {
+            return Some(std::path::PathBuf::from("uv"));
+        }
+    }
+
+    None
+}
+
+fn resolve_python3_binary() -> Option<std::path::PathBuf> {
+    let candidates = [
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+        "/usr/bin/python3",
+        "python3",
+    ];
+
+    for c in candidates {
+        let p = std::path::Path::new(c);
+        if p.exists() {
+            return Some(p.to_path_buf());
+        }
+    }
+
+    None
 }
 
 #[tauri::command]
@@ -671,7 +839,7 @@ pub async fn start_kokoro_server() -> Result<bool, String> {
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        for _ in 0..30 {
+        for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             if is_kokoro_running().await {
                 return Ok(true);
@@ -690,7 +858,7 @@ pub async fn start_kokoro_server() -> Result<bool, String> {
         return Ok(true);
     }
     if is_kokoro_port_in_use() {
-        for _ in 0..15 {
+        for _ in 0..20 {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             if is_kokoro_running().await {
                 return Ok(true);
@@ -699,46 +867,78 @@ pub async fn start_kokoro_server() -> Result<bool, String> {
         return Ok(is_kokoro_running().await);
     }
 
-    let uv_path = if std::path::Path::new("/opt/homebrew/bin/uv").exists() {
-        "/opt/homebrew/bin/uv"
-    } else {
-        "uv"
-    };
+    // Always ensure the embedded python server script exists in ~/.morfeus/kokoro_server.py
+    let script_path = ensure_kokoro_server_script()?;
 
-    let script_candidates = [
-        "src-tauri/kokoro_server.py",
-        "kokoro_server.py",
-        "../src-tauri/kokoro_server.py",
+    let home = std::env::var("HOME").unwrap_or_default();
+    let model_dir_candidates = [
+        format!("{}/.morfeus/models/kokoro", home),
+        "models/kokoro".to_string(),
+        "../models/kokoro".to_string(),
+        format!("{}/Documents/projects/morfeus/models/kokoro", home),
     ];
-
-    let mut script_path = None;
-    for candidate in &script_candidates {
-        if std::path::Path::new(candidate).exists() {
-            script_path = Some(candidate.to_string());
+    let mut resolved_model_dir = None;
+    for cand in &model_dir_candidates {
+        let p = std::path::Path::new(cand);
+        if p.join("kokoro-v1.0.onnx").exists() && p.join("voices-v1.0.bin").exists() {
+            resolved_model_dir = Some(cand.clone());
             break;
         }
     }
 
-    let script = match script_path {
-        Some(s) => s,
-        None => return Err("kokoro_server.py not found".to_string()),
-    };
+    let uv_opt = resolve_uv_binary();
+    let log_file_path = std::path::PathBuf::from(&home).join(".morfeus/kokoro_server.log");
+    let log_out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file_path)
+        .ok();
+    let log_err = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file_path)
+        .ok();
 
-    let mut cmd = tokio::process::Command::new(uv_path);
-    cmd.args([
-        "run",
-        "--with", "kokoro-onnx",
-        "--with", "soundfile",
-        "--with", "fastapi",
-        "--with", "uvicorn",
-        "python3",
-        &script,
-    ]);
+    if let Some(uv_path) = uv_opt {
+        let mut cmd = tokio::process::Command::new(uv_path);
+        cmd.args([
+            "run",
+            "--with", "kokoro-onnx",
+            "--with", "soundfile",
+            "--with", "fastapi",
+            "--with", "uvicorn",
+            "python3",
+            script_path.to_str().unwrap(),
+        ]);
+        if let Some(ref m_dir) = resolved_model_dir {
+            cmd.env("MORFEUS_KOKORO_MODEL_DIR", m_dir);
+        }
+        if let Some(out) = log_out {
+            cmd.stdout(out);
+        }
+        if let Some(err) = log_err {
+            cmd.stderr(err);
+        }
+        cmd.spawn().map_err(|e| format!("Failed to spawn Kokoro server with uv: {}", e))?;
+    } else if let Some(py3) = resolve_python3_binary() {
+        let mut cmd = tokio::process::Command::new(py3);
+        cmd.arg(script_path.to_str().unwrap());
+        if let Some(ref m_dir) = resolved_model_dir {
+            cmd.env("MORFEUS_KOKORO_MODEL_DIR", m_dir);
+        }
+        if let Some(out) = log_out {
+            cmd.stdout(out);
+        }
+        if let Some(err) = log_err {
+            cmd.stderr(err);
+        }
+        cmd.spawn().map_err(|e| format!("Failed to spawn Kokoro server with python3: {}", e))?;
+    } else {
+        return Err("Neither uv nor python3 was found to run Kokoro Neural TTS.".to_string());
+    }
 
-    cmd.spawn().map_err(|e| format!("Failed to spawn Kokoro server: {}", e))?;
-
-    // Wait up to 6 seconds for server to be healthy
-    for _ in 0..30 {
+    // Wait up to 15 seconds for server to initialize model and pass /health check
+    for _ in 0..75 {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         if is_kokoro_running().await {
             return Ok(true);
@@ -974,4 +1174,127 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_embedded_mac_speech_extraction_and_execution() {
+        assert!(
+            MAC_SPEECH_EMBEDDED.len() > 10_000,
+            "Embedded mac_speech binary must be non-empty"
+        );
+        let bin_path = resolve_mac_speech_bin().expect("Should resolve mac_speech binary");
+        assert!(bin_path.exists(), "Resolved mac_speech binary must exist");
+
+        // Also test forced extraction (simulating an installed .app on another Mac where OUT_DIR does not exist)
+        use std::os::unix::fs::PermissionsExt;
+        let extracted_path = std::env::temp_dir().join("morfeus_mac_speech_extracted_test");
+        let _ = std::fs::remove_file(&extracted_path);
+        std::fs::write(&extracted_path, MAC_SPEECH_EMBEDDED).expect("Write embedded bytes");
+        std::fs::set_permissions(&extracted_path, std::fs::Permissions::from_mode(0o755))
+            .expect("Set executable permissions");
+
+        let aiff_path = std::env::temp_dir().join("morfeus_test_stt.aiff");
+        let wav_path = std::env::temp_dir().join("morfeus_test_stt.wav");
+        let _ = std::process::Command::new("say")
+            .args(["-o", aiff_path.to_str().unwrap(), "Hello Morfeus continuous voice test"])
+            .status();
+        let _ = std::process::Command::new("afconvert")
+            .args([
+                "-f",
+                "WAVE",
+                "-d",
+                "LEI16@16000",
+                "-c",
+                "1",
+                aiff_path.to_str().unwrap(),
+                wav_path.to_str().unwrap(),
+            ])
+            .status();
+
+        if wav_path.exists() {
+            let output = std::process::Command::new(&extracted_path)
+                .arg(&wav_path)
+                .output()
+                .expect("Execute extracted mac_speech binary");
+            let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            assert!(
+                stdout.contains("hello") || stdout.contains("voice"),
+                "Expected transcription from extracted mac_speech binary, got stdout={:?} stderr={:?}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let _ = std::fs::remove_file(&aiff_path);
+        let _ = std::fs::remove_file(&wav_path);
+        let _ = std::fs::remove_file(&extracted_path);
+    }
+
+    #[test]
+    fn test_ambient_noise_level() {
+        let host = cpal::default_host();
+        let device = match host.default_input_device() {
+            Some(d) => d,
+            None => {
+                println!("No default input device found");
+                return;
+            }
+        };
+
+        let config = match device.default_input_config() {
+            Ok(c) => c,
+            Err(e) => {
+                println!("No default input config: {}", e);
+                return;
+            }
+        };
+
+        let stats = Arc::new(Mutex::new((0.0f32, 0.0f32, 0usize))); // max_rms, max_peak, count
+        let stats_cb = Arc::clone(&stats);
+
+        let stream = match device.build_input_stream(
+            &config.into(),
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let mut peak = 0.0f32;
+                let mut sum_sq = 0.0f32;
+                for &x in data {
+                    let a = x.abs();
+                    if a > peak { peak = a; }
+                    sum_sq += a * a;
+                }
+                let rms = (sum_sq / data.len().max(1) as f32).sqrt();
+                if let Ok(mut s) = stats_cb.lock() {
+                    if rms > s.0 { s.0 = rms; }
+                    if peak > s.1 { s.1 = peak; }
+                    s.2 += 1;
+                }
+            },
+            |err| eprintln!("Stream error: {}", err),
+            None,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("Failed to build stream: {}", e);
+                return;
+            }
+        };
+
+        let _ = stream.play();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        drop(stream);
+
+        let (max_rms, max_peak, count) = {
+            let s = stats.lock().unwrap();
+            (s.0, s.1, s.2)
+        };
+
+        println!(
+            "\n====== AMBIENT MIC MEASUREMENT ======\nMax RMS: {:.6}\nMax Peak: {:.6}\nBuffer chunks: {}\n=====================================",
+            max_rms, max_peak, count
+        );
+    }
 }

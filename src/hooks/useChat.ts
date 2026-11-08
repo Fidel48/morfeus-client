@@ -282,7 +282,7 @@ export function isMandatoryWebSearchQuery(text: string, hasPriorWebSearch = fals
       return true;
     }
     const isPureAcknowledgement =
-      /^(?:thanks|thank you|thx|ty|ok|okay|k|got it|cool|great|awesome|perfect|nice|good|makes sense|understood|bye|goodbye|hello|hi|hey|yes|no|yep|nope)[.!?\s]*$/i.test(trimmed);
+      /^(?:thanks|thank\s+you|thx|ty|ok|okay|k|got\s+it|cool|great|awesome|perfect|nice|good|makes\s+sense|understood|bye|goodbye|hello|hi|hey|yes|no|yep|nope)(?:\s+(?:so\s+much|very\s+much|a\s+lot|for\s+(?:the\s+|that\s+|this\s+|your\s+)?(?:info(?:rmation)?|update|help|answer|explanation|details|clarification)|morfeus|buddy|friend|man))*[.!?\s]*$/i.test(trimmed);
     if (!isPureAcknowledgement && trimmed.length >= 3) {
       return true;
     }

@@ -92,6 +92,11 @@ morfeus/
   - **Right Panel**: Autonomous Agent Coder panel with collapsible drawer.
   - **Workspace & Storage**: Native project picker with recent projects, scratchpad launcher, and persistent disk storage via `@tauri-apps/plugin-store`.
   - **Surgical Tools & Resilience**: `grep_search`, `read_file_range`, `replace_in_file`, per-file read throttling (anti-loop protection), and fallback parsing for models emitting raw `<tool_call>` XML.
+- **v0.1.31**: Production Voice & Speech Resilience Release:
+  - **Embedded Native Speech Recognizer**: Embedded Apple Speech recognizer binary (`mac_speech`) directly into the Rust executable via `include_bytes!` with automatic runtime extraction, permissions (`0755`), and embedded `Info.plist` for macOS TCC speech recognition authorization.
+  - **Hardware-Calibrated VAD**: Dual peak amplitude and RMS energy voice activity detection calibrated against real macOS microphone noise floors (`0.0077 RMS`), eliminating false continuous voice loops while ensuring automatic conversational pause detection (1.05s) directly dispatches transcribed text to chat.
+  - **Standalone Kokoro Neural TTS**: Embedded `kokoro_server.py` in the binary with multi-path `uv` discovery (`/opt/homebrew/bin/uv`, `/usr/local/bin/uv`, `~/.local/bin/uv`, `~/.cargo/bin/uv`, PATH) and python3 fallback, extended health-check timeout to 15s for ONNX model initialization, and added interactive Error (Retry) action in Voice settings.
+  - **EndCallTool & Context Breakdown**: Integrated native `end_call` tool for natural conversational hang-up phrases and real-time context token usage breakdown popover.
 
 ---
 

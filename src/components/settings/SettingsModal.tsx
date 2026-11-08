@@ -1208,10 +1208,20 @@ const VoiceTab: React.FC<{
               </div>
             )}
             {engineStatus === 'error' && (
-              <div className="flex items-center gap-1 text-[10px] text-red-400">
+              <button
+                type="button"
+                onClick={() => {
+                  setEngineStatus('loading');
+                  tauriApi.startKokoroServer().then((ok) => {
+                    setEngineStatus(ok ? 'ready' : 'error');
+                  }).catch(() => setEngineStatus('error'));
+                }}
+                className="flex items-center gap-1 text-[10px] text-red-400 hover:text-red-300 hover:underline cursor-pointer"
+                title="Click to retry launching Kokoro Neural TTS server"
+              >
                 <AlertCircle size={10} />
-                Error
-              </div>
+                <span>Error (Retry)</span>
+              </button>
             )}
           </div>
         </div>
