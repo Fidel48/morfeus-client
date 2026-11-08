@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { AppSettings, Model, ModelCatalogItem, ModelProviderConfig, ProviderType } from '@/types';
 import { tauriApi } from '@/lib/tauri';
-import { fetchModels, testConnection } from '@/lib/api';
+import { fetchModels, testConnection, fetchOllamaModelContext } from '@/lib/api';
 
 export const DEFAULT_PROVIDERS: ModelProviderConfig[] = [
   {
@@ -286,6 +286,14 @@ export const useSettingsStore = create<SettingsStore>()(
         if (get().isLoaded) {
           get().saveToBackend().catch(() => {});
         }
+        if (partial.model_id || partial.base_url) {
+          const current = get().settings;
+          const targetModel = partial.model_id || current.model_id;
+          const targetUrl = partial.base_url || current.base_url;
+          if (targetModel && targetUrl) {
+            fetchOllamaModelContext(targetUrl, targetModel).catch(() => {});
+          }
+        }
       },
 
       setAvailableModels: (models) => set({ availableModels: models }),
@@ -443,6 +451,9 @@ export const useSettingsStore = create<SettingsStore>()(
           });
 
           set({ settings: merged, isLoaded: true });
+          if (merged.model_id && merged.base_url) {
+            fetchOllamaModelContext(merged.base_url, merged.model_id).catch(() => {});
+          }
         } catch {
           set((state) => ({
             settings: sanitizeAppSettings(state.settings),

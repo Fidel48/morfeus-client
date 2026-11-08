@@ -59,6 +59,7 @@ pub fn run() {
             // LLM proxy (bypasses CORS — all API calls go through Rust)
             commands::llm::proxy_test_connection,
             commands::llm::proxy_fetch_models,
+            commands::llm::proxy_get_ollama_context,
             commands::llm::proxy_stream_chat,
             commands::llm::proxy_cancel_stream,
             // Voice / STT

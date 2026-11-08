@@ -14,7 +14,7 @@ import { useVoiceStore } from '@/stores/voiceStore';
 import { ContentPart, Message } from '@/types';
 import { cn, bytesToBase64, isVisionModel, resizeImage } from '@/lib/utils';
 import { estimateTokenCount, trimHistoryToContext } from '@/lib/chatHistory';
-import { FAST_CHAT_TOOLS, WEB_TOOLS } from '@/lib/api';
+import { FAST_CHAT_TOOLS, WEB_TOOLS, resolveEffectiveContextLength } from '@/lib/api';
 
 function formatCompactTokens(tokens: number): string {
   if (!tokens || tokens <= 0) return '0';
@@ -723,7 +723,10 @@ export const ChatWindow: React.FC = () => {
   const isEmpty = messages.length === 0 && !isStreaming;
 
   const contextStats = useMemo(() => {
-    const maxContext = Math.max(settings.context_length || 16384, 4096);
+    const activeModelId = isFastMode
+      ? (settings.fast_chat_model_id || settings.model_id)
+      : (settings.agent_coder_model_id || settings.model_id);
+    const maxContext = Math.max(resolveEffectiveContextLength(activeModelId, settings.context_length), 4096);
     const sysBase = isFastMode
       ? 680
       : 1050 + estimateTokenCount(settings.system_prompt || '');
@@ -776,6 +779,9 @@ export const ChatWindow: React.FC = () => {
     settings.max_tokens,
     settings.system_prompt,
     settings.tts_enabled,
+    settings.fast_chat_model_id,
+    settings.agent_coder_model_id,
+    settings.model_id,
     isFastMode,
     messages,
     isStreaming,

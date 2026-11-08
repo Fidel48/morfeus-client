@@ -623,6 +623,76 @@ export const FAST_CHAT_TOOLS: ToolDefinition[] = WEB_TOOLS.filter((t) =>
   FAST_CHAT_TOOL_NAMES.has(t.function.name)
 );
 
+// ─── Model Context Resolution ───────────────────────────────────────────────
+
+/** In-memory cache for dynamic model context limits (e.g. from Ollama /api/show) */
+const modelContextLimitCache = new Map<string, number>();
+
+/**
+ * Detect physical context window limits encoded in model identifiers
+ * (e.g. "gemma-4-12b-16k", "qwen2.5-coder-32k", "llama-3-8k", "mistral-7b-4k", etc.)
+ */
+export function detectModelContextLimit(modelId?: string): number | null {
+  if (!modelId) return null;
+  const lower = modelId.toLowerCase();
+  if (modelContextLimitCache.has(lower)) {
+    return modelContextLimitCache.get(lower)!;
+  }
+  // Match explicit context tags in model name: e.g. "16k", "-16k", "_16k", ":16k", "8k", "32k", etc.
+  const match = lower.match(/(?:^|[-_:])(2|4|8|16|32|64|128|256)k(?::|$|[-_])/);
+  if (match) {
+    const k = parseInt(match[1], 10);
+    if (!isNaN(k)) return k * 1024;
+  }
+  if (lower.includes('phi-3-mini-4k') || lower.includes('phi-2')) return 4096;
+  if (lower.includes('llama-2-')) return 4096;
+  if (lower.includes('mistral-7b-v0.1') || lower.includes('mistral-7b-v0.2')) return 8192;
+  return null;
+}
+
+/**
+ * Resolves the effective context length for a given model, ensuring that user
+ * settings never exceed what the physical model architecture supports.
+ */
+export function resolveEffectiveContextLength(
+  modelId: string | undefined,
+  configuredContext: number | undefined
+): number {
+  const detected = detectModelContextLimit(modelId);
+  const userSetting = configuredContext && configuredContext >= 1024 ? configuredContext : 16384;
+  if (detected != null) {
+    // If the model physically specifies a limit (e.g. 16k, 8k, 4k), never allow
+    // the configured setting to exceed that physical limit.
+    return Math.min(userSetting, detected);
+  }
+  return userSetting;
+}
+
+/** Record a dynamically detected context limit for a model (e.g. from Ollama /api/show) */
+export function recordModelContextLimit(modelId: string, limit: number): void {
+  if (modelId && limit >= 1024) {
+    modelContextLimitCache.set(modelId.toLowerCase(), limit);
+  }
+}
+
+/** Fetch dynamic context limit for Ollama models via Rust proxy (bypasses CORS) */
+export async function fetchOllamaModelContext(baseUrl: string, modelName: string): Promise<number | null> {
+  if (!baseUrl || !modelName) return null;
+  try {
+    const ctx = await invoke<number | null>('proxy_get_ollama_context', {
+      baseUrl,
+      modelName,
+    });
+    if (ctx && typeof ctx === 'number' && ctx >= 1024) {
+      recordModelContextLimit(modelName, ctx);
+      return ctx;
+    }
+  } catch (e) {
+    console.debug('[OllamaContext] Failed to query model context:', e);
+  }
+  return null;
+}
+
 // ─── Model list ──────────────────────────────────────────────────────────────
 
 /** Fetch available models via Rust backend (no CORS) */
@@ -679,8 +749,9 @@ export async function* streamChat(
   const isThink = settings.think_enabled ?? true;
   const isLocalServer = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(settings.base_url || '');
 
+  const effectiveContext = resolveEffectiveContextLength(settings.model_id, settings.context_length);
   const safeMaxTokens = Math.max(settings.max_tokens || 2048, 1024);
-  const safeContextLength = Math.max(settings.context_length || 16384, 4096);
+  const safeContextLength = Math.max(effectiveContext, 4096);
 
   const body: any = {
     model: settings.model_id,
@@ -688,10 +759,10 @@ export async function* streamChat(
     temperature: settings.temperature,
     top_p: settings.top_p,
     max_tokens: safeMaxTokens,
-    frequency_penalty: settings.frequency_penalty,
-    // NOTE: no hardcoded repetition_penalty. Code and shell commands are legitimately repetitive
-    // (docker exec ... docker exec ...), and a global penalty makes local models mangle flags/paths.
-    // Users can still tune frequency_penalty in settings.
+    frequency_penalty:
+      settings.frequency_penalty !== undefined && settings.frequency_penalty > 0
+        ? settings.frequency_penalty
+        : (isLocalServer ? 0.2 : 0.0),
     stream: true,
     think: isThink,
     reasoning_effort: isThink ? 'medium' : (isLocalServer ? 'none' : 'low'),
@@ -699,7 +770,12 @@ export async function* streamChat(
     chat_template_kwargs: { think: isThink },
     ...(allTools.length > 0 ? { tools: allTools } : {}), // omit tools key entirely when empty — some servers reject tools: []
     num_ctx: safeContextLength,
-    options: { num_ctx: safeContextLength },
+    options: {
+      num_ctx: safeContextLength,
+      // For local Ollama/LM Studio endpoints, supply Ollama's standard 1.1 repetition penalty
+      // so smaller 7B-14B models do not loop on structured multiple-choice questions or syntax.
+      ...(isLocalServer ? { repeat_penalty: 1.1 } : {}),
+    },
   };
 
   // Chunk queue + resolver for async push/pull

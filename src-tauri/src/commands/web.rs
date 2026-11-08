@@ -780,13 +780,8 @@ pub async fn search_duckduckgo(query: String) -> Result<Vec<SearchResult>, Strin
                 }
             }
         }
-        // Only append encyclopedic Wikipedia results when news/web returned 0 results
-        // or when the query is a study/reference lookup (not a breaking/latest news query)
-        let is_news_query = {
-            let lq = effective_query.to_lowercase();
-            lq.contains("news") || lq.contains("headlines") || lq.contains("breaking")
-        };
-        if results.len() == live_feed_count || (!is_news_query && results.len() < 3) {
+        // Only append encyclopedic Wikipedia results when web/news searches returned 0 results
+        if results.len() == live_feed_count {
             search_wikipedia(&client, &effective_query, &mut results).await;
         }
     }

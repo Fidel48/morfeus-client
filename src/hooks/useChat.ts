@@ -4,7 +4,7 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { useMcpStore } from '@/stores/mcpStore';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { useProjectStore } from '@/stores/projectStore';
-import { streamChat, WEB_TOOLS, FAST_CHAT_TOOLS } from '@/lib/api';
+import { streamChat, WEB_TOOLS, FAST_CHAT_TOOLS, resolveEffectiveContextLength } from '@/lib/api';
 import { tauriApi } from '@/lib/tauri';
 import { sanitizeHistory, trimHistoryToContext } from '@/lib/chatHistory';
 import { kokoroSpeak, kokoroStop, speechQueue } from '@/lib/kokoroTts';
@@ -674,16 +674,17 @@ ${ctx ? `\n${ctx}\n` : ''}
         // context window setting is respected exactly as configured.
         const REASONING_HEADROOM = 6144;
         const baseMaxTokens = Math.max(currentSettings.max_tokens || 4096, 1024);
-        const userContext = Math.max(currentSettings.context_length || 16384, 8192);
+        const effectiveContext = resolveEffectiveContextLength(resolvedModelId, currentSettings.context_length);
         const effectiveMaxTokens = isThink
-          ? Math.max(baseMaxTokens, Math.min(baseMaxTokens + REASONING_HEADROOM, Math.floor(userContext / 2)))
-          : baseMaxTokens;
+          ? Math.max(baseMaxTokens, Math.min(baseMaxTokens + REASONING_HEADROOM, Math.floor(effectiveContext / 2)))
+          : Math.min(baseMaxTokens, Math.floor(effectiveContext / 2));
 
         const effectiveSettings: AppSettings = {
           ...currentSettings,
           base_url: effectiveBaseUrl,
           api_key: effectiveApiKey,
           model_id: resolvedModelId,
+          context_length: effectiveContext,
           max_tokens: effectiveMaxTokens,
         };
 
@@ -813,8 +814,8 @@ ${projectBlock}CRITICAL DIRECTIVES:
           // the active turn (user query + tool calls + tool results).
           const fittedMsgs = trimHistoryToContext(allMsgs, {
             systemPrompt,
-            contextLength: effectiveSettings.context_length || settings.context_length || 8192,
-            maxTokens: effectiveSettings.max_tokens || settings.max_tokens || 2048,
+            contextLength: effectiveSettings.context_length || 16384,
+            maxTokens: effectiveSettings.max_tokens || 2048,
           });
 
           const history: any[] = [];
@@ -1574,16 +1575,24 @@ ${projectBlock}CRITICAL DIRECTIVES:
                   console.warn('[Repetition] Loop detected — aborting stream');
                   tauriApi.appendSystemLog('warn', 'Repetition loop detected. Auto-aborting.');
                   repetitionAborted = true;
-                  // Trim output back to last clean sentence
+                  // Trim output back to the last clean sentence boundary within recent output
                   const current = useChatStore.getState().streamingContent;
                   if (current) {
-                    const cutoff = Math.floor(current.length * 0.8);
-                    let cleanEnd = -1;
-                    for (const m of current.matchAll(/[.!?]\s/g)) {
-                      if (m.index != null && m.index < cutoff) cleanEnd = m.index + 1;
+                    const searchWindow = Math.min(current.length, 250);
+                    const head = current.slice(0, current.length - searchWindow);
+                    const tail = current.slice(current.length - searchWindow);
+                    let lastSentenceIdx = -1;
+                    for (const m of tail.matchAll(/[.!?](?:\s|\n|$)/g)) {
+                      if (m.index != null && m.index < tail.length - 15) {
+                        lastSentenceIdx = m.index + 1;
+                      }
                     }
+                    const cleanOutput = lastSentenceIdx > 0
+                      ? `${head}${tail.slice(0, lastSentenceIdx)}`.trimEnd()
+                      : current.slice(0, Math.max(50, current.length - 80)).trimEnd();
+
                     useChatStore.setState({
-                      streamingContent: cleanEnd > 50 ? current.slice(0, cleanEnd).trimEnd() : current.slice(0, cutoff).trimEnd(),
+                      streamingContent: cleanOutput,
                     });
                   }
                   controller.abort();
@@ -1730,8 +1739,13 @@ ${projectBlock}CRITICAL DIRECTIVES:
                     'Continue directly from the exact word or character where you left off. Do not repeat what you already wrote and do not add any preamble.',
                 },
               ];
+              const fittedContMessages = trimHistoryToContext(contMessages, {
+                systemPrompt,
+                contextLength: effectiveSettings.context_length,
+                maxTokens: 2048,
+              });
               let contText = '';
-              for await (const contChunk of streamChat(effectiveSettings, contMessages, controller.signal, [], true)) {
+              for await (const contChunk of streamChat(effectiveSettings, fittedContMessages, controller.signal, [], true)) {
                 if (controller.signal.aborted) break;
                 const contChoice = contChunk?.choices?.[0];
                 const contDelta = contChoice?.delta?.content;

@@ -182,4 +182,32 @@ describe('trimHistoryToContext', () => {
     // And trimmed[1] should be an assistant message so roles alternate cleanly
     expect(trimmed[1].role).toBe('assistant');
   });
+
+  it('guarantees prompt tokens never exceed safePromptCeiling (75% of context) in long 50-turn sessions', () => {
+    // 55 questions typical of Pearson VUE insurance exam
+    const msgs: Array<{ role: string; content: string }> = [];
+    for (let q = 1; q <= 55; q++) {
+      msgs.push({
+        role: 'assistant',
+        content: `Question ${q}: What is the North Carolina statute rule for licensing requirement section ${q}? A. Option A B. Option B C. Option C D. Option D`,
+      });
+      msgs.push({ role: 'user', content: `Answer ${q}` });
+    }
+
+    const maxContext = 16384;
+    const maxTokens = 4096;
+    const trimmed = trimHistoryToContext(msgs, {
+      systemPrompt: 'You are an AI study assistant.',
+      contextLength: maxContext,
+      maxTokens,
+    });
+
+    let totalMsgTokens = 0;
+    for (const m of trimmed) {
+      totalMsgTokens += 20 + estimateTokenCount(m.content);
+    }
+    const safePromptCeiling = Math.min(maxContext - maxTokens, Math.floor(maxContext * 0.75));
+    expect(totalMsgTokens).toBeLessThanOrEqual(safePromptCeiling);
+    expect(trimmed[trimmed.length - 1].content).toBe('Answer 55');
+  });
 });

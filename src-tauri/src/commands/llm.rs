@@ -148,6 +148,38 @@ pub async fn proxy_fetch_models(
     Err(format!("Could not parse model list from server. Raw response: {}", body.chars().take(300).collect::<String>()))
 }
 
+/// Query Ollama's /api/show endpoint for a model's configured context window (num_ctx).
+#[tauri::command]
+pub async fn proxy_get_ollama_context(
+    base_url: String,
+    model_name: String,
+) -> Result<Option<u32>, String> {
+    let origin = base_url.trim_end_matches('/').trim_end_matches("/v1");
+    let url = format!("{}/api/show", origin);
+    let client = make_client();
+    let body = serde_json::json!({ "name": model_name });
+
+    if let Ok(resp) = client.post(&url).json(&body).send().await {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(params) = json.get("parameters").and_then(|p| p.as_str()) {
+                    for line in params.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("num_ctx") {
+                            if let Some(val_str) = trimmed.split_whitespace().nth(1) {
+                                if let Ok(val) = val_str.parse::<u32>() {
+                                    return Ok(Some(val));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Registry of in-flight streams so the frontend can cancel them. Dropping the HTTP response
 /// closes the connection, which makes Ollama / LM Studio stop generating immediately instead of
 /// burning GPU on an answer nobody will read (and queueing the next request behind it).

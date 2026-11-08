@@ -104,12 +104,20 @@ export function trimHistoryToContext<T extends Msg>(
   if (!allMsgs.length) return [];
 
   const maxContext = options.contextLength && options.contextLength > 0 ? options.contextLength : 8192;
+  const requestedMax = options.maxTokens && options.maxTokens > 0 ? options.maxTokens : 2048;
+  // Reserve at least 25% of context or the requested maxTokens (up to 35% of maxContext),
+  // with a minimum of 256 tokens, so the model always has adequate generation space.
   const completionHeadroom = Math.min(
-    options.maxTokens && options.maxTokens > 0 ? options.maxTokens : 2048,
-    Math.max(128, Math.floor(maxContext * 0.25)),
-    1024
+    requestedMax,
+    Math.max(256, Math.floor(maxContext * 0.35))
   );
-  const baseBudget = estimateTokenCount(options.systemPrompt) + completionHeadroom;
+  // Cap the prompt token budget so prompt tokens never exceed 75% of maxContext,
+  // preventing Ollama RoPE interpolation degradation and OOM prompt evaluation hangs.
+  const safePromptCeiling = Math.min(
+    maxContext - completionHeadroom,
+    Math.floor(maxContext * 0.75)
+  );
+  const baseBudget = estimateTokenCount(options.systemPrompt);
   let budget = baseBudget;
 
   // Identify the start of the active turn (the latest user message)
@@ -127,7 +135,7 @@ export function trimHistoryToContext<T extends Msg>(
     const isCurrentTurn = activeTurnUserIdx >= 0 ? i >= activeTurnUserIdx : i === allMsgs.length - 1;
     const tokCost = 20 + estimateTokenCount(msg.api_content || msg.content) + (msg.tool_calls ? 50 : 0);
 
-    if (!isCurrentTurn && budget + tokCost > maxContext) {
+    if (!isCurrentTurn && budget + tokCost > safePromptCeiling) {
       oldestFitIdx = i + 1;
       break;
     }
@@ -154,14 +162,14 @@ export function trimHistoryToContext<T extends Msg>(
   if (pinnedIdx >= 0 && oldestFitIdx > pinnedIdx) {
     const pinnedMsg = allMsgs[pinnedIdx];
     const pinCost = 20 + estimateTokenCount(pinnedMsg.api_content || pinnedMsg.content);
-    if (pinCost <= Math.floor(maxContext * 0.7)) {
+    if (pinCost <= Math.floor(safePromptCeiling * 0.7)) {
       let pinBudget = baseBudget + pinCost;
       let recentStartIdx = pinnedIdx + 1;
       for (let i = allMsgs.length - 1; i > pinnedIdx; i--) {
         const msg = allMsgs[i];
         const isCurrentTurn = activeTurnUserIdx >= 0 ? i >= activeTurnUserIdx : i === allMsgs.length - 1;
         const tokCost = 20 + estimateTokenCount(msg.api_content || msg.content) + (msg.tool_calls ? 50 : 0);
-        if (!isCurrentTurn && pinBudget + tokCost > maxContext) {
+        if (!isCurrentTurn && pinBudget + tokCost > safePromptCeiling) {
           recentStartIdx = i + 1;
           break;
         }
@@ -178,11 +186,14 @@ export function trimHistoryToContext<T extends Msg>(
     }
   }
 
-  // KV-Cache Prefix Alignment: Snap starting message index down to a multiple of 4
-  // so that consecutive turns share the exact same leading message prefix instead of
-  // shifting by 1 on every turn and invalidating the entire LLM prompt cache.
+  // KV-Cache Prefix Alignment: Snap starting message index UP to a multiple of 4
+  // (dropping older messages rather than adding overflow messages back in) to preserve
+  // KV-cache prefix stability without exceeding the safe prompt budget.
   if (oldestFitIdx > 0 && activeTurnUserIdx > 0 && oldestFitIdx < activeTurnUserIdx) {
-    oldestFitIdx = Math.max(0, Math.floor(oldestFitIdx / 4) * 4);
+    const aligned = Math.ceil(oldestFitIdx / 4) * 4;
+    if (aligned <= activeTurnUserIdx) {
+      oldestFitIdx = aligned;
+    }
   }
 
   return allMsgs.slice(oldestFitIdx);
