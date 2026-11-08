@@ -50,6 +50,9 @@ export function extractCleanSearchQuery(text: string): string {
     .replace(/[?.!]+$/g, '')
     .replace(/^(?:an|ca|cn)\s+you\s+/i, 'can you ')
     .replace(/\b(?:lates|lastes|latets|lastest)\s+news\b/gi, 'latest news')
+    .replace(/\b(?:happeing|hapening|happenning)\b/gi, 'happening')
+    .replace(/\b(?:heiti|heati|hiati|hatii)\b/gi, 'Haiti')
+    .replace(/\b(?:salavdor|salvabdor)\b/gi, 'Salvador')
     .replace(/\bthat\s+(latest|breaking|current)\s+news\b/gi, 'the $1 news')
     .trim();
   const prefixes = [
@@ -61,7 +64,7 @@ export function extractCleanSearchQuery(text: string): string {
     /^please (?:tell me|check|search(?: the web)? for|look up)\s+/i,
     /^(?:tell me|do you know)\s+/i,
     /^(?:search the web for|search online for|look up online|look up)\s+/i,
-    /^(?:what is the|what's the|whats the|what are the|the)\s+/i,
+    /^(?:what is the|what's the|whats the|what are the|what is|what's|whats|the)\s+/i,
   ];
   let changed = true;
   while (changed) {
@@ -186,6 +189,27 @@ export function buildContextualSearchQuery(userText: string, priorSearchQueries:
 }
 
 /**
+ * Detects when the user explicitly asks to end the call/chat or says goodbye
+ * (e.g. "end the call", "end the chat", "hang up", "goodbye", "bye", "that's all for now").
+ */
+export function isEndCallQuery(text: string): boolean {
+  if (!text) return false;
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 140) return false;
+  if (
+    /\b(end\s+(?:the\s+)?(?:call|chat|session|conversation)|hang\s+up|stop\s+listening|exit\s+voice(?:\s+mode)?|turn\s+off\s+continuous)\b/i.test(trimmed)
+  ) {
+    return true;
+  }
+  if (
+    /^(?:ok(?:ay)?[,.\s]+|alright[,.\s]+|well[,.\s]+|thank\s+you[,.\s]+|thanks[,.\s]+)*(?:good\s*bye|bye(?:\s*bye)?|see\s+you(?:\s+later)?|talk\s+to\s+you\s+later|have\s+a\s+(?:good|great)\s+(?:day|night|one)|that'?s\s+all(?:\s+for\s+now)?|i'?m\s+done(?:\s+for\s+now)?)(?:\s+morfeus)?[!.,?\s]*$/i.test(trimmed)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Detects queries that strictly require real-time web grounding (`web_search`) before answering
  * to complement a local LLM's limited/static built-in world knowledge:
  * - Explicit requests to search the web / look up online / fact-check
@@ -200,6 +224,7 @@ export function isMandatoryWebSearchQuery(text: string, hasPriorWebSearch = fals
   if (!text) return false;
   const trimmed = text.trim();
   if (!trimmed || trimmed.length > 500) return false;
+  if (isEndCallQuery(trimmed)) return false;
   if (isRemoteOrPastedLog(trimmed) || shouldEnableLocalFileToolsInFastChat(trimmed)) return false;
   if (/\[Attached (?:Document|File):/i.test(trimmed) || trimmed.includes('```')) return false;
   // Exclude coding/scripting/debugging/math/translation/quiz-proctoring requests
@@ -226,8 +251,11 @@ export function isMandatoryWebSearchQuery(text: string, hasPriorWebSearch = fals
     return true;
   }
 
-  // 4. Breaking / latest / today's news (including common typos like "lates news" / "lastes news"), sports scores, schedules, & current events
-  if (/\b(la(?:test|stes|tes|tets|stest)\s+news|breaking news|today'?s news|current news|recent news|what happened (?:today|recently|to|in)|what is happening (?:now|in)|top news|news (?:wise|about|in|from|on|for)|who won the|score of the|standings|next game)\b/i.test(trimmed)) {
+  // 4. Breaking / latest / today's news (including common typos like "lates news" / "lastes news" / "happeing"), sports scores, schedules, & current events
+  if (
+    /\b(la(?:test|stes|tes|tets|stest)\s+news|breaking news|today'?s news|current news|recent news|what (?:happened|is\s+(?:happen(?:ing)?|happeing|hapening|going\s+on))|what'?s\s+(?:happen(?:ing)?|happeing|hapening|going\s+on)|top news|news (?:wise|about|in|from|on|for)|current events|who won the|score of the|standings|next game)\b/i.test(trimmed) ||
+    /\b(?:happen(?:ing)?|happeing|hapening|going\s+on)\s+(?:in|with|to|at)\s+\w+/i.test(trimmed)
+  ) {
     return true;
   }
 
@@ -1233,6 +1261,18 @@ ${projectBlock}CRITICAL DIRECTIVES:
           } else if (name === 'remove_mcp_server') {
             await useMcpStore.getState().removeServer(args.id);
             result = `MCP server "${args.id}" has been removed and disconnected.`;
+          } else if (name === 'end_call') {
+            const farewell =
+              typeof args.farewell === 'string' && args.farewell.trim()
+                ? args.farewell.trim()
+                : 'Goodbye! Have a great rest of your day.';
+            useSettingsStore.getState().updateSettings({ continuous_voice: false });
+            useSettingsStore.getState().saveToBackend();
+            tauriApi.setContinuousMode(false).catch(() => {});
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('morfeus-end-call'));
+            }
+            result = farewell;
           } else if (name.startsWith('mcp__')) {
             const parts = name.split('__');
             if (parts.length >= 3) {
@@ -1340,6 +1380,50 @@ ${projectBlock}CRITICAL DIRECTIVES:
             }
           }
 
+          // ── Deterministic `end_call` fast-path when user says "end the call", "end the chat", "hang up", or "goodbye" ──
+          const hasEndCallTool = availableTools.some((t) => t.function.name === 'end_call');
+          if (
+            isInitialTurn &&
+            depth === 0 &&
+            !disableTools &&
+            hasEndCallTool &&
+            isEndCallQuery(userDisplayContent)
+          ) {
+            const farewell = 'Goodbye! Have a great rest of your day.';
+            const endCallId = `call_${generateId().slice(0, 8)}`;
+            const endCallObj: ToolCall = {
+              id: endCallId,
+              type: 'function',
+              function: {
+                name: 'end_call',
+                arguments: JSON.stringify({ farewell }),
+              },
+            };
+            await executeTool('end_call', { farewell }, endCallId);
+            addMessage({
+              id: generateId(),
+              conversation_id: convId!,
+              role: 'assistant',
+              content: farewell,
+              tool_calls: [endCallObj],
+              created_at: Date.now(),
+            });
+            addMessage({
+              id: generateId(),
+              conversation_id: convId!,
+              role: 'tool',
+              content: farewell,
+              tool_call_id: endCallId,
+              created_at: Date.now(),
+            });
+            const finalSettings = useSettingsStore.getState().settings;
+            if (finalSettings.tts_enabled) {
+              speechQueue.feedToken(farewell);
+              speechQueue.flush();
+            }
+            return;
+          }
+
           // ── Mandatory real-time web_search enforcement on depth 0 ──
           const hasWebSearchTool = availableTools.some((t) => t.function.name === 'web_search');
           const mustForceWebSearch =
@@ -1416,7 +1500,20 @@ ${projectBlock}CRITICAL DIRECTIVES:
           };
 
           let finishReason: string | null = null;
-          for await (const chunk of streamChat(effectiveSettings, apiMessages, controller.signal, availableTools, disableTools)) {
+          let reasoningTriggeredSearch = false;
+          const reasoningRequestsWebSearch = (rText: string): boolean =>
+            /\b(?:i\s+(?:will|should|need\s+to|must|am\s+going\s+to)\s+(?:perform|do|run|use|call|conduct|make)\s+(?:a\s+)?web\s*search|i\s+(?:will|should|need\s+to)\s+search\s+the\s+web|i\s+should\s+check\s+(?:for\s+)?current\s+events|let(?:'s|\s+me)\s+(?:perform\s+a\s+web\s+search|search\s+the\s+web|use\s+web_search)|call(?:ing)?\s+`?web_search`?)\b/i.test(rText);
+
+          // When `mustForceWebSearch` is true on depth 0, disable `think` for the initial tool-dispatch step
+          // so local models (Gemma 4, Qwen, DeepSeek) in Ollama do not hallucinate inside `<think>` before
+          // having search results or drop `tool_calls` after `</think>`. Once `web_search` completes,
+          // `depth >= 1` uses the user's full `effectiveSettings` (with `think_enabled: true` when Think is ON)
+          // so the model reasons over the verified web search results.
+          const turnStreamSettings = mustForceWebSearch
+            ? { ...effectiveSettings, think_enabled: false }
+            : effectiveSettings;
+
+          for await (const chunk of streamChat(turnStreamSettings, apiMessages, controller.signal, availableTools, disableTools)) {
             if (controller.signal.aborted) break;
             if (!chunk || !Array.isArray(chunk.choices) || chunk.choices.length === 0) continue;
 
@@ -1433,18 +1530,31 @@ ${projectBlock}CRITICAL DIRECTIVES:
 
             if (reasoningDelta) {
               appendReasoningToken(reasoningDelta);
+              if (
+                isInitialTurn &&
+                depth === 0 &&
+                !disableTools &&
+                hasWebSearchTool &&
+                !reasoningTriggeredSearch
+              ) {
+                const liveReasoning = useChatStore.getState().streamingReasoning || '';
+                if (reasoningRequestsWebSearch(liveReasoning)) {
+                  reasoningTriggeredSearch = true;
+                }
+              }
             }
 
             if (delta.content) {
               totalChars += delta.content.length;
 
-              // If this turn strictly requires `web_search` on depth 0, do not feed ungrounded
-              // plain-text guesses to TTS or the UI before `web_search` has been invoked.
-              if (mustForceWebSearch && !sawToolCallDelta) {
+              // If this turn strictly requires `web_search` on depth 0 (or the model's own `<think>` trace
+              // stated it will perform a web search), do not feed ungrounded plain-text guesses to TTS or the UI
+              // before `web_search` has been invoked.
+              if ((mustForceWebSearch || reasoningTriggeredSearch) && !sawToolCallDelta) {
                 mandatoryPlainBuffer += delta.content;
                 const trimmedBuf = mandatoryPlainBuffer.trimStart();
                 if (!trimmedBuf.startsWith('<tool_call>') && trimmedBuf.length > 24) {
-                  console.warn('[WebSearchGate] Model attempted ungrounded plain-text reply on mandatory real-time query — forcing web_search tool call');
+                  console.warn('[WebSearchGate] Model attempted ungrounded plain-text reply on mandatory/reasoning real-time query — forcing web_search tool call');
                   tauriApi.appendSystemLog('info', 'Forcing mandatory web_search tool call for real-time query.');
                   break;
                 }
@@ -1517,8 +1627,8 @@ ${projectBlock}CRITICAL DIRECTIVES:
             return;
           }
 
-          // If `mustForceWebSearch` buffered a text-based `<tool_call>` XML block, flush it so `parseTextToolCalls` can parse it
-          if (mustForceWebSearch && mandatoryPlainBuffer.includes('<tool_call>')) {
+          // If `mustForceWebSearch` or `reasoningTriggeredSearch` buffered a text-based `<tool_call>` XML block, flush it so `parseTextToolCalls` can parse it
+          if ((mustForceWebSearch || reasoningTriggeredSearch) && mandatoryPlainBuffer.includes('<tool_call>')) {
             appendStreamToken(mandatoryPlainBuffer);
           }
 
@@ -1557,7 +1667,7 @@ ${projectBlock}CRITICAL DIRECTIVES:
           }
 
           // ── Deterministic fallback: synthesize `web_search` if model skipped tool call on mandatory real-time query ──
-          if (mustForceWebSearch && !hasToolCalls && !controller.signal.aborted) {
+          if ((mustForceWebSearch || reasoningTriggeredSearch) && !hasToolCalls && !controller.signal.aborted) {
             const cleanedQuery = buildContextualSearchQuery(userDisplayContent, priorWebSearchQueries);
             const syntheticCall: ToolCall = {
               id: `call_${generateId().slice(0, 8)}`,
@@ -1571,13 +1681,14 @@ ${projectBlock}CRITICAL DIRECTIVES:
             finalMessage = {
               ...finalMessage,
               content: undefined,
+              reasoning: undefined,
               tool_calls: [syntheticCall],
             };
             hasToolCalls = true;
             useChatStore.setState((state) => ({
               messages: state.messages.map((m) =>
                 m.id === finalMessage.id
-                  ? { ...m, content: undefined, tool_calls: [syntheticCall] }
+                  ? { ...m, content: undefined, reasoning: undefined, tool_calls: [syntheticCall] }
                   : m
               ),
             }));
@@ -1789,6 +1900,24 @@ ${projectBlock}CRITICAL DIRECTIVES:
                 tool_call_id: tc.id,
                 created_at: Date.now(),
               });
+
+              // If the model invoked `end_call`, finalize the farewell message and stop the session immediately
+              if (toolName === 'end_call') {
+                const farewellText = finalMessage.content?.trim() || result;
+                useChatStore.setState((state) => ({
+                  messages: state.messages.map((m) =>
+                    m.id === finalMessage.id ? { ...m, content: farewellText } : m
+                  ),
+                }));
+                const finalSettings = useSettingsStore.getState().settings;
+                if (finalSettings.tts_enabled && !finalMessage.content?.trim()) {
+                  speechQueue.feedToken(farewellText);
+                  speechQueue.flush();
+                } else if (finalSettings.tts_enabled) {
+                  speechQueue.flush();
+                }
+                return;
+              }
             }
 
             if (controller.signal.aborted) return;

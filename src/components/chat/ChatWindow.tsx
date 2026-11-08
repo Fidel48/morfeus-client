@@ -13,6 +13,18 @@ import { speechQueue, interruptAiSpeech } from '@/lib/kokoroTts';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { ContentPart, Message } from '@/types';
 import { cn, bytesToBase64, isVisionModel, resizeImage } from '@/lib/utils';
+import { estimateTokenCount, trimHistoryToContext } from '@/lib/chatHistory';
+import { FAST_CHAT_TOOLS, WEB_TOOLS } from '@/lib/api';
+
+function formatCompactTokens(tokens: number): string {
+  if (!tokens || tokens <= 0) return '0';
+  if (tokens < 1000) return String(tokens);
+  if (tokens % 1024 === 0 && tokens >= 4096 && tokens <= 131072) {
+    return `${Math.round(tokens / 1024)}K`;
+  }
+  const k = tokens / 1000;
+  return k >= 100 ? `${Math.round(k)}K` : `${Number(k.toFixed(1))}K`;
+}
 
 interface Attachment {
   name: string;
@@ -65,8 +77,10 @@ export const ChatWindow: React.FC = () => {
   const [isParsing, setIsParsing] = useState(false);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
+  const [isContextPopoverOpen, setIsContextPopoverOpen] = useState(false);
   const [modelSearchQuery, setModelSearchQuery] = useState('');
   const modelMenuRef = useRef<HTMLDivElement>(null);
+  const contextPopoverRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const handleSendRef = useRef<(overrideText?: string | React.MouseEvent) => Promise<void> | void>(() => {});
@@ -708,6 +722,67 @@ export const ChatWindow: React.FC = () => {
 
   const isEmpty = messages.length === 0 && !isStreaming;
 
+  const contextStats = useMemo(() => {
+    const maxContext = Math.max(settings.context_length || 16384, 4096);
+    const sysBase = isFastMode
+      ? 680
+      : 1050 + estimateTokenCount(settings.system_prompt || '');
+    const systemTokens = sysBase + (settings.tts_enabled ? 95 : 0);
+    const activeToolDefs = isFastMode
+      ? FAST_CHAT_TOOLS.filter((t) => !['search_files', 'list_directory', 'get_special_dirs', 'read_local_file'].includes(t.function.name))
+      : WEB_TOOLS;
+    const toolTokens = estimateTokenCount(activeToolDefs);
+
+    const fitted = trimHistoryToContext(messages, {
+      systemPrompt: 'x'.repeat(systemTokens * 4),
+      contextLength: maxContext,
+      maxTokens: settings.max_tokens || 2048,
+    });
+
+    let msgTokens = 0;
+    for (const m of fitted) {
+      msgTokens += 12 + estimateTokenCount(m.api_content || m.content) + (m.tool_calls ? 45 : 0);
+    }
+    if (isStreaming && streamingContent) {
+      msgTokens += estimateTokenCount(streamingContent);
+    }
+    if (input.trim()) {
+      msgTokens += estimateTokenCount(input);
+    }
+
+    const hasActivity = messages.length > 0 || Boolean(input.trim()) || isStreaming;
+    const totalUsed = hasActivity ? systemTokens + toolTokens + msgTokens : 0;
+    const rawPct = (totalUsed / maxContext) * 100;
+    const percent = totalUsed === 0 ? 0 : Math.min(100, Math.max(1, Math.round(rawPct)));
+
+    return {
+      maxContext,
+      systemTokens,
+      toolTokens,
+      msgTokens,
+      totalUsed,
+      percent,
+      systemPct: Math.min(100, (systemTokens / maxContext) * 100),
+      toolPct: Math.min(100, (toolTokens / maxContext) * 100),
+      msgPct: Math.min(100, (msgTokens / maxContext) * 100),
+      maxLabel: formatCompactTokens(maxContext),
+      totalLabel: formatCompactTokens(totalUsed),
+      systemLabel: formatCompactTokens(systemTokens),
+      toolLabel: formatCompactTokens(toolTokens),
+      msgLabel: formatCompactTokens(msgTokens),
+    };
+  }, [
+    settings.context_length,
+    settings.max_tokens,
+    settings.system_prompt,
+    settings.tts_enabled,
+    isFastMode,
+    messages,
+    isStreaming,
+    streamingContent,
+    input,
+  ]);
+
   return (
     <div
       className="flex flex-col h-full relative"
@@ -1144,6 +1219,129 @@ export const ChatWindow: React.FC = () => {
                                 );
                               })
                           )}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                {/* Context Window Usage Pill & Breakdown Popover */}
+                <div
+                  className="relative"
+                  ref={contextPopoverRef}
+                  onMouseEnter={() => setIsContextPopoverOpen(true)}
+                  onMouseLeave={() => setIsContextPopoverOpen(false)}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setIsContextPopoverOpen((prev) => !prev)}
+                    className={cn(
+                      'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-mono transition-all select-none cursor-pointer',
+                      contextStats.percent >= 85
+                        ? 'bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/20'
+                        : contextStats.percent >= 65
+                        ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20'
+                        : 'bg-white/5 hover:bg-white/10 border-white/8 text-zinc-400 hover:text-zinc-200'
+                    )}
+                    title={`Context used: ~${contextStats.totalLabel} / ${contextStats.maxLabel} tokens (${contextStats.percent}%)`}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 16 16" className="flex-shrink-0 -rotate-90">
+                      <circle
+                        cx="8"
+                        cy="8"
+                        r="5.5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.75"
+                        className="opacity-25"
+                      />
+                      <circle
+                        cx="8"
+                        cy="8"
+                        r="5.5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.75"
+                        strokeDasharray={2 * Math.PI * 5.5}
+                        strokeDashoffset={
+                          2 * Math.PI * 5.5 * (1 - Math.min(100, Math.max(contextStats.percent, 4)) / 100)
+                        }
+                        strokeLinecap="round"
+                        className={cn(
+                          'transition-all duration-300',
+                          contextStats.percent >= 85
+                            ? 'text-red-400'
+                            : contextStats.percent >= 65
+                            ? 'text-amber-400'
+                            : 'text-zinc-300'
+                        )}
+                      />
+                    </svg>
+                    <span>{contextStats.percent}%</span>
+                  </button>
+
+                  <AnimatePresence>
+                    {isContextPopoverOpen && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 6, scale: 0.96 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 6, scale: 0.96 }}
+                        transition={{ duration: 0.14 }}
+                        className="absolute bottom-full mb-2 left-0 w-64 bg-zinc-900/95 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl p-3.5 z-50 select-none pointer-events-auto"
+                      >
+                        <div className="flex items-center justify-between text-xs">
+                          <div>
+                            <span className="font-semibold text-zinc-100">{contextStats.percent}%</span>{' '}
+                            <span className="text-zinc-400">of context used</span>
+                          </div>
+                          <span className="font-mono text-zinc-200">
+                            ~{contextStats.totalLabel} / {contextStats.maxLabel}
+                          </span>
+                        </div>
+
+                        {/* Segmented Progress Bar */}
+                        <div className="h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden flex my-3 gap-[1px]">
+                          <div
+                            className="h-full bg-zinc-400 transition-all duration-300"
+                            style={{ width: `${Math.max(contextStats.systemPct, 2)}%` }}
+                          />
+                          <div
+                            className="h-full bg-violet-400 transition-all duration-300"
+                            style={{ width: `${Math.max(contextStats.toolPct, 2)}%` }}
+                          />
+                          {contextStats.msgTokens > 0 && (
+                            <div
+                              className="h-full bg-blue-400 transition-all duration-300"
+                              style={{ width: `${Math.max(contextStats.msgPct, 2)}%` }}
+                            />
+                          )}
+                        </div>
+
+                        {/* Breakdown Rows */}
+                        <div className="space-y-2 text-xs">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-zinc-400">
+                              <span className="w-2.5 h-2.5 rounded-[3px] bg-zinc-400 inline-block flex-shrink-0" />
+                              <span>System prompt</span>
+                            </div>
+                            <span className="font-mono text-zinc-300">~{contextStats.systemLabel}</span>
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-zinc-400">
+                              <span className="w-2.5 h-2.5 rounded-[3px] bg-violet-400 inline-block flex-shrink-0" />
+                              <span>Tool definitions</span>
+                            </div>
+                            <span className="font-mono text-zinc-300">~{contextStats.toolLabel}</span>
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-zinc-400">
+                              <span className="w-2.5 h-2.5 rounded-[3px] bg-blue-400 inline-block flex-shrink-0" />
+                              <span>Messages</span>
+                            </div>
+                            <span className="font-mono text-zinc-300">~{contextStats.msgLabel}</span>
+                          </div>
                         </div>
                       </motion.div>
                     )}

@@ -6,6 +6,7 @@ import {
   isMandatoryWebSearchQuery,
   extractCleanSearchQuery,
   buildContextualSearchQuery,
+  isEndCallQuery,
 } from './useChat';
 
 describe('useChat tool gating heuristics', () => {
@@ -81,6 +82,7 @@ No connection adapters were found for 'rgsx+torrent://download?source=https%3A%2
     expect(isMandatoryWebSearchQuery('who is the current CEO of Intel?')).toBe(true);
     expect(isMandatoryWebSearchQuery('what are the requirements for a North Carolina driver\'s license?')).toBe(true);
     expect(isMandatoryWebSearchQuery('can you tell me the latest news about haiti')).toBe(true);
+    expect(isMandatoryWebSearchQuery('can you tell me what is happeing in heiti now ?')).toBe(true);
     expect(isMandatoryWebSearchQuery('an you tell me that lates news in heat?')).toBe(true);
     expect(isMandatoryWebSearchQuery('why did the el salavdor deploy those troops')).toBe(true);
     expect(isMandatoryWebSearchQuery('why did that happen?', true)).toBe(true);
@@ -100,6 +102,7 @@ No connection adapters were found for 'rgsx+torrent://download?source=https%3A%2
     expect(extractCleanSearchQuery('Can you tell me what is the current price of bitcoin?')).toBe('current price of bitcoin');
     expect(extractCleanSearchQuery('Hey Morfeus, please tell me what is the weather in Miami right now!')).toBe('weather in Miami right now');
     expect(extractCleanSearchQuery('an you tell me that lates news in heat?')).toBe('latest news in heat');
+    expect(extractCleanSearchQuery('can you tell me what is happeing in heiti now ?')).toBe('happening in Haiti now');
     expect(
       buildContextualSearchQuery('i am sorry i meant to say haiti', ['latest news in heat'])
     ).toBe('latest news in haiti');
@@ -111,6 +114,18 @@ No connection adapters were found for 'rgsx+torrent://download?source=https%3A%2
     ).toBe('latest news in haiti');
     expect(
       buildContextualSearchQuery('why did the el salavdor deploy those troops', ['latest news Haiti'])
-    ).toBe('why did the el salavdor deploy those troops Haiti');
+    ).toBe('why did the el Salvador deploy those troops Haiti');
+  });
+
+  it('identifies end_call / end_chat session termination phrases', () => {
+    expect(isEndCallQuery('end the call')).toBe(true);
+    expect(isEndCallQuery('end the chat')).toBe(true);
+    expect(isEndCallQuery('hang up')).toBe(true);
+    expect(isEndCallQuery('goodbye')).toBe(true);
+    expect(isEndCallQuery('bye Morfeus!')).toBe(true);
+    expect(isEndCallQuery("that's all for now")).toBe(true);
+    expect(isEndCallQuery('can you tell me what is happening in Haiti now?')).toBe(false);
+    expect(isMandatoryWebSearchQuery('end the call', true)).toBe(false);
+    expect(isMandatoryWebSearchQuery('goodbye', true)).toBe(false);
   });
 });

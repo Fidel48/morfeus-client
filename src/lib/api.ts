@@ -581,7 +581,27 @@ export const WEB_TOOLS: ToolDefinition[] = [
         required: ['id'],
       },
     },
-  }
+  },
+  // ── Session & Voice Call Control (`EndCallTool`) ──
+  {
+    type: 'function',
+    function: {
+      name: 'end_call',
+      description:
+        "Call when the user says 'end the call', 'end the chat', 'hang up', 'stop listening', 'goodbye', 'bye', 'that's all for now', or indicates they are done with the voice or chat session.",
+      parameters: {
+        type: 'object',
+        properties: {
+          farewell: {
+            type: 'string',
+            description:
+              'A warm, concise 1-sentence farewell message to speak/show to the user before ending the session (e.g. "Goodbye! Have a great rest of your day.").',
+          },
+        },
+        required: [],
+      },
+    },
+  },
 ];
 
 /**
@@ -596,6 +616,7 @@ export const FAST_CHAT_TOOL_NAMES = new Set([
   'search_files',
   'list_directory',
   'read_local_file',
+  'end_call',
 ]);
 
 export const FAST_CHAT_TOOLS: ToolDefinition[] = WEB_TOOLS.filter((t) =>

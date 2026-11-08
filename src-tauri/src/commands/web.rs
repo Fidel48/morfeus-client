@@ -30,6 +30,7 @@ pub fn normalize_search_query(query: &str) -> String {
         "can you find out ", "can you search for ", "can you search ",
         "search the web for ", "search online for ", "look up ",
         "what is the ", "what's the ", "whats the ", "what are the ",
+        "what is ", "what's ", "whats ",
     ];
     loop {
         let lower = s.to_lowercase();
@@ -45,6 +46,20 @@ pub fn normalize_search_query(query: &str) -> String {
             break;
         }
     }
+    let normalized_words: Vec<String> = s
+        .split_whitespace()
+        .map(|w| {
+            let clean = w.trim_matches(|c: char| !c.is_alphanumeric());
+            match clean.to_lowercase().as_str() {
+                "happeing" | "hapening" | "happenning" => "happening".to_string(),
+                "lates" | "lastes" | "latets" | "lastest" => "latest".to_string(),
+                "heiti" | "heati" | "hiati" | "hatii" => "Haiti".to_string(),
+                "salavdor" | "salvabdor" => "Salvador".to_string(),
+                _ => w.to_string(),
+            }
+        })
+        .collect();
+    s = normalized_words.join(" ");
     if s.is_empty() {
         query.trim().to_string()
     } else {

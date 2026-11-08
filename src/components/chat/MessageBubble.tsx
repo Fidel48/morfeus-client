@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { Message } from '@/types';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { cn } from '@/lib/utils';
-import { Bot, User, Wrench, Globe, FileText, Search, Folder, Video, Terminal, Copy, Volume2, VolumeX, Sparkles, ChevronDown, X, ZoomIn } from 'lucide-react';
+import { Bot, User, Wrench, Globe, FileText, Search, Folder, Video, Terminal, Copy, Volume2, VolumeX, Sparkles, ChevronDown, X, ZoomIn, PhoneOff } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { tauriApi } from '@/lib/tauri';
@@ -144,7 +144,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
     tc.function?.name === 'web_search' || 
     tc.function?.name === 'read_webpage' || 
     tc.function?.name === 'read_youtube_video' ||
-    tc.function?.name === 'read_local_file'
+    tc.function?.name === 'read_local_file' ||
+    tc.function?.name === 'end_call'
   );
 
   // If debug mode is OFF and this is a tool-call-only message, hide internal tools but ALWAYS show web_search
@@ -258,6 +259,15 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
                               {queryDisplay}
                             </span>
                           )}
+                        </div>
+                      );
+                    }
+
+                    if (toolName === 'end_call') {
+                      return (
+                        <div key={idx} className="flex items-center gap-2 text-xs text-rose-300 bg-rose-950/40 border border-rose-500/30 px-3.5 py-1.5 rounded-full w-fit shadow-sm">
+                          <PhoneOff size={12} className="text-rose-400" />
+                          <span className="font-mono text-[11px] font-semibold text-rose-200">Session Ended</span>
                         </div>
                       );
                     }

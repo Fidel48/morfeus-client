@@ -456,6 +456,25 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
     };
   }, []);
 
+  // ─── Listen for `morfeus-end-call` tool event to cleanly terminate voice/call session ───
+  useEffect(() => {
+    const handleEndCall = () => {
+      isContinuousActiveRef.current = false;
+      tauriApi.setContinuousMode(false).catch(() => {});
+      if (statusRef.current === 'recording') {
+        stopRecordingRef.current();
+      } else {
+        stopWaveform();
+        statusRef.current = 'idle';
+        setStatus('idle');
+      }
+    };
+    window.addEventListener('morfeus-end-call', handleEndCall);
+    return () => {
+      window.removeEventListener('morfeus-end-call', handleEndCall);
+    };
+  }, [setStatus, stopWaveform]);
+
   // ─── Continuous Mode Auto-Arm Watchdog ────────────────────────────────────
   // Ensures that whenever Continuous Mode is active and AI is not speaking/generating,
   // the microphone remains reliably armed and listening for the user's turn.
