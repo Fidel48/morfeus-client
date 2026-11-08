@@ -29,6 +29,17 @@ Morfeus Client is a local-first, privacy-focused desktop AI developer assistant 
    - The application is highly stable on Windows 11. Do NOT automatically rewrite, simplify, or modify Windows-specific code (`.cmd` resolutions, SAPI voices, Gatekeeper workarounds) unless explicitly requested.
 4. **Git Push Rule**:
    - **NEVER** execute `git push` or push tags to GitHub without explicit, separate user authorization for that specific push.
+5. **Installed App Deployment & Testing Directive (CRITICAL)**:
+   - When implementing features or fixes, **always compile and test directly against the installed application** (`/Applications/Morfeus Client.app`) so regressions in production packaging (path resolution, TCC permissions, background processes, embedded assets) are caught and fixed in the main app immediately.
+   - **Always bundle using Tauri production bundling**:
+     ```bash
+     npm run tauri build -- --bundles app
+     killall morfeus "Morfeus Client" 2>/dev/null || true
+     rm -rf "/Applications/Morfeus Client.app"
+     cp -R "src-tauri/target/release/bundle/macos/Morfeus Client.app" "/Applications/"
+     codesign --force --deep --sign - --entitlements src-tauri/Entitlements.plist "/Applications/Morfeus Client.app"
+     ```
+   - **NEVER** overwrite `/Applications/Morfeus Client.app/Contents/MacOS/morfeus` with a raw `cargo build --release` binary without `tauri build` (doing so misses the production asset embedding and points to `http://localhost:1420`, resulting in a white screen).
 
 ---
 
