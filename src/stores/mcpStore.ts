@@ -13,6 +13,8 @@ import { tauriApi } from '@/lib/tauri';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+const inFlightConnects = new Map<string, Promise<void>>();
+
 function stripRuntime(config: McpServerConfig): McpServerConfig {
   const { status: _s, tools: _t, errorMessage: _e, ...rest } = config;
   return rest;
@@ -117,25 +119,37 @@ export const useMcpStore = create<McpStore>()(
       },
 
       connectServer: async (id) => {
+        const existing = inFlightConnects.get(id);
+        if (existing) {
+          return existing;
+        }
+
         const srv = get().servers.find((s) => s.id === id);
         if (!srv) return;
 
-        get()._setServerRuntime(id, 'connecting', undefined, undefined);
-        try {
-          try { await tauriApi.mcpStopServer(id); } catch { /* ignore */ }
-          await tauriApi.mcpStartServer(id, srv.command, srv.args, srv.env ?? {});
-          const res = await Promise.race([
-            tauriApi.mcpListTools(id),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error('Connection timed out waiting for tools response (10s)')), 10_000)
-            ),
-          ]);
-          const tools: McpToolInfo[] = res?.tools ?? [];
-          get()._setServerRuntime(id, 'connected', tools, undefined);
-        } catch (err: any) {
-          console.error(`[MCP] Failed to connect server "${id}":`, err);
-          get()._setServerRuntime(id, 'error', [], String(err?.message ?? err));
-        }
+        const connectTask = (async () => {
+          get()._setServerRuntime(id, 'connecting', undefined, undefined);
+          try {
+            try { await tauriApi.mcpStopServer(id); } catch { /* ignore */ }
+            await tauriApi.mcpStartServer(id, srv.command, srv.args, srv.env ?? {});
+            const res = await Promise.race([
+              tauriApi.mcpListTools(id),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('Connection timed out waiting for tools response (10s)')), 10_000)
+              ),
+            ]);
+            const tools: McpToolInfo[] = res?.tools ?? [];
+            get()._setServerRuntime(id, 'connected', tools, undefined);
+          } catch (err: any) {
+            console.error(`[MCP] Failed to connect server "${id}":`, err);
+            get()._setServerRuntime(id, 'error', [], String(err?.message ?? err));
+          } finally {
+            inFlightConnects.delete(id);
+          }
+        })();
+
+        inFlightConnects.set(id, connectTask);
+        return connectTask;
       },
 
       disconnectServer: async (id) => {

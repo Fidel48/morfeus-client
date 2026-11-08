@@ -182,9 +182,9 @@ const ParametersTab: React.FC<{ settings: AppSettings; updateSettings: (p: Parti
       </div>
       <input
         type="range"
-        min={128}
+        min={512}
         max={8192}
-        step={128}
+        step={256}
         value={settings.max_tokens}
         onChange={(e) => updateSettings({ max_tokens: parseInt(e.target.value) })}
         className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer accent-violet-500"

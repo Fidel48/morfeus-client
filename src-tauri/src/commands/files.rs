@@ -88,14 +88,29 @@ pub async fn parse_local_file(path: String) -> Result<String, String> {
         return Err("File contains no readable text. If this is a PDF, it might be a scanned image or lack a text layer (OCR is not yet supported).".into());
     }
 
-    // Truncate if too long (safety limit, ~15k chars for local LLMs)
-    if cleaned_content.chars().count() > 15000 {
-        let mut truncated = cleaned_content.chars().take(15000).collect::<String>();
+    // Truncate if too long (safety limit, ~45k chars so full multi-page study guides/exams fit intact)
+    if cleaned_content.chars().count() > 45000 {
+        let mut truncated = cleaned_content.chars().take(45000).collect::<String>();
         truncated.push_str("\n\n[...Content truncated due to size limits...]");
         Ok(truncated)
     } else {
         Ok(cleaned_content)
     }
+}
+
+/// Read raw bytes from any local file path (used as unrestricted fallback for PDF/image attachments).
+#[command]
+pub async fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
+    const MAX_BYTES: u64 = 50 * 1024 * 1024; // 50 MB safety limit
+    let file_path = Path::new(&path);
+    if !file_path.is_file() {
+        return Err(format!("File does not exist: {}", path));
+    }
+    let size = fs::metadata(file_path).map_err(|e| format!("Cannot stat file: {}", e))?.len();
+    if size > MAX_BYTES {
+        return Err(format!("File is too large ({:.1} MB, limit 50 MB).", size as f64 / 1_048_576.0));
+    }
+    fs::read(file_path).map_err(|e| format!("Cannot read file: {}", e))
 }
 
 #[derive(Serialize, Deserialize, Debug)]

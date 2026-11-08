@@ -119,12 +119,17 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
   // ─── macOS Path: Native Rust CoreAudio + Apple SFSpeechRecognizer ────────
   const startMacRecording = useCallback(async () => {
     const isBusy = useChatStore.getState().isStreaming || useVoiceStore.getState().isSpeaking;
-    if (isStartingRef.current || statusRef.current === 'recording' || statusRef.current === 'transcribing' || isBusy) return;
+    const currentStatus = useVoiceStore.getState().status;
+    if (isStartingRef.current || isStoppingRef.current || currentStatus === 'recording' || currentStatus === 'transcribing' || isBusy) return;
     isStartingRef.current = true;
 
     try {
       usingNativeRef.current = true;
+      if (isContinuousActiveRef.current) {
+        tauriApi.setContinuousMode(true).catch(() => {});
+      }
       await tauriApi.startRecording();
+      statusRef.current = 'recording';
       setStatus('recording');
       startWaveform();
     } catch (err: any) {
@@ -132,6 +137,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
       tauriApi.appendSystemLog('error', `Mac recording start error: ${err?.message || err}`);
       stopWaveform();
       usingNativeRef.current = false;
+      statusRef.current = 'idle';
       setStatus('idle');
     } finally {
       isStartingRef.current = false;
@@ -142,6 +148,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
     if (isStoppingRef.current) return;
     isStoppingRef.current = true;
     stopWaveform();
+    statusRef.current = 'transcribing';
     setStatus('transcribing');
 
     try {
@@ -161,23 +168,28 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
         // Empty capture (silence/ambient timeout) - seamlessly keep listening if AI is not busy
         setTimeout(() => {
           const isBusy = useChatStore.getState().isStreaming || useVoiceStore.getState().isSpeaking;
-          if (isContinuousActiveRef.current && statusRef.current === 'idle' && !isBusy) {
+          if (isContinuousActiveRef.current && useVoiceStore.getState().status === 'idle' && !isBusy) {
             startRecordingRef.current();
           }
         }, 250);
       }
     } catch (err: any) {
-      console.error('[VoiceButton/Mac] Native STT error:', err);
-      tauriApi.appendSystemLog('error', `Mac STT error: ${err?.message || err}`);
+      const errMsg = String(err?.message || err || '');
+      const isNoSpeech = /no speech detected/i.test(errMsg);
+      if (!isNoSpeech) {
+        console.error('[VoiceButton/Mac] Native STT error:', err);
+        tauriApi.appendSystemLog('error', `Mac STT error: ${errMsg}`);
+      }
       if (isContinuousActiveRef.current) {
         setTimeout(() => {
           const isBusy = useChatStore.getState().isStreaming || useVoiceStore.getState().isSpeaking;
-          if (isContinuousActiveRef.current && statusRef.current === 'idle' && !isBusy) {
+          if (isContinuousActiveRef.current && useVoiceStore.getState().status === 'idle' && !isBusy) {
             startRecordingRef.current();
           }
         }, 400);
       }
     } finally {
+      statusRef.current = 'idle';
       setStatus('idle');
       usingNativeRef.current = false;
       isStoppingRef.current = false;
@@ -353,7 +365,8 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
   }, [startMacRecording, startBrowserRecording, startNativeRecording]);
 
   const stopRecording = useCallback(() => {
-    if (status !== 'recording') return;
+    const currentStatus = useVoiceStore.getState().status;
+    if (currentStatus !== 'recording' && statusRef.current !== 'recording') return;
     if (isMacOS) {
       stopMacRecording();
     } else if (usingNativeRef.current) {
@@ -361,7 +374,7 @@ export const VoiceButton: React.FC<VoiceButtonProps> = ({ currentInput = '', onT
     } else {
       stopBrowserRecording();
     }
-  }, [status, stopMacRecording, stopNativeRecording, stopBrowserRecording]);
+  }, [stopMacRecording, stopNativeRecording, stopBrowserRecording]);
 
   // ─── Refs for event listeners ─────────────────────────────────────────────
   const startRecordingRef = useRef(startRecording);

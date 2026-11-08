@@ -1,5 +1,29 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeHistory, trimHistoryToContext } from '@/lib/chatHistory';
+import { estimateTokenCount, sanitizeHistory, stripRunawayRepetition, trimHistoryToContext } from '@/lib/chatHistory';
+
+describe('estimateTokenCount', () => {
+  it('estimates multimodal image_url parts using fixed vision patch budget instead of raw base64 length', () => {
+    const hugeBase64 = 'A'.repeat(400_000);
+    const multimodal = [
+      { type: 'text', text: 'Please analyze this page.' },
+      { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${hugeBase64}` } },
+    ];
+    const tokens = estimateTokenCount(multimodal);
+    expect(tokens).toBeLessThan(300);
+  });
+});
+
+describe('stripRunawayRepetition', () => {
+  it('cleans corrupted base64 repetition loops in Google News RSS URLs', () => {
+    const corrupted =
+      'Here is the summary.\n\n### Sources\n* [Article](https://news.google.com/rss/articles/CBMi' +
+      'Z3I2V2'.repeat(80) +
+      ')';
+    const cleaned = stripRunawayRepetition(corrupted);
+    expect(cleaned).not.toContain('Z3I2V2Z3I2V2');
+    expect(cleaned).toContain('[Article](https://news.google.com)');
+  });
+});
 
 describe('sanitizeHistory', () => {
   it('drops error cards and empty placeholders', () => {
@@ -53,6 +77,20 @@ describe('sanitizeHistory', () => {
       { role: 'user', content: img },
     ]);
     expect(out).toHaveLength(2);
+  });
+
+  it('strips truncation warnings and runaway repetition tails from assistant messages', () => {
+    const out = sanitizeHistory([
+      { role: 'user', content: 'search news' },
+      {
+        role: 'assistant',
+        content:
+          'Summary [Link](https://news.google.com/rss/articles/CBMi' +
+          'Z3I2V2'.repeat(50) +
+          ')\n\n> ⚠️ _Reply was cut off at the Max Tokens limit._',
+      },
+    ]);
+    expect(out[1].content).toBe('Summary [Link](https://news.google.com)');
   });
 });
 
@@ -115,5 +153,33 @@ describe('trimHistoryToContext', () => {
 
     const activeUser = trimmed[trimmed.length - 1];
     expect(activeUser.content).toBe('Final question');
+  });
+
+  it('pins the attached document message at the start of history when later Q&A turns exceed context', () => {
+    const docText = 'Question 1 ... Question 60 '.repeat(40); // ~270 tokens
+    const msgs: Array<{ role: string; content: string; api_content?: string }> = [
+      {
+        role: 'user',
+        content: '📎 Attached: Practice_Exam.pdf\n\nQuiz me one question at a time',
+        api_content: `I have attached the following files for reference:\n--- File: Practice_Exam.pdf ---\n${docText}`,
+      },
+    ];
+    for (let q = 1; q <= 20; q++) {
+      msgs.push({ role: 'assistant', content: `Question ${q}: What is the rule for item ${q}? A/B/C/D` });
+      msgs.push({ role: 'user', content: 'a' });
+    }
+
+    const trimmed = trimHistoryToContext(msgs, {
+      systemPrompt: 'System',
+      contextLength: 600,
+      maxTokens: 128,
+    });
+
+    // The attached document at index 0 MUST remain pinned at trimmed[0]
+    expect(trimmed[0].content).toContain('📎 Attached: Practice_Exam.pdf');
+    // And the latest user message MUST be preserved at the end
+    expect(trimmed[trimmed.length - 1].content).toBe('a');
+    // And trimmed[1] should be an assistant message so roles alternate cleanly
+    expect(trimmed[1].role).toBe('assistant');
   });
 });

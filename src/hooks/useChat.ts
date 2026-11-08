@@ -41,6 +41,96 @@ export function shouldEnableLocalFileToolsInFastChat(text: string): boolean {
 }
 
 /**
+ * Strips conversational voice/chat filler from the front of a user prompt
+ * so `web_search` receives a clean, high-signal search query.
+ */
+export function extractCleanSearchQuery(text: string): string {
+  let s = (text || '').trim().replace(/[?.!]+$/g, '').trim();
+  const prefixes = [
+    /^hey morfeus[, ]+/i,
+    /^hi morfeus[, ]+/i,
+    /^ok morfeus[, ]+/i,
+    /^morfeus[, ]+/i,
+    /^(?:can|could|would) you (?:please )?(?:tell me|check|find out|search(?: the web)? for|look up)\s+/i,
+    /^please (?:tell me|check|search(?: the web)? for|look up)\s+/i,
+    /^(?:tell me|do you know)\s+/i,
+    /^(?:search the web for|search online for|look up online|look up)\s+/i,
+    /^(?:what is the|what's the|whats the|what are the)\s+/i,
+  ];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const rx of prefixes) {
+      const m = s.match(rx);
+      if (m && s.length > m[0].length + 3) {
+        s = s.slice(m[0].length).trim();
+        changed = true;
+        break;
+      }
+    }
+  }
+  return s || (text || '').trim();
+}
+
+/**
+ * Detects queries that strictly require real-time web grounding (`web_search`) before answering
+ * to complement a local LLM's limited/static built-in world knowledge:
+ * - Explicit requests to search the web / look up online / fact-check
+ * - Live / current prices of Bitcoin, crypto, stocks, indices, or commodities
+ * - Current weather, temperature, or forecast
+ * - Breaking / latest / today's news, current events, sports scores/schedules
+ * - Current officeholders, CEOs, leaders, net worth, release dates, software versions
+ * - Specific state/federal laws, DMV/insurance/tax regulations, or recent-year (2024–2027) facts
+ */
+export function isMandatoryWebSearchQuery(text: string): boolean {
+  if (!text) return false;
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 500) return false;
+  if (isRemoteOrPastedLog(trimmed) || shouldEnableLocalFileToolsInFastChat(trimmed)) return false;
+  if (/\[Attached (?:Document|File):/i.test(trimmed) || trimmed.includes('```')) return false;
+  // Exclude coding/scripting/debugging/math/translation/quiz-proctoring requests
+  if (/\b(write|create|build|implement|code|debug|fix|refactor|translate|summarize this|quiz me|test me|one question at a time)\b.*\b(script|function|code|app|program|component|class|bot|api|exam|test|questions)?\b/i.test(trimmed) &&
+      /\b(script|function|code|app|program|component|class|bot|api|quiz me|test me|one question at a time)\b/i.test(trimmed)) {
+    return false;
+  }
+
+  // 1. Explicit web search / online lookup / fact-check requests
+  if (/\b(search the web|search online|look up online|web search|google this|search the internet|fact[- ]?check|check online|find online)\b/i.test(trimmed)) {
+    return true;
+  }
+
+  // 2. Live / current financial, crypto, stock, index, or commodity prices
+  const hasPriceWord = /\b(price|prices|value|worth|rate|quote|trading at|market cap|exchange rate|net worth)\b/i.test(trimmed);
+  const hasTemporalLive = /\b(current|currently|live|spot|right now|today|today'?s|latest|at the moment|this week|this month|this year)\b/i.test(trimmed);
+  const hasAsset = /\b(bitcoin|btc|ethereum|eth|solana|sol|dogecoin|doge|xrp|ripple|cardano|ada|bnb|litecoin|ltc|avax|polkadot|dot|chainlink|link|shib|uniswap|uni|xlm|atom|sui|apt|pepe|crypto|cryptocurrency|gold|silver|crude oil|s&p\s*500|sp500|nasdaq|dow jones|djia|nvda|nvidia|tsla|tesla|aapl|apple stock|msft|amzn|googl|meta|amd|nflx|pltr|coin|mstr|stock|stocks|share price)\b/i.test(trimmed);
+  if ((hasPriceWord && hasTemporalLive) || (hasPriceWord && hasAsset) || /\bhow much is (?:1\s+|a\s+|an\s+)?(?:bitcoin|btc|ethereum|eth|solana|sol|dogecoin|doge|xrp|gold|silver)\b/i.test(trimmed)) {
+    return true;
+  }
+
+  // 3. Current weather / temperature / forecast
+  if (/\b(current weather|weather today|weather right now|weather forecast|weather in\s+\w+|what'?s the weather|how'?s the weather|temperature in\s+\w+)\b/i.test(trimmed)) {
+    return true;
+  }
+
+  // 4. Breaking / latest / today's news, sports scores, schedules, & current events
+  if (/\b(latest news|breaking news|today'?s news|current news|recent news|what happened (?:today|recently|to)|top news|news about|who won the|score of the|standings|next game)\b/i.test(trimmed)) {
+    return true;
+  }
+
+  // 5. Current officeholders, CEOs, leaders, versions, release dates, & recent years (2024–2027)
+  if (/\b(who is the current|who is the ceo of|who is the president of|who is the governor of|who is the mayor of|latest version of|release date of|when does .* come out|in 202[4-9])\b/i.test(trimmed)) {
+    return true;
+  }
+
+  // 6. Real-world regulatory, state law, DMV, licensing, or tax rules (when no local document is attached)
+  if (/\b(what are the (?:rules|requirements|laws|regulations) for|dmv|driver'?s license|insurance (?:commissioner|regulation|requirement|licensing)|state law in|tax rate in)\b/i.test(trimmed)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Determines whether a connected MCP server is relevant to the user's turn.
  * Gating prevents domain-specific servers (e.g. FreeCAD 3D CAD, PostgreSQL) from polluting general
  * web searches or casual chat, avoiding tool confusion like FreeCAD's `list_documents` firing for a DMV query.
@@ -422,8 +512,8 @@ ${ctx ? `\n${ctx}\n` : ''}
         // half of the user's chosen context window, so history/prompt still fit and the
         // context window setting is respected exactly as configured.
         const REASONING_HEADROOM = 6144;
-        const baseMaxTokens = currentSettings.max_tokens > 0 ? currentSettings.max_tokens : 2048;
-        const userContext = currentSettings.context_length || 4096;
+        const baseMaxTokens = Math.max(currentSettings.max_tokens || 4096, 1024);
+        const userContext = Math.max(currentSettings.context_length || 16384, 8192);
         const effectiveMaxTokens = isThink
           ? Math.max(baseMaxTokens, Math.min(baseMaxTokens + REASONING_HEADROOM, Math.floor(userContext / 2)))
           : baseMaxTokens;
@@ -438,7 +528,7 @@ ${ctx ? `\n${ctx}\n` : ''}
 
         const isVoiceActive = useSettingsStore.getState().settings.tts_enabled;
         const voiceDirective = isVoiceActive
-          ? `\n\nVOICE MODE DIRECTIVE: Your response will be spoken aloud to the user using text-to-speech. Keep conversational answers natural, direct, and concise (1 to 3 punchy sentences). Avoid long rambling introductions, bullet lists, or reading code out loud—provide the code in markdown and give a brief 1-sentence spoken summary. Display all source links and references at the very end under a "### Sources" heading so they are displayed visually but not spoken.`
+          ? `\n\nVOICE MODE DIRECTIVE: Your response will be spoken aloud to the user using text-to-speech. If the user asks for current prices (e.g. Bitcoin, crypto, stocks), breaking news, weather, or live facts, you MUST still call the \`web_search\` tool first before speaking your answer—never guess prices or facts from memory. Once you have the answer, keep spoken responses natural, direct, and concise (1 to 3 punchy sentences). Avoid long rambling introductions, bullet lists, or reading code out loud—provide the code in markdown and give a brief 1-sentence spoken summary. Display all source links and references at the very end under a "### Sources" heading so they are displayed visually but not spoken.`
           : '';
 
         // Qwen3-family models ignore the API-level think flag on OpenAI-compatible endpoints;
@@ -482,9 +572,9 @@ DIRECTIVES:
    - When the user pastes logs, shell output, error messages, terminal sessions (e.g. "pi@pi:~$", "docker logs", "root@server:~$"), or code snippets containing file paths (e.g. "/config/...", "/data/...", "ia.ini", ".torrent"), DO NOT search for or read those files on the user's local computer. They do not exist on the user's local host!
    - Answer directly by analyzing the provided text and error messages. Provide the requested code, configuration, or shell commands for the user to run on their machine or container.
    - ONLY call local file tools if the user explicitly asks to find or read a file on their own computer (e.g. "find my resume", "read file at /path").
-5. TOOL CALLING: You have access to web search and connected tools. Use them quietly when needed to satisfy a specific user request. Never recite your tools unprompted.
-6. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or asked to read news stories or articles, provide a thorough, informative breakdown covering the key details (who, what, when, where, charges, facts, context). State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable Markdown source links formatted under a "### Sources" section at the very end: [Source Title](url).
-7. DIRECT QUIZ & EXAM PROCTORING: When the user asks to be quizzed, practice for an exam, or take a mock test (e.g. asking for "one question at a time"), act directly as the exam proctor. Immediately present the actual subject-matter question with multiple-choice options (A, B, C, D). NEVER ask meta-questions about the user's feelings, confidence level, or session goals. Wait for the user's answer before providing the answer key and moving to the next question.
+5. MANDATORY REAL-TIME WEB SEARCH & TOOL CALLING: You MUST call the \`web_search\` tool BEFORE answering ANY question about current/live prices (e.g. Bitcoin, crypto, stocks, gold), latest/today's news, weather, sports scores, current events, or real-time facts. NEVER guess or fabricate current prices, facts, or source URLs from training memory—even in Voice Mode or when Thinking is off. Never recite your tools unprompted in casual greetings.
+6. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or asked to read news stories or articles, provide a thorough, informative breakdown covering the key details (who, what, when, where, charges, facts, context). State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable Markdown source links formatted under a "### Sources" section at the very end: [Source Title](url) pointing ONLY to exact URLs returned by the \`web_search\` tool.
+7. DIRECT QUIZ & EXAM PROCTORING: When the user asks to be quizzed, practice for an exam, or take a mock test (e.g. asking for "one question at a time"), act directly as the exam proctor. If a study guide or practice exam document is attached in the conversation, ALWAYS use the exact questions and exact A, B, C, D options from the attached document in sequential order. Immediately present the actual subject-matter question with its 4 specific multiple-choice options (A, B, C, D). NEVER reuse or repeat the same multiple-choice options from a previous question. NEVER ask meta-questions about the user's feelings, confidence level, or session goals. Wait for the user's answer before providing the answer key and moving to the next question.
 8. CODING LIMITATION: Chat mode does not edit codebase files directly (inform the user to switch to "Agent Coder" mode if they need codebase editing).${mcpBlock}${voiceDirective}${thinkDirective}`;
         } else {
           const basePrompt = currentSettings.system_prompt || 'You are Morfeus, a powerful, articulate, and versatile desktop AI assistant and autonomous developer harness.';
@@ -638,17 +728,34 @@ ${projectBlock}CRITICAL DIRECTIVES:
                 console.warn('[web_search] Backend search returned error:', err);
               }
               if (Array.isArray(res) && res.length > 0) {
-                // Auto-fetch top article content so the LLM has complete context (like Gemini/Perplexity/Grok)
+                // Auto-fetch top readable article content so the local LLM has deep context (like Gemini/Perplexity).
+                // Skip bare publisher homepages (e.g. "https://www.reuters.com") and structured live-ticker endpoints
+                // whose authoritative figures are already embedded in `[LIVE VERIFIED DATA]` snippets.
                 let topArticleContent = '';
                 const topResult = res[0];
-                if (topResult?.url && (topResult.url.startsWith('http://') || topResult.url.startsWith('https://'))) {
+                const isScrapeCandidate = (r: any): boolean => {
+                  const u = String(r?.url || '');
+                  if (!u.startsWith('http://') && !u.startsWith('https://')) return false;
+                  if (String(r?.title || '').startsWith('[LIVE VERIFIED DATA]')) return false;
                   try {
-                    const pageText = await tauriApi.fetchWebpage(topResult.url);
-                    if (pageText && !pageText.startsWith('[Webpage Notice]') && pageText.length > 50) {
-                      topArticleContent = `\n\n═══════════════════════════════════════════════════\nFULL ARTICLE CONTENT (From Top Source: "${topResult.title}" | ${topResult.url}):\n═══════════════════════════════════════════════════\n${pageText}\n═══════════════════════════════════════════════════`;
+                    const parsed = new URL(u);
+                    // Skip bare root homepages (path is "/" or empty) which come from fallback RSS <source> tags
+                    return parsed.pathname.length > 1;
+                  } catch {
+                    return false;
+                  }
+                };
+
+                const scrapeTargets = res.filter(isScrapeCandidate).slice(0, 2);
+                for (const target of scrapeTargets) {
+                  try {
+                    const pageText = await tauriApi.fetchWebpage(target.url);
+                    if (pageText && !pageText.startsWith('[Webpage Notice]') && pageText.length > 120) {
+                      topArticleContent = `\n\n═══════════════════════════════════════════════════\nFULL ARTICLE CONTENT (From Source: "${target.title}" | ${target.url}):\n═══════════════════════════════════════════════════\n${pageText}\n═══════════════════════════════════════════════════`;
+                      break;
                     }
                   } catch (e) {
-                    console.warn('[web_search] Could not auto-scrape top article:', e);
+                    console.warn('[web_search] Could not auto-scrape article:', e);
                   }
                 }
 
@@ -656,9 +763,9 @@ ${projectBlock}CRITICAL DIRECTIVES:
                   `[Source ${i + 1}]: "${r.title}"\nURL: ${r.url}\nSnippet: ${r.snippet}`
                 ).join('\n\n');
 
-                result = `Search Results for query "${q}":\n\n${searchSnippets}${topArticleContent}\n\nSYNTHESIS DIRECTIVE: Synthesize an articulate, comprehensive response based on the article content and search results above. Detail key facts, names, chronology, charges, and context. State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable markdown source links at the end: [${topResult?.title || 'Source'}](${topResult?.url || ''}). If more depth from other sources is needed, you can call \`read_webpage\`.`;
+                result = `Search Results for query "${q}":\n\n${searchSnippets}${topArticleContent}\n\nSYNTHESIS DIRECTIVE (100% FACTUAL GROUNDING): Synthesize an accurate, well-structured response strictly grounded in the verified search results and article content above. If a "[LIVE VERIFIED DATA]" entry is present above, treat its exact figures (price, temperature, market quote) as 100% authoritative over any older news headlines. NEVER guess or invent facts, numbers, or URLs from training memory. State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable markdown source links at the end: [${topResult?.title || 'Source'}](${topResult?.url || ''}).`;
               } else {
-                result = typeof res === 'string' ? res : JSON.stringify(res, null, 2);
+                result = `No direct web search results matched the exact query "${q}". Do NOT repeat the same narrow query—either try a broader 2–3 word search term without internal codes, or answer the user's request directly using your domain knowledge and state the current date/time ("As of ${dateStr} at ${timeStr}...").`;
               }
             }
           } else if (name === 'read_webpage') {
@@ -1018,11 +1125,29 @@ ${projectBlock}CRITICAL DIRECTIVES:
             }
           }
 
+          // ── Mandatory real-time web_search enforcement on depth 0 ──
+          const hasWebSearchTool = availableTools.some((t) => t.function.name === 'web_search');
+          const mustForceWebSearch =
+            isInitialTurn &&
+            depth === 0 &&
+            !disableTools &&
+            hasWebSearchTool &&
+            isMandatoryWebSearchQuery(userDisplayContent);
+
+          if (mustForceWebSearch) {
+            apiMessages.push({
+              role: 'system',
+              content: `MANDATORY TOOL CALL: The user is asking for real-time/current information ("${userDisplayContent.slice(0, 140)}"). You MUST invoke the \`web_search\` tool right now before writing any answer. Do NOT guess prices, news, weather, or URLs from training memory.`,
+            });
+          }
+
           // ── Stream response ──
           let firstToken = false;
           const recentTokens: string[] = [];
           let totalChars = 0;
           let repetitionAborted = false;
+          let sawToolCallDelta = false;
+          let mandatoryPlainBuffer = '';
 
           const detectRepetition = (): boolean => {
             const len = recentTokens.length;
@@ -1096,6 +1221,20 @@ ${projectBlock}CRITICAL DIRECTIVES:
 
             if (delta.content) {
               totalChars += delta.content.length;
+
+              // If this turn strictly requires `web_search` on depth 0, do not feed ungrounded
+              // plain-text guesses to TTS or the UI before `web_search` has been invoked.
+              if (mustForceWebSearch && !sawToolCallDelta) {
+                mandatoryPlainBuffer += delta.content;
+                const trimmedBuf = mandatoryPlainBuffer.trimStart();
+                if (!trimmedBuf.startsWith('<tool_call>') && trimmedBuf.length > 24) {
+                  console.warn('[WebSearchGate] Model attempted ungrounded plain-text reply on mandatory real-time query — forcing web_search tool call');
+                  tauriApi.appendSystemLog('info', 'Forcing mandatory web_search tool call for real-time query.');
+                  break;
+                }
+                continue;
+              }
+
               const trimmed = delta.content.trim();
               if (trimmed) {
                 recentTokens.push(trimmed);
@@ -1138,6 +1277,7 @@ ${projectBlock}CRITICAL DIRECTIVES:
             }
 
             if (delta.tool_calls) {
+              sawToolCallDelta = true;
               speechQueue.stop(); // Don't speak tool call JSON
               appendToolCallDelta(delta.tool_calls);
             }
@@ -1161,9 +1301,14 @@ ${projectBlock}CRITICAL DIRECTIVES:
             return;
           }
 
+          // If `mustForceWebSearch` buffered a text-based `<tool_call>` XML block, flush it so `parseTextToolCalls` can parse it
+          if (mustForceWebSearch && mandatoryPlainBuffer.includes('<tool_call>')) {
+            appendStreamToken(mandatoryPlainBuffer);
+          }
+
           const hadReasoning = !!useChatStore.getState().streamingReasoning;
           let finalMessage = finalizeStreamMessage(convId!);
-          let hasToolCalls = finalMessage.tool_calls && finalMessage.tool_calls.length > 0;
+          let hasToolCalls = Boolean(finalMessage.tool_calls && finalMessage.tool_calls.length > 0);
 
           // ── Fallback parser for text-based tool calls (Nemotron, Qwen, Mistral) ──
           if (!disableTools && !hasToolCalls && finalMessage.content && finalMessage.content.includes('<tool_call>')) {
@@ -1195,6 +1340,33 @@ ${projectBlock}CRITICAL DIRECTIVES:
             }
           }
 
+          // ── Deterministic fallback: synthesize `web_search` if model skipped tool call on mandatory real-time query ──
+          if (mustForceWebSearch && !hasToolCalls && !controller.signal.aborted) {
+            const cleanedQuery = extractCleanSearchQuery(userDisplayContent);
+            const syntheticCall: ToolCall = {
+              id: `call_${generateId().slice(0, 8)}`,
+              type: 'function',
+              function: {
+                name: 'web_search',
+                arguments: JSON.stringify({ query: cleanedQuery }),
+              },
+            };
+            speechQueue.stop();
+            finalMessage = {
+              ...finalMessage,
+              content: undefined,
+              tool_calls: [syntheticCall],
+            };
+            hasToolCalls = true;
+            useChatStore.setState((state) => ({
+              messages: state.messages.map((m) =>
+                m.id === finalMessage.id
+                  ? { ...m, content: undefined, tool_calls: [syntheticCall] }
+                  : m
+              ),
+            }));
+          }
+
           // ── Truncated while thinking: model hit the token limit before writing an answer ──
           // A retry can't help (same limit) and would discard the reasoning, so show an
           // actionable notice and keep the thinking text visible.
@@ -1218,16 +1390,53 @@ ${projectBlock}CRITICAL DIRECTIVES:
           }
 
           // ── Reply cut off by the token limit (not a thinking-only truncation) ──
-          // Without this the user sees half a code block / sentence and assumes the model is broken.
+          // Attempt 1 seamless auto-continuation so mid-sentence / mid-question cutoffs complete cleanly.
           if (finishReason === 'length' && !isEmptyContent && noToolCalls && !controller.signal.aborted) {
-            tauriApi.appendSystemLog('warn', 'Reply truncated: finish_reason=length. Raise Max Tokens / Context Length.');
-            useChatStore.setState((state) => ({
-              messages: state.messages.map((m) =>
-                m.id === finalMessage.id
-                  ? { ...m, content: `${m.content ?? ''}\n\n> ⚠️ _Reply was cut off at the Max Tokens limit. Raise **Max Tokens** (and Context Length) in Params, or ask me to continue._` }
-                  : m
-              ),
-            }));
+            let contFinishReason: string | null = 'length';
+            try {
+              const contMessages = [
+                ...apiMessages,
+                { role: 'assistant', content: finalMessage.content ?? '' },
+                {
+                  role: 'user',
+                  content:
+                    'Continue directly from the exact word or character where you left off. Do not repeat what you already wrote and do not add any preamble.',
+                },
+              ];
+              let contText = '';
+              for await (const contChunk of streamChat(effectiveSettings, contMessages, controller.signal, [], true)) {
+                if (controller.signal.aborted) break;
+                const contChoice = contChunk?.choices?.[0];
+                const contDelta = contChoice?.delta?.content;
+                if (contDelta) {
+                  contText += contDelta;
+                  const liveTts = useSettingsStore.getState().settings.tts_enabled;
+                  if (liveTts) speechQueue.feedToken(contDelta);
+                  useChatStore.setState((state) => ({
+                    messages: state.messages.map((m) =>
+                      m.id === finalMessage.id ? { ...m, content: `${m.content ?? ''}${contDelta}` } : m
+                    ),
+                  }));
+                }
+                if (contChoice?.finish_reason) contFinishReason = contChoice.finish_reason;
+              }
+              if (contText) {
+                finalMessage = { ...finalMessage, content: `${finalMessage.content ?? ''}${contText}` };
+              }
+            } catch (contErr) {
+              console.warn('[Chat] Auto-continue after finish_reason=length failed:', contErr);
+            }
+
+            if (contFinishReason === 'length' && !controller.signal.aborted) {
+              tauriApi.appendSystemLog('warn', 'Reply truncated: finish_reason=length. Raise Max Tokens / Context Length.');
+              useChatStore.setState((state) => ({
+                messages: state.messages.map((m) =>
+                  m.id === finalMessage.id
+                    ? { ...m, content: `${m.content ?? ''}\n\n> ⚠️ _Reply was cut off at the Max Tokens limit. Raise **Max Tokens** (and Context Length) in Params, or ask me to continue._` }
+                    : m
+                ),
+              }));
+            }
           }
 
           // ── Auto-retry without tools if model returned an empty response ──
@@ -1418,6 +1627,41 @@ ${projectBlock}CRITICAL DIRECTIVES:
             }
           }
         };
+
+        // ── Self-heal legacy attachment messages in this conversation that lacked persisted api_content ──
+        try {
+          const convMsgs = useChatStore.getState().messages.filter((m) => m.conversation_id === convId);
+          for (const msg of convMsgs) {
+            if (msg.role === 'user' && !msg.api_content && typeof msg.content === 'string' && msg.content.includes('📎 Attached:')) {
+              const match = msg.content.match(/📎 Attached:\s*([^\n]+)/);
+              if (match && match[1]) {
+                const fileNames = match[1].split(',').map((s) => s.trim()).filter(Boolean);
+                let recoveredContext = '';
+                for (const fileName of fileNames) {
+                  const found = await tauriApi.searchFiles(fileName);
+                  if (found && found.length > 0) {
+                    const parsed = await tauriApi.parseLocalFile(found[0].path);
+                    if (parsed) {
+                      const clipped = parsed.length > 45000 ? parsed.slice(0, 45000) + '\n[...truncated...]' : parsed;
+                      recoveredContext += `\n--- File: ${fileName} ---\n${clipped}\n---\n`;
+                    }
+                  }
+                }
+                if (recoveredContext) {
+                  const userBody = msg.content.replace(/^📎 Attached:\s*[^\n]+\s*/, '').trim() || 'Please analyze the attached file(s).';
+                  const healedApiContent = `I have attached the following files for reference:${recoveredContext}\nUser Question/Message: ${userBody}`;
+                  useChatStore.setState((state) => ({
+                    messages: state.messages.map((m) =>
+                      m.id === msg.id ? { ...m, api_content: healedApiContent } : m
+                    ),
+                  }));
+                }
+              }
+            }
+          }
+        } catch (healErr) {
+          console.warn('[Chat] Could not self-heal legacy attachment message:', healErr);
+        }
 
         await executeChatLoop(true, 0);
         updateConversation(convId, { updated_at: Date.now() });

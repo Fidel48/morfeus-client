@@ -73,6 +73,8 @@ pub struct AppSettings {
     pub stt_model_path: String,
     pub ptt_mode: bool,
     #[serde(default)]
+    pub continuous_voice: bool,
+    #[serde(default)]
     pub think_enabled: Option<bool>,
     #[serde(default)]
     pub debug_mode: bool,
@@ -101,6 +103,7 @@ impl Default for AppSettings {
             tts_volume: 1.0,
             stt_model_path: String::new(),
             ptt_mode: true,
+            continuous_voice: false,
             think_enabled: Some(true),
             debug_mode: false,
         }

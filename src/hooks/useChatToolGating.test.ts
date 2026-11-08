@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { isRemoteOrPastedLog, shouldEnableLocalFileToolsInFastChat, isMcpServerRelevant } from './useChat';
+import {
+  isRemoteOrPastedLog,
+  shouldEnableLocalFileToolsInFastChat,
+  isMcpServerRelevant,
+  isMandatoryWebSearchQuery,
+  extractCleanSearchQuery,
+} from './useChat';
 
 describe('useChat tool gating heuristics', () => {
   it('correctly detects remote logs and docker sessions', () => {
@@ -55,5 +61,34 @@ No connection adapters were found for 'rgsx+torrent://download?source=https%3A%2
 
     // Multi-turn context preservation (hasPriorServerCalls)
     expect(isMcpServerRelevant(freecadServer, 'now make it 20mm wider', true)).toBe(true);
+  });
+
+  it('identifies mandatory real-time web_search queries (prices, weather, news, regulations, explicit search)', () => {
+    // Live crypto / stock / index / asset prices
+    expect(isMandatoryWebSearchQuery('Can you tell me what is the current price of bitcoin')).toBe(true);
+    expect(isMandatoryWebSearchQuery('what is the price of BTC right now?')).toBe(true);
+    expect(isMandatoryWebSearchQuery('how much is 1 ethereum worth today?')).toBe(true);
+    expect(isMandatoryWebSearchQuery('nvidia stock price')).toBe(true);
+    expect(isMandatoryWebSearchQuery('what is the s&p 500 trading at today?')).toBe(true);
+
+    // Weather & breaking news & explicit search
+    expect(isMandatoryWebSearchQuery("what's the weather in Charlotte right now?")).toBe(true);
+    expect(isMandatoryWebSearchQuery('what is the latest news about SpaceX?')).toBe(true);
+    expect(isMandatoryWebSearchQuery('search the web for North Carolina insurance licensing updates')).toBe(true);
+
+    // Current officeholders, versions, regulations
+    expect(isMandatoryWebSearchQuery('who is the current CEO of Intel?')).toBe(true);
+    expect(isMandatoryWebSearchQuery('what are the requirements for a North Carolina driver\'s license?')).toBe(true);
+
+    // Non-mandatory queries (coding, general knowledge, attached docs, local files)
+    expect(isMandatoryWebSearchQuery('write a python script to fetch the current price of bitcoin')).toBe(false);
+    expect(isMandatoryWebSearchQuery('what is the capital of France?')).toBe(false);
+    expect(isMandatoryWebSearchQuery('Quiz me on the NC Life exam one question at a time')).toBe(false);
+    expect(isMandatoryWebSearchQuery('[Attached Document: exam.pdf]\nWhat is the current price of bitcoin?')).toBe(false);
+  });
+
+  it('strips conversational filler when extracting clean search queries', () => {
+    expect(extractCleanSearchQuery('Can you tell me what is the current price of bitcoin?')).toBe('current price of bitcoin');
+    expect(extractCleanSearchQuery('Hey Morfeus, please tell me what is the weather in Miami right now!')).toBe('weather in Miami right now');
   });
 });

@@ -11,7 +11,6 @@ import { useProjectStore, projectNameFromPath } from '@/stores/projectStore';
 import { tauriApi } from '@/lib/tauri';
 import { speechQueue, interruptAiSpeech } from '@/lib/kokoroTts';
 import { useVoiceStore } from '@/stores/voiceStore';
-import { extractPdfText, renderPdfToImages } from '@/lib/pdfParser';
 import { ContentPart, Message } from '@/types';
 import { cn, bytesToBase64, isVisionModel, resizeImage } from '@/lib/utils';
 
@@ -328,27 +327,49 @@ export const ChatWindow: React.FC = () => {
           }
         } else if (isPdf) {
           try {
-            let bytes: Uint8Array;
+            const { extractPdfText, renderPdfToImages } = await import('@/lib/pdfParser');
+            let bytes: Uint8Array | null = null;
             if (att.file) {
               const arrayBuffer = await att.file.arrayBuffer();
               bytes = new Uint8Array(arrayBuffer);
             } else if (att.path) {
-              bytes = await tauriApi.readFileBytes(att.path);
+              try {
+                bytes = await tauriApi.readFileBytes(att.path);
+              } catch (readErr) {
+                console.warn(`[attachment] readFileBytes failed for "${att.name}", will try Rust parseLocalFile:`, readErr);
+              }
             } else {
               throw new Error("No file or path provided");
             }
 
-            // First, try text extraction
-            const text = await extractPdfText(bytes);
+            // First, try JS text extraction (if bytes available), then fallback to native Rust pdf_extract
+            let text: string | null = null;
+            if (bytes) {
+              try {
+                text = await extractPdfText(bytes);
+              } catch (pdfErr) {
+                console.warn(`[attachment] JS extractPdfText failed for "${att.name}":`, pdfErr);
+              }
+            }
+            if (!text && att.path) {
+              try {
+                const rustText = await tauriApi.parseLocalFile(att.path);
+                if (rustText && rustText.trim().length > 20) {
+                  text = rustText;
+                }
+              } catch (rustErr) {
+                console.warn(`[attachment] Rust parseLocalFile failed for "${att.name}":`, rustErr);
+              }
+            }
 
             if (text) {
-              // Text layer exists — inject as text context
-              let clipped = text.length > 12000
-                ? text.slice(0, 12000) + '\n[...truncated...]'
+              // Text layer exists — inject as text context (up to 45,000 chars so full exams/documents fit)
+              const clipped = text.length > 45000
+                ? text.slice(0, 45000) + '\n[...truncated...]'
                 : text;
               textContext += `\n--- File: ${att.name} ---\n${clipped}\n---\n`;
               console.log(`[attachment] "${att.name}" text: ${clipped.length} chars`);
-            } else {
+            } else if (bytes) {
               // No text layer — render pages to images and send via vision API
               console.log(`[attachment] "${att.name}" has no text layer, rendering to images...`);
               const images = await renderPdfToImages(bytes, 4);
@@ -364,22 +385,27 @@ export const ChatWindow: React.FC = () => {
               } else {
                 textContext += `\n--- File: ${att.name} ---\n[Could not render PDF pages. Try a different PDF file.]\n---\n`;
               }
+            } else {
+              textContext += `\n--- File: ${att.name} ---\n[Could not read PDF file.]\n---\n`;
             }
           } catch (e) {
             console.error(`[attachment] PDF error for "${att.name}":`, e);
             textContext += `\n--- File: ${att.name} ---\n[Error reading PDF: ${e}]\n---\n`;
           }
         } else {
-          // Plain text/code file — use Rust backend
+          // Plain text, code, or .docx file — prefer Rust backend for .docx or path-backed files
           try {
             let content = '';
-            if (att.file) {
+            const isDocx = att.name.toLowerCase().endsWith('.docx');
+            if (att.path && (isDocx || !att.file)) {
+              content = await tauriApi.parseLocalFile(att.path);
+            } else if (att.file && !isDocx) {
               content = await att.file.text();
             } else if (att.path) {
               content = await tauriApi.parseLocalFile(att.path);
             }
-            if (content.length > 12000) {
-              content = content.slice(0, 12000) + '\n[...truncated...]';
+            if (content.length > 45000) {
+              content = content.slice(0, 45000) + '\n[...truncated...]';
             }
             textContext += `\n--- File: ${att.name} ---\n${content}\n---\n`;
           } catch (e) {

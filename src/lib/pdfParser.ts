@@ -16,7 +16,12 @@ async function openPdf(bytes: Uint8Array) {
   // Use bytes.slice(0) to create a copy of the underlying ArrayBuffer.
   // This prevents the worker from detaching/consuming the original buffer,
   // allowing us to reuse the same bytes if we need to fallback to image rendering.
-  return pdfjs.getDocument({ data: bytes.slice(0), useSystemFonts: true }).promise;
+  try {
+    return await pdfjs.getDocument({ data: bytes.slice(0), useSystemFonts: true }).promise;
+  } catch (err) {
+    console.warn('[pdfParser] Worker open failed, retrying with disableWorker:', err);
+    return await pdfjs.getDocument({ data: bytes.slice(0), useSystemFonts: true, disableWorker: true } as any).promise;
+  }
 }
 
 /**
@@ -51,7 +56,7 @@ export async function extractPdfText(bytes: Uint8Array): Promise<string | null> 
 
       const sortedLines = [...lineMap.entries()]
         .sort((a, b) => b[0] - a[0])
-        .map(([, words]) => words.join('').trim())
+        .map(([, words]) => words.join(' ').replace(/\s+/g, ' ').trim())
         .filter(Boolean);
 
       allLines.push(...sortedLines);

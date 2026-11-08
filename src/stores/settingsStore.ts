@@ -189,8 +189,19 @@ export function sanitizeAppSettings(settings: AppSettings): AppSettings {
     modelId = '';
   }
 
+  const safeMaxTokens =
+    typeof settings.max_tokens === 'number' && settings.max_tokens >= 512
+      ? settings.max_tokens
+      : 4096;
+  const safeContextLength =
+    typeof settings.context_length === 'number' && settings.context_length >= 4096
+      ? settings.context_length
+      : 16384;
+
   return {
     ...settings,
+    max_tokens: safeMaxTokens,
+    context_length: safeContextLength,
     model_id: modelId,
     fast_chat_model_id: fastChatModelId,
     fast_chat_provider_id: fastChatProviderId,
@@ -211,8 +222,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   providers: DEFAULT_PROVIDERS,
   temperature: 0.7,
   top_p: 1.0,
-  max_tokens: 2048,
-  context_length: 8192,
+  max_tokens: 4096,
+  context_length: 16384,
   frequency_penalty: 0.3,
   system_prompt: 'You are a helpful AI assistant.',
   tts_enabled: false,
@@ -222,7 +233,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   stt_model_path: '',
   ptt_mode: false,
   continuous_voice: false,
-  think_enabled: true,
+  think_enabled: false,
   debug_mode: false,
 };
 
@@ -272,6 +283,9 @@ export const useSettingsStore = create<SettingsStore>()(
         set((state) => ({
           settings: { ...state.settings, ...partial },
         }));
+        if (get().isLoaded) {
+          get().saveToBackend().catch(() => {});
+        }
       },
 
       setAvailableModels: (models) => set({ availableModels: models }),

@@ -79,6 +79,7 @@ pub fn run() {
             commands::web::fetch_webpage,
             // Files
             commands::files::parse_local_file,
+            commands::files::read_file_bytes,
             commands::files::read_text_file,
             commands::files::list_directory,
             commands::files::get_special_dirs,

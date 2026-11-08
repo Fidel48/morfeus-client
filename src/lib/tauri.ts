@@ -1,3 +1,6 @@
+import { invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
+import { readFile } from '@tauri-apps/plugin-fs';
 import { AppSettings } from '@/types';
 
 // Detect whether we're running inside the actual Tauri desktop app.
@@ -14,23 +17,24 @@ function assertTauri(): void {
   }
 }
 
-// Lazy-loaded Tauri API functions — only imported when running inside Tauri
 async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   assertTauri();
-  const { invoke } = await import('@tauri-apps/api/core');
   return invoke<T>(cmd, args);
 }
 
 async function tauriOpen(options: any): Promise<any> {
   assertTauri();
-  const { open } = await import('@tauri-apps/plugin-dialog');
   return open(options);
 }
 
 async function tauriReadFile(path: string): Promise<Uint8Array> {
   assertTauri();
-  const { readFile } = await import('@tauri-apps/plugin-fs');
-  return readFile(path);
+  try {
+    return await readFile(path);
+  } catch {
+    const raw = await tauriInvoke<number[]>('read_file_bytes', { path });
+    return new Uint8Array(raw);
+  }
 }
 
 export const tauriApi = {
@@ -176,8 +180,12 @@ export const tauriApi = {
     const selected = await tauriOpen({
       multiple: true,
       filters: [{
-        name: 'Documents',
-        extensions: ['pdf', 'txt', 'md', 'json', 'csv', 'rs', 'ts', 'js', 'html', 'css', 'xml', 'yaml', 'toml']
+        name: 'Documents & Code',
+        extensions: [
+          'pdf', 'docx', 'txt', 'md', 'json', 'csv', 'log',
+          'rs', 'ts', 'tsx', 'js', 'jsx', 'py', 'go', 'java', 'c', 'cpp', 'h',
+          'html', 'css', 'xml', 'yaml', 'yml', 'toml', 'sh', 'sql'
+        ]
       }]
     });
 

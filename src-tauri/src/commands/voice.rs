@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 static SPEECH_GENERATION: AtomicU64 = AtomicU64::new(0);
+static RECORDING_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 pub static IS_CONTINUOUS_MODE: AtomicBool = AtomicBool::new(false);
 pub static IS_AI_SPEAKING: AtomicBool = AtomicBool::new(false);
 pub static BARGE_IN_THRESHOLD: AtomicU32 = AtomicU32::new(45); // RMS 0.045
@@ -58,11 +59,21 @@ pub async fn start_recording(
         }
     }
 
+    // If a previous recording thread was left open (e.g. after HMR reload or missed event),
+    // terminate it first so start_recording always begins a fresh VAD session.
+    let was_already_recording = {
+        let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
+        let prev = *is_recording;
+        *is_recording = false;
+        prev
+    };
+    if was_already_recording {
+        tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
+    }
+
+    let session_id = RECORDING_SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1;
     {
         let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
-        if *is_recording {
-            return Ok(());
-        }
         *is_recording = true;
     }
     {
@@ -167,13 +178,15 @@ pub async fn start_recording(
                     }
                 }
 
-                // Enhanced VAD sensitivity (0.007) to detect soft speech, quiet vowels and consonants
-                if rms > 0.007 {
-                    if let Ok(mut sd) = speech_detected_cb.lock() {
+                // VAD with hysteresis: require 0.012 RMS to trigger speech onset (ignoring room/fan noise)
+                // and 0.009 RMS to sustain active speech so silence detection reliably fires after speaking.
+                if let Ok(mut sd) = speech_detected_cb.lock() {
+                    let thresh = if *sd { 0.009 } else { 0.012 };
+                    if rms > thresh {
                         *sd = true;
-                    }
-                    if let Ok(mut lst) = last_speech_cb.lock() {
-                        *lst = Some(std::time::Instant::now());
+                        if let Ok(mut lst) = last_speech_cb.lock() {
+                            *lst = Some(std::time::Instant::now());
+                        }
                     }
                 }
             },
@@ -196,10 +209,13 @@ pub async fn start_recording(
         }
 
         let mut start_time = std::time::Instant::now();
-        let mut silence_emitted = false;
+        let mut silence_emitted_at: Option<std::time::Instant> = None;
 
         loop {
             std::thread::sleep(std::time::Duration::from_millis(50));
+            if RECORDING_SESSION_ID.load(Ordering::SeqCst) != session_id {
+                break;
+            }
             if let Ok(rec) = is_recording_ref.lock() {
                 if !*rec { break; }
             }
@@ -215,22 +231,31 @@ pub async fn start_recording(
                 continue;
             }
 
-            // Check if speech was detected followed by natural conversational silence (1400ms threshold)
+            // If silence was already emitted but frontend didn't stop within 1.5s, re-emit so it never deadlocks
+            if let Some(emitted_time) = silence_emitted_at {
+                if emitted_time.elapsed() >= std::time::Duration::from_millis(1500) {
+                    silence_emitted_at = Some(std::time::Instant::now());
+                    let _ = app_handle.emit("voice-silence-detected", ());
+                }
+                continue;
+            }
+
+            // Check if speech was detected followed by natural conversational silence (1300ms threshold)
             // Allows natural thinking and breathing pauses without abruptly cutting the user off
-            if has_spoken && !silence_emitted {
+            if has_spoken {
                 let last_time = last_speech_time.lock().map(|g| *g).unwrap_or(None);
                 if let Some(t) = last_time {
-                    let silence_threshold = if is_continuous { 1400 } else { 1500 };
+                    let silence_threshold = if is_continuous { 1300 } else { 1450 };
                     if t.elapsed() >= std::time::Duration::from_millis(silence_threshold) {
-                        silence_emitted = true;
+                        silence_emitted_at = Some(std::time::Instant::now());
                         let _ = app_handle.emit("voice-silence-detected", ());
                     }
                 }
             }
 
             // Idle safety timeout: if mic stays open with no speech for 14s, auto-stop
-            if !has_spoken && !silence_emitted && start_time.elapsed() >= std::time::Duration::from_secs(14) {
-                silence_emitted = true;
+            if !has_spoken && start_time.elapsed() >= std::time::Duration::from_secs(14) {
+                silence_emitted_at = Some(std::time::Instant::now());
                 let _ = app_handle.emit("voice-silence-detected", ());
             }
         }
@@ -611,6 +636,19 @@ pub async fn stop_speaking() -> Result<(), String> {
 
 // ─── Kokoro Neural TTS Server & Playback ──────────────────────────────────────
 
+static KOKORO_STARTING: AtomicBool = AtomicBool::new(false);
+
+struct KokoroStartGuard;
+impl Drop for KokoroStartGuard {
+    fn drop(&mut self) {
+        KOKORO_STARTING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn is_kokoro_port_in_use() -> bool {
+    std::net::TcpListener::bind("127.0.0.1:8880").is_err()
+}
+
 #[tauri::command]
 pub async fn is_kokoro_running() -> bool {
     reqwest::Client::new()
@@ -626,6 +664,39 @@ pub async fn is_kokoro_running() -> bool {
 pub async fn start_kokoro_server() -> Result<bool, String> {
     if is_kokoro_running().await {
         return Ok(true);
+    }
+
+    // If another task is already starting Kokoro, wait for it instead of double-spawning
+    if KOKORO_STARTING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if is_kokoro_running().await {
+                return Ok(true);
+            }
+            if !KOKORO_STARTING.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        return Ok(is_kokoro_running().await);
+    }
+
+    let _guard = KokoroStartGuard;
+
+    // Re-check health or port binding after acquiring the startup lock
+    if is_kokoro_running().await {
+        return Ok(true);
+    }
+    if is_kokoro_port_in_use() {
+        for _ in 0..15 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if is_kokoro_running().await {
+                return Ok(true);
+            }
+        }
+        return Ok(is_kokoro_running().await);
     }
 
     let uv_path = if std::path::Path::new("/opt/homebrew/bin/uv").exists() {

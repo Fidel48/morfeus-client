@@ -25,7 +25,7 @@ export const WEB_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'web_search',
-      description: 'Search the web using DuckDuckGo to find current information, news, or facts.',
+      description: 'Search the web using DuckDuckGo to find current information, live prices (Bitcoin, crypto, stocks), breaking news, weather, or current facts. You MUST call this tool whenever the user asks for current/live prices, today/latest news, or real-time information.',
       parameters: {
         type: 'object',
         properties: {
@@ -658,12 +658,15 @@ export async function* streamChat(
   const isThink = settings.think_enabled ?? true;
   const isLocalServer = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(settings.base_url || '');
 
+  const safeMaxTokens = Math.max(settings.max_tokens || 2048, 1024);
+  const safeContextLength = Math.max(settings.context_length || 16384, 4096);
+
   const body: any = {
     model: settings.model_id,
     messages,
     temperature: settings.temperature,
     top_p: settings.top_p,
-    max_tokens: settings.max_tokens,
+    max_tokens: safeMaxTokens,
     frequency_penalty: settings.frequency_penalty,
     // NOTE: no hardcoded repetition_penalty. Code and shell commands are legitimately repetitive
     // (docker exec ... docker exec ...), and a global penalty makes local models mangle flags/paths.
@@ -674,7 +677,8 @@ export async function* streamChat(
     include_reasoning: isThink,
     chat_template_kwargs: { think: isThink },
     ...(allTools.length > 0 ? { tools: allTools } : {}), // omit tools key entirely when empty — some servers reject tools: []
-    num_ctx: settings.context_length,
+    num_ctx: safeContextLength,
+    options: { num_ctx: safeContextLength },
   };
 
   // Chunk queue + resolver for async push/pull
@@ -692,6 +696,7 @@ export async function* streamChat(
   }
 
   let streamDone = false;
+  let upstreamFinished = false;
   let hasReceivedToken = false;
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -730,11 +735,13 @@ export async function* streamChat(
 
   const unlistenDone = await listen<{ id: string }>('stream-done', (evt) => {
     if (evt.payload.id !== streamId) return;
+    upstreamFinished = true;
     push({ done: true });
   });
 
   const unlistenError = await listen<{ id: string; error: string }>('stream-error', (evt) => {
     if (evt.payload.id !== streamId) return;
+    upstreamFinished = true;
     push({ done: true, error: evt.payload.error });
   });
 
@@ -747,6 +754,9 @@ export async function* streamChat(
       signal.removeEventListener('abort', abortHandler);
     }
     if (watchdogTimer) clearTimeout(watchdogTimer);
+    if (!upstreamFinished) {
+      invoke('proxy_cancel_stream', { streamId }).catch(() => {});
+    }
   };
 
   // Handle abort
