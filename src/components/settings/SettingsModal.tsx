@@ -1024,10 +1024,10 @@ const ParametersTab: React.FC<{
         {/* Quick Context Presets */}
         <div className="flex items-center gap-1.5 flex-wrap">
           {[
-            { label: '4K (Fastest)', value: 4096 },
-            { label: '8K (Balanced)', value: 8192 },
-            { label: '16K (Long Context)', value: 16384 },
-            { label: '32K (Deep Coding)', value: 32768 },
+            { label: '8K (Fast)', value: 8192 },
+            { label: '16K (Balanced)', value: 16384 },
+            { label: '32K (Deep Context)', value: 32768 },
+            { label: '64K (Massive Context)', value: 65536 },
           ].map((preset) => (
             <button
               key={preset.value}
