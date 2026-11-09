@@ -148,18 +148,45 @@ pub async fn proxy_fetch_models(
     Err(format!("Could not parse model list from server. Raw response: {}", body.chars().take(300).collect::<String>()))
 }
 
-/// Query Ollama's /api/show endpoint for a model's configured context window (num_ctx).
+/// Query Ollama for a model's active or configured context window (num_ctx).
+/// Checks live /api/ps first, then falls back to /api/show Modelfile parameters.
 #[tauri::command]
 pub async fn proxy_get_ollama_context(
     base_url: String,
     model_name: String,
 ) -> Result<Option<u32>, String> {
     let origin = base_url.trim_end_matches('/').trim_end_matches("/v1");
-    let url = format!("{}/api/show", origin);
     let client = make_client();
+
+    // 1. Check live active models in /api/ps
+    let ps_url = format!("{}/api/ps", origin);
+    if let Ok(resp) = client.get(&ps_url).send().await {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(models) = json.get("models").and_then(|m| m.as_array()) {
+                    for m in models {
+                        let name = m.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let matches = name == model_name
+                            || name.starts_with(&format!("{}:", model_name))
+                            || model_name.starts_with(&format!("{}:", name));
+                        if matches {
+                            if let Some(ctx) = m.get("context_length").and_then(|c| c.as_u64()) {
+                                if ctx >= 1024 {
+                                    return Ok(Some(ctx as u32));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Check Modelfile parameters in /api/show
+    let show_url = format!("{}/api/show", origin);
     let body = serde_json::json!({ "name": model_name });
 
-    if let Ok(resp) = client.post(&url).json(&body).send().await {
+    if let Ok(resp) = client.post(&show_url).json(&body).send().await {
         if resp.status().is_success() {
             if let Ok(json) = resp.json::<serde_json::Value>().await {
                 if let Some(params) = json.get("parameters").and_then(|p| p.as_str()) {
@@ -178,6 +205,51 @@ pub async fn proxy_get_ollama_context(
         }
     }
     Ok(None)
+}
+
+/// Helper: Ensures Ollama has loaded the model with at least `desired_ctx` context length in VRAM.
+/// Ollama's OpenAI-compatible /v1/chat/completions endpoint does not set num_ctx when loading
+/// a model, defaulting to 2048/4096 tokens unless preloaded via Ollama's native /api/generate.
+async fn ensure_ollama_context_loaded(
+    client: &reqwest::Client,
+    origin: &str,
+    model: &str,
+    desired_ctx: u64,
+) {
+    let ps_url = format!("{}/api/ps", origin);
+    let mut needs_load = true;
+
+    if let Ok(resp) = client.get(&ps_url).send().await {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(models) = json.get("models").and_then(|m| m.as_array()) {
+                    for m in models {
+                        let name = m.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let current_ctx = m.get("context_length").and_then(|c| c.as_u64()).unwrap_or(0);
+                        let matches_name = name == model
+                            || name.starts_with(&format!("{}:", model))
+                            || model.starts_with(&format!("{}:", name));
+                        if matches_name && current_ctx >= desired_ctx {
+                            needs_load = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if needs_load {
+        let gen_url = format!("{}/api/generate", origin);
+        let preload_body = serde_json::json!({
+            "model": model,
+            "prompt": "",
+            "options": {
+                "num_ctx": desired_ctx
+            }
+        });
+        let _ = client.post(&gen_url).json(&preload_body).send().await;
+    }
 }
 
 /// Registry of in-flight streams so the frontend can cancel them. Dropping the HTTP response
@@ -229,6 +301,25 @@ pub async fn proxy_stream_chat(
         }
     }
     let _unregister = Unregister(stream_id.clone());
+
+    // If connecting to an Ollama server, ensure the model is loaded with the user's desired num_ctx.
+    // Ollama's /v1/chat/completions ignores options.num_ctx when loading a model into VRAM, defaulting
+    // to 2048/4096 tokens unless preloaded via Ollama's native /api/generate endpoint.
+    let is_ollama = base_url.contains(":11434") || base_url.contains("ollama");
+    if is_ollama {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload) {
+            let model = val.get("model").and_then(|m| m.as_str()).unwrap_or("");
+            let num_ctx = val.pointer("/options/num_ctx")
+                .and_then(|v| v.as_u64())
+                .or_else(|| val.get("num_ctx").and_then(|v| v.as_u64()))
+                .unwrap_or(16384);
+
+            if !model.is_empty() && num_ctx > 4096 {
+                let origin = base_url.trim_end_matches('/').trim_end_matches("/v1");
+                ensure_ollama_context_loaded(&client, origin, model, num_ctx).await;
+            }
+        }
+    }
 
     let send_fut = client
         .post(&url)
