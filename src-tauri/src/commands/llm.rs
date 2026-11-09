@@ -244,11 +244,14 @@ async fn ensure_ollama_context_loaded(
         let preload_body = serde_json::json!({
             "model": model,
             "prompt": "",
+            "stream": false,
             "options": {
                 "num_ctx": desired_ctx
             }
         });
-        let _ = client.post(&gen_url).json(&preload_body).send().await;
+        if let Ok(resp) = client.post(&gen_url).json(&preload_body).send().await {
+            let _ = resp.bytes().await;
+        }
     }
 }
 
