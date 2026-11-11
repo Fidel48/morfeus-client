@@ -208,52 +208,164 @@ pub async fn proxy_get_ollama_context(
     Ok(None)
 }
 
-/// Helper: Ensures Ollama has loaded the model with at least `desired_ctx` context length in VRAM.
-/// Ollama's OpenAI-compatible /v1/chat/completions endpoint does not set num_ctx when loading
-/// a model, defaulting to 2048/4096 tokens unless preloaded via Ollama's native /api/generate.
-async fn ensure_ollama_context_loaded(
-    client: &reqwest::Client,
-    origin: &str,
-    model: &str,
-    desired_ctx: u64,
-) {
-    let ps_url = format!("{}/api/ps", origin);
-    let mut needs_load = true;
+/// Helper: Prepares an OpenAI-compatible chat completion payload for Ollama's native `/api/chat` endpoint.
+/// Ollama's `/v1/chat/completions` translation adapter discards `options.num_ctx` and reloads models with
+/// a hardcoded 2048/4096 VRAM context ceiling. Routing directly to `/api/chat` with explicit `options.num_ctx`
+/// guarantees that Ollama allocates and preserves the exact context window requested by the user.
+fn transform_for_ollama(payload: &str) -> (serde_json::Value, u64) {
+    let mut val: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return (serde_json::Value::Null, 16384),
+    };
 
-    if let Ok(resp) = client.get(&ps_url).send().await {
-        if resp.status().is_success() {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                if let Some(models) = json.get("models").and_then(|m| m.as_array()) {
-                    for m in models {
-                        let name = m.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                        let current_ctx = m.get("context_length").and_then(|c| c.as_u64()).unwrap_or(0);
-                        let matches_name = name == model
-                            || name.starts_with(&format!("{}:", model))
-                            || model.starts_with(&format!("{}:", name));
-                        if matches_name && current_ctx >= desired_ctx {
-                            needs_load = false;
-                            break;
+    let num_ctx = val.pointer("/options/num_ctx")
+        .and_then(|v| v.as_u64())
+        .or_else(|| val.get("num_ctx").and_then(|v| v.as_u64()))
+        .unwrap_or(16384);
+
+    let temperature = val.get("temperature").cloned();
+    let top_p = val.get("top_p").cloned();
+    let max_tokens = val.get("max_tokens").cloned();
+    let repeat_penalty = val.pointer("/options/repeat_penalty").cloned();
+
+    // Transform messages: Ollama's /api/chat expects message.content to be a string.
+    // If it's an array of multimodal parts (text + image_url), extract text and images.
+    if let Some(messages) = val.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for msg in messages {
+            if let Some(content_val) = msg.get("content") {
+                if let Some(parts) = content_val.as_array() {
+                    let mut text_buf = String::new();
+                    let mut images_arr = Vec::new();
+
+                    for p in parts {
+                        if let Some(typ) = p.get("type").and_then(|t| t.as_str()) {
+                            if typ == "text" {
+                                if let Some(txt) = p.get("text").and_then(|t| t.as_str()) {
+                                    text_buf.push_str(txt);
+                                }
+                            } else if typ == "image_url" {
+                                if let Some(url_str) = p.pointer("/image_url/url").and_then(|u| u.as_str()) {
+                                    let b64 = if let Some(comma_pos) = url_str.find(',') {
+                                        &url_str[comma_pos + 1..]
+                                    } else {
+                                        url_str
+                                    };
+                                    images_arr.push(serde_json::Value::String(b64.to_string()));
+                                }
+                            }
                         }
                     }
+
+                    msg["content"] = serde_json::Value::String(text_buf);
+                    if !images_arr.is_empty() {
+                        msg["images"] = serde_json::Value::Array(images_arr);
+                    }
                 }
+            } else {
+                msg["content"] = serde_json::Value::String(String::new());
             }
         }
     }
 
-    if needs_load {
-        let gen_url = format!("{}/api/generate", origin);
-        let preload_body = serde_json::json!({
-            "model": model,
-            "prompt": "",
-            "stream": false,
-            "options": {
-                "num_ctx": desired_ctx
-            }
-        });
-        if let Ok(resp) = client.post(&gen_url).json(&preload_body).send().await {
-            let _ = resp.bytes().await;
+    // Build options map for Ollama
+    let mut options = serde_json::Map::new();
+    options.insert("num_ctx".to_string(), serde_json::json!(num_ctx));
+    if let Some(t) = temperature {
+        options.insert("temperature".to_string(), t);
+    }
+    if let Some(p) = top_p {
+        options.insert("top_p".to_string(), p);
+    }
+    if let Some(m) = max_tokens {
+        options.insert("num_predict".to_string(), m);
+    }
+    if let Some(rp) = repeat_penalty {
+        options.insert("repeat_penalty".to_string(), rp);
+    } else {
+        options.insert("repeat_penalty".to_string(), serde_json::json!(1.1));
+    }
+    val["options"] = serde_json::Value::Object(options);
+    val["stream"] = serde_json::json!(true);
+
+    (val, num_ctx)
+}
+
+/// Helper: Translates an Ollama `/api/chat` ndjson streaming chunk into an OpenAI-compatible SSE chunk.
+fn ollama_chunk_to_openai_sse(stream_id: &str, line: &str) -> Result<Option<(String, bool)>, String> {
+    let val: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+
+    if let Some(err) = val.get("error").and_then(|e| e.as_str()) {
+        return Err(err.to_string());
+    }
+
+    let model = val.get("model").and_then(|m| m.as_str()).unwrap_or("ollama");
+    let done = val.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
+    let done_reason = val.get("done_reason").and_then(|r| r.as_str()).unwrap_or("stop");
+
+    let message = val.get("message");
+    let content = message.and_then(|m| m.get("content")).and_then(|c| c.as_str()).unwrap_or("");
+    let thinking = message.and_then(|m| m.get("thinking")).and_then(|t| t.as_str()).unwrap_or("");
+
+    let mut delta = serde_json::Map::new();
+    delta.insert("role".to_string(), serde_json::json!("assistant"));
+    if !content.is_empty() {
+        delta.insert("content".to_string(), serde_json::json!(content));
+    }
+    if !thinking.is_empty() {
+        delta.insert("reasoning_content".to_string(), serde_json::json!(thinking));
+    }
+
+    if let Some(tool_calls) = message.and_then(|m| m.get("tool_calls")).and_then(|tc| tc.as_array()) {
+        let mut converted_tc = Vec::new();
+        for (idx, tc) in tool_calls.iter().enumerate() {
+            let tc_id = tc.get("id").and_then(|id| id.as_str()).unwrap_or("call_ollama");
+            let func_name = tc.pointer("/function/name").and_then(|n| n.as_str()).unwrap_or("");
+            let func_args = tc.pointer("/function/arguments");
+            let args_str = match func_args {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(obj) => serde_json::to_string(obj).unwrap_or_default(),
+                None => String::new(),
+            };
+            converted_tc.push(serde_json::json!({
+                "index": idx,
+                "id": tc_id,
+                "type": "function",
+                "function": {
+                    "name": func_name,
+                    "arguments": args_str
+                }
+            }));
+        }
+        if !converted_tc.is_empty() {
+            delta.insert("tool_calls".to_string(), serde_json::Value::Array(converted_tc));
         }
     }
+
+    let finish_reason = if done {
+        serde_json::json!(done_reason)
+    } else {
+        serde_json::Value::Null
+    };
+
+    let openai_chunk = serde_json::json!({
+        "id": stream_id,
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason
+            }
+        ]
+    });
+
+    let sse_data = serde_json::to_string(&openai_chunk).map_err(|e| e.to_string())?;
+    Ok(Some((sse_data, done)))
 }
 
 /// Registry of in-flight streams so the frontend can cancel them. Dropping the HTTP response
@@ -292,7 +404,6 @@ pub async fn proxy_stream_chat(
     use tauri::Emitter;
     use futures_util::StreamExt;
 
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let client = make_client();
     let cancel = stream_cancel_handle(&stream_id);
     // Always unregister when this stream ends, whatever the exit path.
@@ -306,30 +417,28 @@ pub async fn proxy_stream_chat(
     }
     let _unregister = Unregister(stream_id.clone());
 
-    // If connecting to an Ollama server, ensure the model is loaded with the user's desired num_ctx.
-    // Ollama's /v1/chat/completions ignores options.num_ctx when loading a model into VRAM, defaulting
-    // to 2048/4096 tokens unless preloaded via Ollama's native /api/generate endpoint.
+    // Ollama's OpenAI-compatible /v1/chat/completions endpoint does not respect per-request
+    // context window parameters (num_ctx), resetting loaded models to 2048/4096 VRAM limit.
+    // For Ollama connections, route directly to Ollama's native /api/chat with full options support.
     let is_ollama = base_url.contains(":11434") || base_url.contains("ollama");
-    if is_ollama {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload) {
-            let model = val.get("model").and_then(|m| m.as_str()).unwrap_or("");
-            let num_ctx = val.pointer("/options/num_ctx")
-                .and_then(|v| v.as_u64())
-                .or_else(|| val.get("num_ctx").and_then(|v| v.as_u64()))
-                .unwrap_or(16384);
-
-            if !model.is_empty() && num_ctx > 4096 {
-                let trimmed_url = base_url.trim_end_matches('/');
-                let origin = trimmed_url.strip_suffix("/v1").unwrap_or(trimmed_url);
-                ensure_ollama_context_loaded(&client, origin, model, num_ctx).await;
-            }
-        }
-    }
+    let (url, request_payload) = if is_ollama {
+        let trimmed_url = base_url.trim_end_matches('/');
+        let origin = trimmed_url.strip_suffix("/v1").unwrap_or(trimmed_url);
+        let (val, _num_ctx) = transform_for_ollama(&payload);
+        let final_body = if val.is_null() {
+            payload
+        } else {
+            serde_json::to_string(&val).unwrap_or(payload)
+        };
+        (format!("{}/api/chat", origin), final_body)
+    } else {
+        (format!("{}/chat/completions", base_url.trim_end_matches('/')), payload)
+    };
 
     let send_fut = client
         .post(&url)
         .headers(make_stream_headers(&api_key)) // includes X-Accel-Buffering: no for Cloudflare
-        .body(payload)
+        .body(request_payload)
         .send();
 
     let resp = tokio::select! {
@@ -431,35 +540,172 @@ pub async fn proxy_stream_chat(
 
         buffer.extend_from_slice(&chunk);
 
-        // Process complete SSE lines
-        while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
-            let raw: Vec<u8> = buffer.drain(..=newline_pos).collect();
-            let line = String::from_utf8_lossy(&raw[..raw.len() - 1]).trim().to_string();
+        if is_ollama {
+            // Process complete Ollama ndjson lines
+            while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+                let raw: Vec<u8> = buffer.drain(..=newline_pos).collect();
+                let line = String::from_utf8_lossy(&raw[..raw.len() - 1]).trim().to_string();
 
-            if line.is_empty() {
-                continue;
-            }
-
-            if let Some(rest) = line.strip_prefix("data:") {
-                let data = rest.trim();
-                if data.is_empty() {
+                if line.is_empty() {
                     continue;
                 }
 
-                if data == "[DONE]" {
-                    let _ = app.emit("stream-done", serde_json::json!({ "id": stream_id }));
-                    return Ok(());
+                match ollama_chunk_to_openai_sse(&stream_id, &line) {
+                    Ok(Some((sse_data, done))) => {
+                        let _ = app.emit("stream-token", serde_json::json!({
+                            "id": stream_id,
+                            "data": sse_data
+                        }));
+                        if done {
+                            let _ = app.emit("stream-done", serde_json::json!({ "id": stream_id }));
+                            return Ok(());
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err_msg) => {
+                        let _ = app.emit("stream-error", serde_json::json!({ "id": stream_id, "error": err_msg }));
+                        return Err(err_msg);
+                    }
+                }
+            }
+        } else {
+            // Process complete OpenAI SSE lines
+            while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+                let raw: Vec<u8> = buffer.drain(..=newline_pos).collect();
+                let line = String::from_utf8_lossy(&raw[..raw.len() - 1]).trim().to_string();
+
+                if line.is_empty() {
+                    continue;
                 }
 
-                // Emit raw JSON chunk to frontend
-                let _ = app.emit("stream-token", serde_json::json!({
-                    "id": stream_id,
-                    "data": data
-                }));
+                if let Some(rest) = line.strip_prefix("data:") {
+                    let data = rest.trim();
+                    if data.is_empty() {
+                        continue;
+                    }
+
+                    if data == "[DONE]" {
+                        let _ = app.emit("stream-done", serde_json::json!({ "id": stream_id }));
+                        return Ok(());
+                    }
+
+                    // Emit raw JSON chunk to frontend
+                    let _ = app.emit("stream-token", serde_json::json!({
+                        "id": stream_id,
+                        "data": data
+                    }));
+                }
             }
         }
     }
 
     let _ = app.emit("stream-done", serde_json::json!({ "id": stream_id }));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_transform_for_ollama_basic() {
+        let input = serde_json::json!({
+            "model": "qwen3.5:9b",
+            "messages": [
+                { "role": "system", "content": "You are helpful." },
+                { "role": "user", "content": "Hello!" }
+            ],
+            "temperature": 0.7,
+            "max_tokens": 4096,
+            "options": {
+                "num_ctx": 32768
+            },
+            "think": false
+        });
+
+        let (transformed, num_ctx) = transform_for_ollama(&input.to_string());
+        assert_eq!(num_ctx, 32768);
+        assert_eq!(transformed["model"], "qwen3.5:9b");
+        assert_eq!(transformed["stream"], true);
+        assert_eq!(transformed["options"]["num_ctx"], 32768);
+        assert_eq!(transformed["options"]["temperature"], 0.7);
+        assert_eq!(transformed["options"]["num_predict"], 4096);
+        assert_eq!(transformed["options"]["repeat_penalty"], 1.1);
+        assert_eq!(transformed["think"], false);
+    }
+
+    #[test]
+    fn test_transform_for_ollama_multimodal() {
+        let input = serde_json::json!({
+            "model": "qwen3.5:9b",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Describe this image: " },
+                        { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==" } }
+                    ]
+                }
+            ],
+            "options": {
+                "num_ctx": 16384
+            }
+        });
+
+        let (transformed, num_ctx) = transform_for_ollama(&input.to_string());
+        assert_eq!(num_ctx, 16384);
+        let msg = &transformed["messages"][0];
+        assert_eq!(msg["content"], "Describe this image: ");
+        assert_eq!(msg["images"][0], "iVBORw0KGgoAAAANSUhEUg==");
+    }
+
+    #[test]
+    fn test_ollama_chunk_to_openai_sse_text_and_thinking() {
+        let stream_id = "test-stream-123";
+
+        // 1. Thinking chunk
+        let thinking_line = r#"{"model":"qwen3.5:9b","message":{"role":"assistant","content":"","thinking":"Hmm let me think"},"done":false}"#;
+        let res = ollama_chunk_to_openai_sse(stream_id, thinking_line).unwrap();
+        assert!(res.is_some());
+        let (sse, done) = res.unwrap();
+        assert!(!done);
+        let val: serde_json::Value = serde_json::from_str(&sse).unwrap();
+        assert_eq!(val["id"], stream_id);
+        assert_eq!(val["choices"][0]["delta"]["reasoning_content"], "Hmm let me think");
+        assert!(val["choices"][0]["finish_reason"].is_null());
+
+        // 2. Content chunk
+        let content_line = r#"{"model":"qwen3.5:9b","message":{"role":"assistant","content":"Answer is B."},"done":false}"#;
+        let res2 = ollama_chunk_to_openai_sse(stream_id, content_line).unwrap();
+        assert!(res2.is_some());
+        let (sse2, done2) = res2.unwrap();
+        assert!(!done2);
+        let val2: serde_json::Value = serde_json::from_str(&sse2).unwrap();
+        assert_eq!(val2["choices"][0]["delta"]["content"], "Answer is B.");
+
+        // 3. Done chunk
+        let done_line = r#"{"model":"qwen3.5:9b","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}"#;
+        let res3 = ollama_chunk_to_openai_sse(stream_id, done_line).unwrap();
+        assert!(res3.is_some());
+        let (sse3, done3) = res3.unwrap();
+        assert!(done3);
+        let val3: serde_json::Value = serde_json::from_str(&sse3).unwrap();
+        assert_eq!(val3["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn test_ollama_chunk_to_openai_sse_tool_calls() {
+        let stream_id = "test-stream-456";
+        let tool_line = r#"{"model":"qwen3.5:9b","message":{"role":"assistant","content":"","tool_calls":[{"id":"call_abc","function":{"name":"search","arguments":{"query":"NC law"}}}]},"done":false}"#;
+        let res = ollama_chunk_to_openai_sse(stream_id, tool_line).unwrap();
+        assert!(res.is_some());
+        let (sse, done) = res.unwrap();
+        assert!(!done);
+        let val: serde_json::Value = serde_json::from_str(&sse).unwrap();
+        let tc = &val["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(tc["id"], "call_abc");
+        assert_eq!(tc["function"]["name"], "search");
+        // Arguments must be serialized to string for OpenAI format
+        assert_eq!(tc["function"]["arguments"], r#"{"query":"NC law"}"#);
+    }
 }
