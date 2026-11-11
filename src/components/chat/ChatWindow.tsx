@@ -739,7 +739,7 @@ export const ChatWindow: React.FC = () => {
     const fitted = trimHistoryToContext(messages, {
       systemPrompt: 'x'.repeat(systemTokens * 4),
       contextLength: maxContext,
-      maxTokens: settings.max_tokens || 2048,
+      maxTokens: settings.max_tokens && settings.max_tokens > 0 ? settings.max_tokens : 4096,
     });
 
     let msgTokens = 0;

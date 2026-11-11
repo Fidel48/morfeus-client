@@ -177,16 +177,16 @@ const ParametersTab: React.FC<{ settings: AppSettings; updateSettings: (p: Parti
       <div className="flex items-center justify-between mb-1.5">
         <label className="text-xs text-zinc-400 font-medium">Max Tokens</label>
         <span className="text-xs text-zinc-500 font-mono bg-white/5 px-1.5 py-0.5 rounded">
-          {settings.max_tokens}
+          {!settings.max_tokens || settings.max_tokens === 0 ? 'Auto' : settings.max_tokens}
         </span>
       </div>
       <input
         type="range"
-        min={512}
+        min={0}
         max={8192}
         step={256}
-        value={settings.max_tokens}
-        onChange={(e) => updateSettings({ max_tokens: parseInt(e.target.value) })}
+        value={settings.max_tokens || 0}
+        onChange={(e) => updateSettings({ max_tokens: parseInt(e.target.value) || 0 })}
         className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer accent-violet-500"
       />
     </div>

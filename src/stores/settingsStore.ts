@@ -189,10 +189,11 @@ export function sanitizeAppSettings(settings: AppSettings): AppSettings {
     modelId = '';
   }
 
+  // 0 indicates "Auto" (dynamic headroom calculated automatically)
   const safeMaxTokens =
-    typeof settings.max_tokens === 'number' && settings.max_tokens >= 512
+    typeof settings.max_tokens === 'number' && (settings.max_tokens === 0 || settings.max_tokens >= 256)
       ? settings.max_tokens
-      : 4096;
+      : 0;
   const safeContextLength =
     typeof settings.context_length === 'number' && settings.context_length >= 4096
       ? settings.context_length
@@ -222,7 +223,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   providers: DEFAULT_PROVIDERS,
   temperature: 0.7,
   top_p: 1.0,
-  max_tokens: 4096,
+  max_tokens: 0, // 0 = Auto (Dynamic Headroom)
   context_length: 16384,
   frequency_penalty: 0.3,
   system_prompt: 'You are a helpful AI assistant.',

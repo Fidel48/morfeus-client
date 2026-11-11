@@ -677,16 +677,27 @@ ${ctx ? `\n${ctx}\n` : ''}
         const effectiveBaseUrl = matchedProvider ? matchedProvider.base_url : currentSettings.base_url;
         const effectiveApiKey = matchedProvider ? (matchedProvider.api_key || '') : currentSettings.api_key;
 
-        // Reasoning tokens count against max_tokens on most servers. When Think is on, add
-        // headroom so the model can finish thinking AND write an answer, but never exceed
-        // half of the user's chosen context window, so history/prompt still fit and the
-        // context window setting is respected exactly as configured.
-        const REASONING_HEADROOM = 6144;
-        const baseMaxTokens = Math.max(currentSettings.max_tokens || 4096, 1024);
+        // Auto Token Adjuster: Dynamic Token Headroom calculation
+        // When max_tokens is 0 (Auto), compute the largest safe output allocation (up to 8,192).
+        // If Think is enabled, ensure sufficient headroom so the model can both think and write.
         const effectiveContext = resolveEffectiveContextLength(resolvedModelId, currentSettings.context_length);
-        const effectiveMaxTokens = isThink
-          ? Math.max(baseMaxTokens, Math.min(baseMaxTokens + REASONING_HEADROOM, Math.floor(effectiveContext / 2)))
-          : Math.min(baseMaxTokens, Math.floor(effectiveContext / 2));
+        const isAutoTokens = !currentSettings.max_tokens || currentSettings.max_tokens === 0;
+        const maxAllowed = Math.max(1024, Math.floor(effectiveContext * 0.65));
+
+        let effectiveMaxTokens: number;
+        if (isAutoTokens) {
+          effectiveMaxTokens = Math.min(8192, maxAllowed);
+        } else {
+          const userMax = Math.max(currentSettings.max_tokens, 1024);
+          effectiveMaxTokens = Math.min(userMax, maxAllowed);
+        }
+        if (isThink) {
+          const REASONING_HEADROOM = 4096;
+          effectiveMaxTokens = Math.min(
+            effectiveMaxTokens + REASONING_HEADROOM,
+            Math.max(2048, Math.floor(effectiveContext * 0.75))
+          );
+        }
 
         const effectiveSettings: AppSettings = {
           ...currentSettings,
@@ -1736,54 +1747,61 @@ ${projectBlock}CRITICAL DIRECTIVES:
           }
 
           // ── Reply cut off by the token limit (not a thinking-only truncation) ──
-          // Attempt 1 seamless auto-continuation so mid-sentence / mid-question cutoffs complete cleanly.
+          // Seamless multi-pass auto-continuation (up to 2 passes) so large mid-sentence cutoffs complete cleanly.
           if (finishReason === 'length' && !isEmptyContent && noToolCalls && !controller.signal.aborted) {
             let contFinishReason: string | null = 'length';
-            try {
-              const contMessages = [
-                ...apiMessages,
-                { role: 'assistant', content: finalMessage.content ?? '' },
-                {
-                  role: 'user',
-                  content:
-                    'Continue directly from the exact word or character where you left off. Do not repeat what you already wrote and do not add any preamble.',
-                },
-              ];
-              const fittedContMessages = trimHistoryToContext(contMessages, {
-                systemPrompt,
-                contextLength: effectiveSettings.context_length,
-                maxTokens: 2048,
-              });
-              let contText = '';
-              for await (const contChunk of streamChat(effectiveSettings, fittedContMessages, controller.signal, [], true)) {
-                if (controller.signal.aborted) break;
-                const contChoice = contChunk?.choices?.[0];
-                const contDelta = contChoice?.delta?.content;
-                if (contDelta) {
-                  contText += contDelta;
-                  const liveTts = useSettingsStore.getState().settings.tts_enabled;
-                  if (liveTts) speechQueue.feedToken(contDelta);
-                  useChatStore.setState((state) => ({
-                    messages: state.messages.map((m) =>
-                      m.id === finalMessage.id ? { ...m, content: `${m.content ?? ''}${contDelta}` } : m
-                    ),
-                  }));
+            let contPass = 0;
+            const MAX_AUTO_CONT_PASSES = 2;
+
+            while (contFinishReason === 'length' && contPass < MAX_AUTO_CONT_PASSES && !controller.signal.aborted) {
+              contPass++;
+              try {
+                const contMessages = [
+                  ...apiMessages,
+                  { role: 'assistant', content: finalMessage.content ?? '' },
+                  {
+                    role: 'user',
+                    content:
+                      'Continue directly from the exact word or character where you left off. Do not repeat what you already wrote and do not add any preamble.',
+                  },
+                ];
+                const fittedContMessages = trimHistoryToContext(contMessages, {
+                  systemPrompt,
+                  contextLength: effectiveSettings.context_length,
+                  maxTokens: effectiveSettings.max_tokens || 4096,
+                });
+                let contText = '';
+                for await (const contChunk of streamChat(effectiveSettings, fittedContMessages, controller.signal, [], true)) {
+                  if (controller.signal.aborted) break;
+                  const contChoice = contChunk?.choices?.[0];
+                  const contDelta = contChoice?.delta?.content;
+                  if (contDelta) {
+                    contText += contDelta;
+                    const liveTts = useSettingsStore.getState().settings.tts_enabled;
+                    if (liveTts) speechQueue.feedToken(contDelta);
+                    useChatStore.setState((state) => ({
+                      messages: state.messages.map((m) =>
+                        m.id === finalMessage.id ? { ...m, content: `${m.content ?? ''}${contDelta}` } : m
+                      ),
+                    }));
+                  }
+                  if (contChoice?.finish_reason) contFinishReason = contChoice.finish_reason;
                 }
-                if (contChoice?.finish_reason) contFinishReason = contChoice.finish_reason;
+                if (contText) {
+                  finalMessage = { ...finalMessage, content: `${finalMessage.content ?? ''}${contText}` };
+                }
+              } catch (contErr) {
+                console.warn('[Chat] Auto-continue after finish_reason=length failed:', contErr);
+                break;
               }
-              if (contText) {
-                finalMessage = { ...finalMessage, content: `${finalMessage.content ?? ''}${contText}` };
-              }
-            } catch (contErr) {
-              console.warn('[Chat] Auto-continue after finish_reason=length failed:', contErr);
             }
 
             if (contFinishReason === 'length' && !controller.signal.aborted) {
-              tauriApi.appendSystemLog('warn', 'Reply truncated: finish_reason=length. Raise Max Tokens / Context Length.');
+              tauriApi.appendSystemLog('warn', 'Reply truncated: finish_reason=length after auto-continuation passes.');
               useChatStore.setState((state) => ({
                 messages: state.messages.map((m) =>
                   m.id === finalMessage.id
-                    ? { ...m, content: `${m.content ?? ''}\n\n> ⚠️ _Reply was cut off at the Max Tokens limit. Raise **Max Tokens** (and Context Length) in Params, or ask me to continue._` }
+                    ? { ...m, content: `${m.content ?? ''}\n\n> ⚠️ _Reply reached maximum continuous token capacity. Ask me to continue to proceed._` }
                     : m
                 ),
               }));

@@ -1047,21 +1047,20 @@ const ParametersTab: React.FC<{
       </div>
     </Field>
 
-    <Field label="Max Output Tokens" hint="Maximum tokens the model is allowed to generate per response.">
+    <Field label="Max Output Tokens" hint="Maximum tokens the model is allowed to generate per response. Auto dynamically maximizes headroom.">
       <div className="space-y-2">
         <Input
           type="number"
-          value={settings.max_tokens || ''}
-          onChange={(e) => updateSettings({ max_tokens: parseInt(e.target.value) || 0 })}
-          placeholder="2048"
-          onBlur={(e) => {
-            if (!settings.max_tokens || settings.max_tokens < 256) {
-              updateSettings({ max_tokens: 2048 });
-            }
+          value={settings.max_tokens === 0 || !settings.max_tokens ? '' : settings.max_tokens}
+          onChange={(e) => {
+            const val = e.target.value.trim();
+            updateSettings({ max_tokens: val === '' ? 0 : Math.max(0, parseInt(val) || 0) });
           }}
+          placeholder="Auto (Dynamic Headroom)"
         />
         <div className="flex gap-2">
           {[
+            { label: 'Auto (Dynamic)', value: 0 },
             { label: '2048 (Standard)', value: 2048 },
             { label: '4096 (Long Answers)', value: 4096 },
             { label: '8192 (Max Output)', value: 8192 },
@@ -1072,7 +1071,7 @@ const ParametersTab: React.FC<{
               onClick={() => updateSettings({ max_tokens: preset.value })}
               className={cn(
                 'px-2.5 py-1 text-[11px] rounded-md transition-all cursor-pointer border',
-                settings.max_tokens === preset.value
+                (settings.max_tokens === preset.value || (preset.value === 0 && (!settings.max_tokens || settings.max_tokens === 0)))
                   ? 'bg-violet-600/25 text-violet-300 border-violet-500/40 font-medium'
                   : 'bg-white/5 text-zinc-400 hover:text-zinc-200 border-white/8 hover:bg-white/8'
               )}

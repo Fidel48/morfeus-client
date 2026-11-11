@@ -749,8 +749,36 @@ export async function* streamChat(
   const isLocalServer = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(settings.base_url || '');
 
   const effectiveContext = resolveEffectiveContextLength(settings.model_id, settings.context_length);
-  const safeMaxTokens = Math.max(settings.max_tokens || 2048, 1024);
   const safeContextLength = Math.max(effectiveContext, 4096);
+
+  // Auto Token Adjuster: Dynamically measure prompt token weight to calculate safe output headroom
+  let estimatedPromptTokens = 0;
+  for (const m of messages) {
+    if (typeof m.content === 'string') {
+      estimatedPromptTokens += Math.ceil(m.content.length / 3.8) + 12;
+    } else if (Array.isArray(m.content)) {
+      for (const part of m.content) {
+        if (part.type === 'text' && part.text) {
+          estimatedPromptTokens += Math.ceil(part.text.length / 3.8);
+        } else if (part.type === 'image_url') {
+          estimatedPromptTokens += 1000;
+        }
+      }
+    }
+    if (m.tool_calls) {
+      estimatedPromptTokens += 60 * m.tool_calls.length;
+    }
+  }
+  if (allTools.length > 0) {
+    estimatedPromptTokens += 40 * allTools.length;
+  }
+
+  // Reserve safety headroom so the model never clips the context ceiling
+  const availableHeadroom = Math.max(1024, safeContextLength - estimatedPromptTokens - 256);
+  const isAutoTokens = !settings.max_tokens || settings.max_tokens === 0;
+  const safeMaxTokens = isAutoTokens
+    ? Math.min(8192, availableHeadroom)
+    : Math.min(settings.max_tokens, availableHeadroom);
 
   const body: any = {
     model: settings.model_id,
