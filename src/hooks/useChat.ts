@@ -991,21 +991,20 @@ ${projectBlock}CRITICAL DIRECTIVES:
                   }
                 };
 
-                const scrapeTargets = res.filter(isScrapeCandidate).slice(0, 2);
-                const scrapedBlocks: string[] = [];
-                for (const target of scrapeTargets) {
-                  try {
+                const scrapeTargets = res.filter(isScrapeCandidate).slice(0, 5);
+                const scrapedResults = await Promise.allSettled(
+                  scrapeTargets.map(async (target) => {
                     const pageText = await tauriApi.fetchWebpage(target.url);
                     if (pageText && !pageText.startsWith('[Webpage Notice]') && pageText.length > 120) {
-                      const clippedPage = pageText.length > 3200 ? `${pageText.slice(0, 3200)}...` : pageText;
-                      scrapedBlocks.push(
-                        `═══════════════════════════════════════════════════\nFULL ARTICLE CONTENT (From Source: "${target.title}" | ${target.url}):\n═══════════════════════════════════════════════════\n${clippedPage}\n═══════════════════════════════════════════════════`
-                      );
+                      const clippedPage = pageText.length > 2500 ? `${pageText.slice(0, 2500)}...` : pageText;
+                      return `═══════════════════════════════════════════════════\nFULL ARTICLE CONTENT (From Source: "${target.title}" | ${target.url}):\n═══════════════════════════════════════════════════\n${clippedPage}\n═══════════════════════════════════════════════════`;
                     }
-                  } catch (e) {
-                    console.warn('[web_search] Could not auto-scrape article:', e);
-                  }
-                }
+                    return null;
+                  })
+                );
+                const scrapedBlocks = scrapedResults
+                  .filter((r): r is PromiseFulfilledResult<string | null> => r.status === 'fulfilled' && r.value !== null)
+                  .map((r) => r.value as string);
                 if (scrapedBlocks.length > 0) {
                   topArticleContent = `\n\n${scrapedBlocks.join('\n\n')}`;
                 }

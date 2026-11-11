@@ -243,120 +243,6 @@ fn parse_google_news_rss(body: &str, results: &mut Vec<SearchResult>) {
     }
 }
 
-fn is_relevant_wikipedia_match(query: &str, title: &str, snippet: &str) -> bool {
-    const GENERIC_STOP_WORDS: &[&str] = &[
-        "the", "a", "an", "and", "or", "for", "with", "about", "into", "from",
-        "of", "in", "on", "at", "to", "by", "is", "are", "was", "were", "what",
-        "how", "many", "when", "where", "why", "who", "which", "can", "you",
-        "tell", "me", "please", "i", "need", "help", "topics", "coverage", "syllabus",
-        "curriculum", "questions", "details", "information", "overview", "taker",
-        "english", "state", "total", "number", "test", "tests"
-    ];
-
-    let query_lower = query.to_lowercase();
-    let query_words: Vec<&str> = query_lower
-        .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
-        .filter(|w| w.len() >= 3 && !GENERIC_STOP_WORDS.contains(w))
-        .collect();
-
-    if query_words.is_empty() {
-        return false;
-    }
-
-    let title_lower = title.to_lowercase();
-    let snippet_lower = snippet.to_lowercase();
-
-    // The title must contain at least one significant query word, OR the snippet must contain at least two significant query words
-    let title_matches = query_words.iter().filter(|&&w| title_lower.contains(w)).count();
-    let snippet_matches = query_words.iter().filter(|&&w| snippet_lower.contains(w)).count();
-
-    title_matches >= 1 || snippet_matches >= 2
-}
-
-async fn search_wikipedia(client: &Client, query: &str, results: &mut Vec<SearchResult>) {
-    let cleaned = normalize_search_query(query);
-    let stop_words = [
-        "latest", "lastes", "lates", "breaking", "recent", "current", "today", "todays",
-        "news", "headlines", "update", "updates", "about", "in", "from", "on", "for", "the",
-    ];
-    let entity_cleaned: String = cleaned
-        .split_whitespace()
-        .filter(|w| !stop_words.contains(&w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).as_ref()))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let wiki_query = if entity_cleaned.trim().len() >= 2 {
-        entity_cleaned.trim()
-    } else {
-        cleaned.as_str()
-    };
-    let wiki_url = format!(
-        "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={}&utf8=&format=json&srlimit=4",
-        urlencoding::encode(wiki_query)
-    );
-    let mut found_titles: Vec<(String, String)> = Vec::new();
-    if let Ok(resp) = client.get(&wiki_url).send().await {
-        if let Ok(json) = resp.json::<serde_json::Value>().await {
-            if let Some(items) = json.get("query").and_then(|q| q.get("search")).and_then(|s| s.as_array()) {
-                for item in items.iter().take(4) {
-                    let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
-                    let raw_snippet = item.get("snippet").and_then(|s| s.as_str()).unwrap_or("");
-                    let fragment = Html::parse_fragment(raw_snippet);
-                    let snippet = fragment.root_element().text().collect::<Vec<_>>().join(" ").trim().to_string();
-                    if !title.is_empty() && is_relevant_wikipedia_match(query, &title, &snippet) {
-                        found_titles.push((title, snippet));
-                    }
-                }
-            }
-        }
-    }
-
-    if found_titles.is_empty() {
-        return;
-    }
-
-    // Fetch rich 900-char encyclopedic intro extracts for the top 2 Wikipedia matches
-    // so local LLMs get complete definitions, dates, and facts without needing extra round-trips.
-    let top_titles: String = found_titles
-        .iter()
-        .take(2)
-        .map(|(t, _)| t.as_str())
-        .collect::<Vec<_>>()
-        .join("|");
-    let mut extracts_map = std::collections::HashMap::<String, String>::new();
-    let extract_url = format!(
-        "https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&exchars=900&titles={}&format=json",
-        urlencoding::encode(&top_titles)
-    );
-    if let Ok(resp) = client.get(&extract_url).send().await {
-        if let Ok(json) = resp.json::<serde_json::Value>().await {
-            if let Some(pages) = json.get("query").and_then(|q| q.get("pages")).and_then(|p| p.as_object()) {
-                for (_id, page) in pages {
-                    let title = page.get("title").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
-                    let extract = page.get("extract").and_then(|e| e.as_str()).unwrap_or("").trim().to_string();
-                    if !title.is_empty() && !extract.is_empty() {
-                        extracts_map.insert(title.to_lowercase(), extract);
-                    }
-                }
-            }
-        }
-    }
-
-    for (title, search_snippet) in found_titles {
-        let slug = title.replace(' ', "_");
-        let url = format!("https://en.wikipedia.org/wiki/{}", urlencoding::encode(&slug));
-        let rich_snippet = extracts_map
-            .get(&title.to_lowercase())
-            .cloned()
-            .unwrap_or_else(|| if search_snippet.is_empty() { title.clone() } else { search_snippet });
-        results.push(SearchResult {
-            title: format!("{} - Wikipedia Encyclopedia", title),
-            url,
-            snippet: rich_snippet,
-        });
-    }
-}
-
 fn format_usd_amount(amount: f64) -> String {
     if amount.abs() < 1.0 && amount != 0.0 {
         return format!("${:.4}", amount);
@@ -838,16 +724,6 @@ pub async fn search_duckduckgo(query: String) -> Result<Vec<SearchResult>, Strin
         }
     }
 
-    // 6. Automatic Wikipedia fallback with strict relevance checking
-    if results.len() == live_feed_count {
-        search_wikipedia(&client, &effective_query, &mut results).await;
-        if results.len() == live_feed_count {
-            if let Some(broadened) = broaden_search_query(&effective_query) {
-                search_wikipedia(&client, &broadened, &mut results).await;
-            }
-        }
-    }
-
     if results.is_empty() {
         return Err(format!("No search results found for query: '{}'. Please try a simpler search term.", query));
     }
@@ -931,39 +807,7 @@ pub async fn fetch_webpage(url: String) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{broaden_search_query, format_usd_amount, is_relevant_wikipedia_match, normalize_search_query, search_duckduckgo};
-
-    #[test]
-    fn filters_unrelated_wikipedia_articles() {
-        // Unrelated articles matched by Wikipedia loose keyword indexing MUST be rejected
-        assert!(!is_relevant_wikipedia_match(
-            "Pearson VUE life insurance exam 55 questions English taker",
-            "Timeline of the COVID-19 pandemic in the United Kingdom (July-December 2020)",
-            "The following is a timeline of the COVID-19 pandemic in the United Kingdom from July to December 2020."
-        ));
-        assert!(!is_relevant_wikipedia_match(
-            "North Carolina state life insurance license exam syllabus curriculum topics coverage 2024",
-            "LGBTQ rights in India",
-            "Lesbian, gay, bisexual, and transgender (LGBT) people in India face legal and social difficulties."
-        ));
-        assert!(!is_relevant_wikipedia_match(
-            "North Carolina state life insurance license exam syllabus curriculum topics coverage 2024",
-            "List of Dispatches episodes",
-            "Dispatches is a British documentary television programme."
-        ));
-
-        // Genuinely relevant encyclopedic articles MUST be accepted
-        assert!(is_relevant_wikipedia_match(
-            "North Carolina life insurance licensing requirements",
-            "Life insurance",
-            "Life insurance (or life assurance, especially in the Commonwealth of Nations) is a contract between an insurance policy holder and an insurer."
-        ));
-        assert!(is_relevant_wikipedia_match(
-            "who is the current CEO of Intel",
-            "Intel",
-            "Intel Corporation is an American multinational corporation and technology company headquartered in Santa Clara, California."
-        ));
-    }
+    use super::{broaden_search_query, format_usd_amount, normalize_search_query, search_duckduckgo};
 
     #[test]
     fn broadens_exam_code_queries() {
