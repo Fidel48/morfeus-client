@@ -155,7 +155,8 @@ pub async fn proxy_get_ollama_context(
     base_url: String,
     model_name: String,
 ) -> Result<Option<u32>, String> {
-    let origin = base_url.trim_end_matches('/').trim_end_matches("/v1");
+    let trimmed_url = base_url.trim_end_matches('/');
+    let origin = trimmed_url.strip_suffix("/v1").unwrap_or(trimmed_url);
     let client = make_client();
 
     // 1. Check live active models in /api/ps
@@ -318,7 +319,8 @@ pub async fn proxy_stream_chat(
                 .unwrap_or(16384);
 
             if !model.is_empty() && num_ctx > 4096 {
-                let origin = base_url.trim_end_matches('/').trim_end_matches("/v1");
+                let trimmed_url = base_url.trim_end_matches('/');
+                let origin = trimmed_url.strip_suffix("/v1").unwrap_or(trimmed_url);
                 ensure_ollama_context_loaded(&client, origin, model, num_ctx).await;
             }
         }

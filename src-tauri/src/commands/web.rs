@@ -243,6 +243,37 @@ fn parse_google_news_rss(body: &str, results: &mut Vec<SearchResult>) {
     }
 }
 
+fn is_relevant_wikipedia_match(query: &str, title: &str, snippet: &str) -> bool {
+    const GENERIC_STOP_WORDS: &[&str] = &[
+        "the", "a", "an", "and", "or", "for", "with", "about", "into", "from",
+        "of", "in", "on", "at", "to", "by", "is", "are", "was", "were", "what",
+        "how", "many", "when", "where", "why", "who", "which", "can", "you",
+        "tell", "me", "please", "i", "need", "help", "topics", "coverage", "syllabus",
+        "curriculum", "questions", "details", "information", "overview", "taker",
+        "english", "state", "total", "number", "test", "tests"
+    ];
+
+    let query_lower = query.to_lowercase();
+    let query_words: Vec<&str> = query_lower
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| w.len() >= 3 && !GENERIC_STOP_WORDS.contains(w))
+        .collect();
+
+    if query_words.is_empty() {
+        return false;
+    }
+
+    let title_lower = title.to_lowercase();
+    let snippet_lower = snippet.to_lowercase();
+
+    // The title must contain at least one significant query word, OR the snippet must contain at least two significant query words
+    let title_matches = query_words.iter().filter(|&&w| title_lower.contains(w)).count();
+    let snippet_matches = query_words.iter().filter(|&&w| snippet_lower.contains(w)).count();
+
+    title_matches >= 1 || snippet_matches >= 2
+}
+
 async fn search_wikipedia(client: &Client, query: &str, results: &mut Vec<SearchResult>) {
     let cleaned = normalize_search_query(query);
     let stop_words = [
@@ -272,7 +303,7 @@ async fn search_wikipedia(client: &Client, query: &str, results: &mut Vec<Search
                     let raw_snippet = item.get("snippet").and_then(|s| s.as_str()).unwrap_or("");
                     let fragment = Html::parse_fragment(raw_snippet);
                     let snippet = fragment.root_element().text().collect::<Vec<_>>().join(" ").trim().to_string();
-                    if !title.is_empty() {
+                    if !title.is_empty() && is_relevant_wikipedia_match(query, &title, &snippet) {
                         found_titles.push((title, snippet));
                     }
                 }
@@ -621,27 +652,9 @@ async fn fetch_live_weather(client: &Client, query: &str) -> Option<SearchResult
     })
 }
 
-#[tauri::command]
-pub async fn search_duckduckgo(query: String) -> Result<Vec<SearchResult>, String> {
-    let client = make_client()?;
-    let mut results = Vec::new();
-    let effective_query = normalize_search_query(&query);
-
-    if let Some(crypto_spot) = fetch_crypto_spot_price(&client, &effective_query).await {
-        results.push(crypto_spot);
-    }
-    if let Some(market_quote) = fetch_market_quote(&client, &effective_query).await {
-        results.push(market_quote);
-    }
-    if let Some(live_wx) = fetch_live_weather(&client, &effective_query).await {
-        results.push(live_wx);
-    }
-
-    let live_feed_count = results.len();
-
-    // 1. Try DuckDuckGo HTML
+async fn query_duckduckgo_html(client: &Client, query: &str, results: &mut Vec<SearchResult>) {
     let html_url = "https://html.duckduckgo.com/html/";
-    if let Ok(resp) = client.post(html_url).form(&[("q", effective_query.as_str()), ("b", ""), ("kl", "us-en")]).send().await {
+    if let Ok(resp) = client.post(html_url).form(&[("q", query), ("b", ""), ("kl", "us-en")]).send().await {
         if resp.status() == reqwest::StatusCode::OK {
             if let Ok(body) = resp.text().await {
                 if !body.contains("anomaly-modal") {
@@ -683,77 +696,120 @@ pub async fn search_duckduckgo(query: String) -> Result<Vec<SearchResult>, Strin
             }
         }
     }
+}
 
-    // 2. Fallback to DuckDuckGo Lite if HTML gave 0 results
-    if results.len() == live_feed_count {
-        let lite_url = "https://lite.duckduckgo.com/lite/";
-        if let Ok(resp) = client.post(lite_url).form(&[("q", effective_query.as_str())]).send().await {
-            if resp.status() == reqwest::StatusCode::OK {
-                if let Ok(body) = resp.text().await {
-                    if !body.contains("anomaly-modal") {
-                        let document = Html::parse_document(&body);
-                        let link_selector = Selector::parse("a.result-link").unwrap();
-                        let snippet_selector = Selector::parse("td.result-snippet").unwrap();
+async fn query_duckduckgo_lite(client: &Client, query: &str, results: &mut Vec<SearchResult>) {
+    let lite_url = "https://lite.duckduckgo.com/lite/";
+    if let Ok(resp) = client.post(lite_url).form(&[("q", query)]).send().await {
+        if resp.status() == reqwest::StatusCode::OK {
+            if let Ok(body) = resp.text().await {
+                if !body.contains("anomaly-modal") {
+                    let document = Html::parse_document(&body);
+                    let link_selector = Selector::parse("a.result-link").unwrap();
+                    let snippet_selector = Selector::parse("td.result-snippet").unwrap();
 
-                        let links: Vec<_> = document.select(&link_selector).collect();
-                        let snippets: Vec<_> = document.select(&snippet_selector).collect();
+                    let links: Vec<_> = document.select(&link_selector).collect();
+                    let snippets: Vec<_> = document.select(&snippet_selector).collect();
 
-                        for (i, link_el) in links.iter().take(6).enumerate() {
-                            let title = link_el.text().collect::<Vec<_>>().join("").trim().to_string();
-                            let url = link_el.value().attr("href").unwrap_or("").to_string();
-                            let snippet = if i < snippets.len() {
-                                snippets[i].text().collect::<Vec<_>>().join("").trim().to_string()
-                            } else {
-                                String::new()
-                            };
+                    for (i, link_el) in links.iter().take(6).enumerate() {
+                        let title = link_el.text().collect::<Vec<_>>().join("").trim().to_string();
+                        let url = link_el.value().attr("href").unwrap_or("").to_string();
+                        let snippet = if i < snippets.len() {
+                            snippets[i].text().collect::<Vec<_>>().join("").trim().to_string()
+                        } else {
+                            String::new()
+                        };
 
-                            if !title.is_empty() && !url.is_empty() {
-                                results.push(SearchResult { title, url, snippet });
-                            }
+                        if !title.is_empty() && !url.is_empty() {
+                            results.push(SearchResult { title, url, snippet });
                         }
                     }
                 }
             }
         }
+    }
+}
+
+async fn query_duckduckgo_api(client: &Client, query: &str, results: &mut Vec<SearchResult>) {
+    let api_url = format!("https://api.duckduckgo.com/?q={}&format=json&no_html=1", urlencoding::encode(query));
+    if let Ok(resp) = client.get(&api_url).send().await {
+        if let Ok(json) = resp.json::<serde_json::Value>().await {
+            if let Some(abstract_text) = json.get("AbstractText").and_then(|v| v.as_str()) {
+                if !abstract_text.is_empty() {
+                    let source_url = json.get("AbstractURL").and_then(|v| v.as_str()).unwrap_or("https://duckduckgo.com");
+                    let source_title = json.get("Heading").and_then(|v| v.as_str()).unwrap_or("Search Result");
+                    results.push(SearchResult {
+                        title: source_title.to_string(),
+                        url: source_url.to_string(),
+                        snippet: abstract_text.to_string(),
+                    });
+                }
+            }
+            if let Some(topics) = json.get("RelatedTopics").and_then(|v| v.as_array()) {
+                for topic in topics.iter().take(5) {
+                    if let (Some(text), Some(url)) = (
+                        topic.get("Text").and_then(|t| t.as_str()),
+                        topic.get("FirstURL").and_then(|u| u.as_str()),
+                    ) {
+                        if !text.is_empty() && !url.is_empty() {
+                            results.push(SearchResult {
+                                title: text.chars().take(80).collect::<String>(),
+                                url: url.to_string(),
+                                snippet: text.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn search_duckduckgo(query: String) -> Result<Vec<SearchResult>, String> {
+    let client = make_client()?;
+    let mut results = Vec::new();
+    let effective_query = normalize_search_query(&query);
+
+    if let Some(crypto_spot) = fetch_crypto_spot_price(&client, &effective_query).await {
+        results.push(crypto_spot);
+    }
+    if let Some(market_quote) = fetch_market_quote(&client, &effective_query).await {
+        results.push(market_quote);
+    }
+    if let Some(live_wx) = fetch_live_weather(&client, &effective_query).await {
+        results.push(live_wx);
+    }
+
+    let live_feed_count = results.len();
+
+    // 1. Try DuckDuckGo HTML
+    query_duckduckgo_html(&client, &effective_query, &mut results).await;
+
+    // 2. Fallback to DuckDuckGo Lite if HTML gave 0 results
+    if results.len() == live_feed_count {
+        query_duckduckgo_lite(&client, &effective_query, &mut results).await;
     }
 
     // 3. Fallback to DuckDuckGo Instant Answer API if still empty
     if results.len() == live_feed_count {
-        let api_url = format!("https://api.duckduckgo.com/?q={}&format=json&no_html=1", urlencoding::encode(&effective_query));
-        if let Ok(resp) = client.get(&api_url).send().await {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                if let Some(abstract_text) = json.get("AbstractText").and_then(|v| v.as_str()) {
-                    if !abstract_text.is_empty() {
-                        let source_url = json.get("AbstractURL").and_then(|v| v.as_str()).unwrap_or("https://duckduckgo.com");
-                        let source_title = json.get("Heading").and_then(|v| v.as_str()).unwrap_or("Search Result");
-                        results.push(SearchResult {
-                            title: source_title.to_string(),
-                            url: source_url.to_string(),
-                            snippet: abstract_text.to_string(),
-                        });
-                    }
-                }
-                if let Some(topics) = json.get("RelatedTopics").and_then(|v| v.as_array()) {
-                    for topic in topics.iter().take(5) {
-                        if let (Some(text), Some(url)) = (
-                            topic.get("Text").and_then(|t| t.as_str()),
-                            topic.get("FirstURL").and_then(|u| u.as_str()),
-                        ) {
-                            if !text.is_empty() && !url.is_empty() {
-                                results.push(SearchResult {
-                                    title: text.chars().take(80).collect::<String>(),
-                                    url: url.to_string(),
-                                    snippet: text.to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
+        query_duckduckgo_api(&client, &effective_query, &mut results).await;
+    }
+
+    // 4. If narrow/long query produced 0 web results, try Broadened Query on DuckDuckGo
+    if results.len() == live_feed_count {
+        if let Some(broadened) = broaden_search_query(&effective_query) {
+            query_duckduckgo_html(&client, &broadened, &mut results).await;
+            if results.len() == live_feed_count {
+                query_duckduckgo_lite(&client, &broadened, &mut results).await;
+            }
+            if results.len() == live_feed_count {
+                query_duckduckgo_api(&client, &broadened, &mut results).await;
             }
         }
     }
 
-    // 4. Fallback to Bing News RSS (full article URLs + multi-sentence descriptions) + Google News RSS + Wikipedia Knowledge Extracts
+    // 5. Fallback to Bing News RSS + Google News RSS
     if results.len() == live_feed_count {
         let bing_news_url = format!(
             "https://www.bing.com/news/search?q={}&format=rss",
@@ -780,40 +836,15 @@ pub async fn search_duckduckgo(query: String) -> Result<Vec<SearchResult>, Strin
                 }
             }
         }
-        // Only append encyclopedic Wikipedia results when web/news searches returned 0 results
-        if results.len() == live_feed_count {
-            search_wikipedia(&client, &effective_query, &mut results).await;
-        }
     }
 
-    // 5. Automatic Query Broadening + Wikipedia API fallback if specific codes/jargon yielded 0 results
+    // 6. Automatic Wikipedia fallback with strict relevance checking
     if results.len() == live_feed_count {
-        if let Some(broadened) = broaden_search_query(&effective_query) {
-            let bing_news_url = format!(
-                "https://www.bing.com/news/search?q={}&format=rss",
-                urlencoding::encode(&broadened)
-            );
-            if let Ok(resp) = client.get(&bing_news_url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(body) = resp.text().await {
-                        parse_bing_news_rss(&body, &mut results);
-                    }
-                }
+        search_wikipedia(&client, &effective_query, &mut results).await;
+        if results.len() == live_feed_count {
+            if let Some(broadened) = broaden_search_query(&effective_query) {
+                search_wikipedia(&client, &broadened, &mut results).await;
             }
-            if results.len() == live_feed_count {
-                let news_url = format!(
-                    "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en",
-                    urlencoding::encode(&broadened)
-                );
-                if let Ok(resp) = client.get(&news_url).send().await {
-                    if resp.status().is_success() {
-                        if let Ok(body) = resp.text().await {
-                            parse_google_news_rss(&body, &mut results);
-                        }
-                    }
-                }
-            }
-            search_wikipedia(&client, &broadened, &mut results).await;
         }
     }
 
@@ -900,7 +931,39 @@ pub async fn fetch_webpage(url: String) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{broaden_search_query, format_usd_amount, normalize_search_query, search_duckduckgo};
+    use super::{broaden_search_query, format_usd_amount, is_relevant_wikipedia_match, normalize_search_query, search_duckduckgo};
+
+    #[test]
+    fn filters_unrelated_wikipedia_articles() {
+        // Unrelated articles matched by Wikipedia loose keyword indexing MUST be rejected
+        assert!(!is_relevant_wikipedia_match(
+            "Pearson VUE life insurance exam 55 questions English taker",
+            "Timeline of the COVID-19 pandemic in the United Kingdom (July-December 2020)",
+            "The following is a timeline of the COVID-19 pandemic in the United Kingdom from July to December 2020."
+        ));
+        assert!(!is_relevant_wikipedia_match(
+            "North Carolina state life insurance license exam syllabus curriculum topics coverage 2024",
+            "LGBTQ rights in India",
+            "Lesbian, gay, bisexual, and transgender (LGBT) people in India face legal and social difficulties."
+        ));
+        assert!(!is_relevant_wikipedia_match(
+            "North Carolina state life insurance license exam syllabus curriculum topics coverage 2024",
+            "List of Dispatches episodes",
+            "Dispatches is a British documentary television programme."
+        ));
+
+        // Genuinely relevant encyclopedic articles MUST be accepted
+        assert!(is_relevant_wikipedia_match(
+            "North Carolina life insurance licensing requirements",
+            "Life insurance",
+            "Life insurance (or life assurance, especially in the Commonwealth of Nations) is a contract between an insurance policy holder and an insurer."
+        ));
+        assert!(is_relevant_wikipedia_match(
+            "who is the current CEO of Intel",
+            "Intel",
+            "Intel Corporation is an American multinational corporation and technology company headquartered in Santa Clara, California."
+        ));
+    }
 
     #[test]
     fn broadens_exam_code_queries() {

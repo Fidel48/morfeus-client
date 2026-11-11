@@ -91,11 +91,16 @@ No connection adapters were found for 'rgsx+torrent://download?source=https%3A%2
     expect(isMandatoryWebSearchQuery('what about in haiti?', true)).toBe(true);
     expect(isMandatoryWebSearchQuery('thanks!', true)).toBe(false);
 
-    // Non-mandatory queries (coding, general knowledge, attached docs, local files)
+    // Non-mandatory queries (coding, general knowledge, attached docs, local files, study flow)
     expect(isMandatoryWebSearchQuery('write a python script to fetch the current price of bitcoin')).toBe(false);
     expect(isMandatoryWebSearchQuery('what is the capital of France?')).toBe(false);
     expect(isMandatoryWebSearchQuery('Quiz me on the NC Life exam one question at a time')).toBe(false);
     expect(isMandatoryWebSearchQuery('[Attached Document: exam.pdf]\nWhat is the current price of bitcoin?')).toBe(false);
+    expect(isMandatoryWebSearchQuery('repeat the question please', true)).toBe(false);
+    expect(isMandatoryWebSearchQuery('ok ask me one by one lets contniue question', true)).toBe(false);
+    expect(isMandatoryWebSearchQuery('Option B', true)).toBe(false);
+    expect(isMandatoryWebSearchQuery('why is that the correct answer?', true)).toBe(false);
+    expect(isMandatoryWebSearchQuery('let\'s continue with the next question', true)).toBe(false);
   });
 
   it('strips conversational filler and enriches follow-up queries & typo corrections with prior search context', () => {

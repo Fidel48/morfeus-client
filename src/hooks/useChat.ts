@@ -233,6 +233,13 @@ export function isMandatoryWebSearchQuery(text: string, hasPriorWebSearch = fals
     return false;
   }
 
+  // Exclude study session continuations, exam answers, and requests to repeat / continue
+  const isConversationalFlow =
+    /\b(?:repeat|repeat the question|say that again|try again|please try again|continue|let'?s continue|contniue|keep going|next|next question|one by one|ask me|ask the next|another question|option\s+[a-d]|choice\s+[a-d]|\([a-d]\)|^[a-d][.)]?$|correct|incorrect|why is that|explain why)\b/i.test(trimmed);
+  if (isConversationalFlow) {
+    return false;
+  }
+
   // 1. Explicit web search / online lookup / fact-check requests
   if (/\b(search the web|search online|look up online|web search|google this|search the internet|fact[- ]?check|check online|find online)\b/i.test(trimmed)) {
     return true;
@@ -274,16 +281,18 @@ export function isMandatoryWebSearchQuery(text: string, hasPriorWebSearch = fals
     return true;
   }
 
-  // 8. In a conversation that has already used `web_search`, ANY correction ("i am sorry i meant to say haiti"),
-  // topic switch ("what about haiti?"), or factual follow-up question must trigger `web_search` so the local LLM
-  // never hallucinates fake facts or fake URLs on turn 2+.
+  // 8. In a conversation that has already used `web_search`, trigger follow-up web_search
+  // if the user explicitly makes a correction ("i meant haiti", "sorry i meant ethereum"),
+  // asks a question with temporal/live/news/price/weather keywords, or asks an explicit follow-up question ("what about ...?")
   if (hasPriorWebSearch) {
     if (extractCorrectionTarget(trimmed) !== null) {
       return true;
     }
+    const hasTemporalOrSearch =
+      /\b(?:search|look up|check online|what about|how about|happen(?:ed|ing)?|current|latest|today|price|weather|news|why did that|what caused)\b/i.test(trimmed);
     const isPureAcknowledgement =
       /^(?:thanks|thank\s+you|thx|ty|ok|okay|k|got\s+it|cool|great|awesome|perfect|nice|good|makes\s+sense|understood|bye|goodbye|hello|hi|hey|yes|no|yep|nope)(?:\s+(?:so\s+much|very\s+much|a\s+lot|for\s+(?:the\s+|that\s+|this\s+|your\s+)?(?:info(?:rmation)?|update|help|answer|explanation|details|clarification)|morfeus|buddy|friend|man))*[.!?\s]*$/i.test(trimmed);
-    if (!isPureAcknowledgement && trimmed.length >= 3) {
+    if (hasTemporalOrSearch && !isPureAcknowledgement && trimmed.length >= 3) {
       return true;
     }
   }
@@ -1005,11 +1014,11 @@ ${projectBlock}CRITICAL DIRECTIVES:
                   `[Source ${i + 1}]: "${r.title}"\nURL: ${r.url}\nSnippet: ${r.snippet}`
                 ).join('\n\n');
 
-                const directive = `SYNTHESIS DIRECTIVE (100% FACTUAL GROUNDING): Synthesize an accurate, comprehensive response strictly grounded in the verified search results and article content here. Detail the specific WHO, WHAT, WHEN, WHERE, and WHY (exact names, triggers, missing/kidnapped individuals, casualties, and numbers reported in the sources). NEVER invent speculative motives, connections, or narratives that are not explicitly stated in the sources. If a "[LIVE VERIFIED DATA]" entry is present, treat its exact figures as 100% authoritative. State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable markdown source links at the end: [${topResult?.title || 'Source'}](${topResult?.url || ''}).`;
+                const directive = `SYNTHESIS DIRECTIVE (FACTUAL GROUNDING): Synthesize a clear, accurate, and comprehensive response grounded directly in the verified search results and source material below. Address the user's specific request directly. Incorporate specific facts, laws, requirements, figures, and details from the sources. If a "[LIVE VERIFIED DATA]" entry is present, treat its exact figures as 100% authoritative. State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable markdown source links at the end: [${topResult?.title || 'Source'}](${topResult?.url || ''}).`;
 
                 result = `${directive}\n\nSearch Results for query "${q}":\n\n${searchSnippets}${topArticleContent}\n\n${directive}`;
               } else {
-                result = `No direct web search results matched the exact query "${q}". Do NOT repeat the same narrow query—either try a broader 2–3 word search term without internal codes, or answer the user's request directly using your domain knowledge and state the current date/time ("As of ${dateStr} at ${timeStr}...").`;
+                result = `No verified web search results matched the query "${q}". Please answer the user's request directly using your extensive pre-trained domain knowledge and state the current date/time ("As of ${dateStr} at ${timeStr}..."). Do NOT cite web sources or URLs that were not found.`;
               }
             }
           } else if (name === 'read_webpage') {
@@ -1459,7 +1468,7 @@ ${projectBlock}CRITICAL DIRECTIVES:
               if (tail.every(t => t === tail[0])) return true;
             }
 
-            // Pattern 2: cycling pattern of token period 2–8
+            // Pattern 2: cycling pattern of token period 2–8 repeating 4 full cycles
             for (const period of [2, 3, 4, 5, 6, 7, 8]) {
               const needed = period * 4;
               if (len >= needed) {
@@ -1469,25 +1478,28 @@ ${projectBlock}CRITICAL DIRECTIVES:
               }
             }
 
-            // Pattern 3: repeated multi-word phrase in recent 30 tokens
-            if (len >= 30) {
-              const chunk = recentTokens.slice(-30).join('');
-              if (chunk.length >= 40) {
-                for (let subLen = 5; subLen <= 20; subLen++) {
-                  const sub = chunk.slice(-subLen);
-                  if ((chunk.split(sub).length - 1) >= 5) return true;
+            // Pattern 3: Consecutive multi-word phrase repetition in streaming text (catches runaway phrase loops)
+            const live = useChatStore.getState().streamingContent || '';
+            if (live.length >= 100) {
+              const tail = live.slice(-300);
+              // Look for consecutive phrase repetitions of length 15-80 chars repeating at least 3 times
+              for (let phraseLen = 15; phraseLen <= 80; phraseLen++) {
+                const phrase = tail.slice(-phraseLen);
+                // Ensure phrase has spaces and repeats consecutively at least 3 times
+                if (phrase.includes(' ') && tail.endsWith(phrase.repeat(3))) {
+                  return true;
                 }
               }
             }
 
-            // Pattern 4: character-level repetition in streaming text (catches runaway URLs / base64 cycles like I2V2Z3...)
-            const live = useChatStore.getState().streamingContent || '';
+            // Pattern 4: character-level repetition in streaming text (catches runaway URLs / base64 cycles / punctuation)
             if (live.length >= 60) {
               const tailChars = live.slice(-200);
               for (let period = 3; period <= 24; period++) {
                 const sub = tailChars.slice(-period);
-                // Check if tailChars ends with at least 5 repetitions of `sub`
-                if (tailChars.endsWith(sub.repeat(5))) return true;
+                // Skip markdown horizontal rules (---, ===), spaces, and table formatting
+                if (/^[\s\-_=|*]+$/.test(sub)) continue;
+                if (tailChars.endsWith(sub.repeat(6))) return true;
               }
             }
 
@@ -1575,21 +1587,20 @@ ${projectBlock}CRITICAL DIRECTIVES:
                   console.warn('[Repetition] Loop detected — aborting stream');
                   tauriApi.appendSystemLog('warn', 'Repetition loop detected. Auto-aborting.');
                   repetitionAborted = true;
-                  // Trim output back to the last clean sentence boundary within recent output
+                  // Trim output back to remove the looped repetition
                   const current = useChatStore.getState().streamingContent;
                   if (current) {
-                    const searchWindow = Math.min(current.length, 250);
-                    const head = current.slice(0, current.length - searchWindow);
-                    const tail = current.slice(current.length - searchWindow);
-                    let lastSentenceIdx = -1;
-                    for (const m of tail.matchAll(/[.!?](?:\s|\n|$)/g)) {
-                      if (m.index != null && m.index < tail.length - 15) {
-                        lastSentenceIdx = m.index + 1;
+                    let cleanOutput = current;
+                    for (let p = 3; p <= 80; p++) {
+                      const pattern = current.slice(-p);
+                      if (pattern.length >= 3 && current.endsWith(pattern.repeat(3))) {
+                        cleanOutput = current.slice(0, current.length - pattern.length * 2).trimEnd();
+                        break;
                       }
                     }
-                    const cleanOutput = lastSentenceIdx > 0
-                      ? `${head}${tail.slice(0, lastSentenceIdx)}`.trimEnd()
-                      : current.slice(0, Math.max(50, current.length - 80)).trimEnd();
+                    if (cleanOutput === current) {
+                      cleanOutput = current.slice(0, Math.max(50, current.length - 80)).trimEnd();
+                    }
 
                     useChatStore.setState({
                       streamingContent: cleanOutput,

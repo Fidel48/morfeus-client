@@ -651,21 +651,20 @@ export function detectModelContextLimit(modelId?: string): number | null {
 }
 
 /**
- * Resolves the effective context length for a given model, ensuring that user
- * settings never exceed what the physical model architecture supports.
+ * Resolves the effective context length for a given model.
+ * If the user has explicitly configured a context length (e.g. 32K, 64K, 16K in Params/Settings),
+ * respect the user's setting so users with capable GPUs are never artificially throttled.
+ * Only fallback to detected model limits or default if no context was configured.
  */
 export function resolveEffectiveContextLength(
   modelId: string | undefined,
   configuredContext: number | undefined
 ): number {
-  const detected = detectModelContextLimit(modelId);
-  const userSetting = configuredContext && configuredContext >= 1024 ? configuredContext : 16384;
-  if (detected != null) {
-    // If the model physically specifies a limit (e.g. 16k, 8k, 4k), never allow
-    // the configured setting to exceed that physical limit.
-    return Math.min(userSetting, detected);
+  if (configuredContext && configuredContext >= 1024) {
+    return configuredContext;
   }
-  return userSetting;
+  const detected = detectModelContextLimit(modelId);
+  return detected ?? 16384;
 }
 
 /** Record a dynamically detected context limit for a model (e.g. from Ollama /api/show) */
