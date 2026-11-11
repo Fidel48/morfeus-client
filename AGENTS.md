@@ -108,6 +108,12 @@ morfeus/
   - **Hardware-Calibrated VAD**: Dual peak amplitude and RMS energy voice activity detection calibrated against real macOS microphone noise floors (`0.0077 RMS`), eliminating false continuous voice loops while ensuring automatic conversational pause detection (1.05s) directly dispatches transcribed text to chat.
   - **Standalone Kokoro Neural TTS**: Embedded `kokoro_server.py` in the binary with multi-path `uv` discovery (`/opt/homebrew/bin/uv`, `/usr/local/bin/uv`, `~/.local/bin/uv`, `~/.cargo/bin/uv`, PATH) and python3 fallback, extended health-check timeout to 15s for ONNX model initialization, and added interactive Error (Retry) action in Voice settings.
   - **EndCallTool & Context Breakdown**: Integrated native `end_call` tool for natural conversational hang-up phrases and real-time context token usage breakdown popover.
+- **v0.1.32**: Dynamic Token Engine & Native Ollama Context Architecture:
+  - **Native Ollama `/api/chat` Adapter**: High-performance native streaming adapter in Rust replacing generic OpenAI translation, natively preserving requested context sizes (up to 32K/64K+) in VRAM without resetting to 4K limits.
+  - **Auto Token Adjuster**: Intelligent dynamic token headroom sizing that automatically allocates maximal safe output capacity (up to 8,192 tokens) based on active conversation size.
+  - **Multi-Pass Seamless Auto-Continuation**: Transparent, silent multi-turn stitching when outputs hit single-turn boundaries, eliminating false `finish_reason: length` warning cutoffs.
+  - **TTS Emoji & Symbol Filter**: Dual-layer Unicode pictograph, checkmark, and emoticon suppression preventing speech engines from vocalizing symbols while preserving full visual markdown formatting in chat.
+  - **Real-Time Web Search Synthesis**: Direct multi-source concurrent scraping across 5 verified web sources with automatic removal of encyclopedic extract fallbacks.
 
 ---
 
