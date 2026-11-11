@@ -93,9 +93,11 @@ export async function ensureKokoroServer(): Promise<boolean> {
 }
 
 /**
- * Clean markdown symbols from text so it reads naturally.
+ * Clean markdown symbols, emojis, and decorative icons from text so it reads naturally.
+ * Emojis and checkmarks (😊, ✅, ❌, etc.) remain visually in the chat UI,
+ * but are stripped here so TTS engines never read out "smiling face" or "white heavy check mark".
  */
-function cleanTextForSpeech(text: string): string {
+export function cleanTextForSpeech(text: string): string {
   // If the text is purely a Sources / Resources heading or bullet point, skip speaking
   if (/^(?:#+\s*)?(?:Sources|Resources|References|Source Links|Citations)[\s:]*$/i.test(text.trim())) {
     return '';
@@ -126,6 +128,12 @@ function cleanTextForSpeech(text: string): string {
     .replace(/\*+/g, '')                               // Strip ANY remaining asterisks so TTS never speaks "asterisk"
     .replace(/~+/g, '')                                // Strip remaining tildes
     .replace(/_{2,}/g, ' ')                            // Strip remaining multiple underscores
+    // Strip all Unicode emojis and pictographs (😊, 😂, 🎯, 🚀, 💡, 👍, etc.)
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    // Strip dingbats, symbols, checkmarks, crosses (✅, ✔️, ❌, ⚠️, ☀️, etc.) and variation selectors
+    .replace(/[\u{200D}\u{2190}-\u{21FF}\u{2300}-\u{23FF}\u{25A0}-\u{25FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{2B50}-\u{2B55}\u{FE00}-\u{FE0F}]/gu, '')
+    // Strip common ASCII emoticons (like :), :-), :D, XD, ^_^)
+    .replace(/(?:^|\s)(?::[-~]?[)DPOdp(\\/]|;[-~]?[)Dp]|<3|\^_\^|[-_]{2,})(?=\s|$)/g, ' ')
     .replace(/\n{2,}/g, '. ')                          // Double newlines → pause
     .replace(/\n/g, ' ')
     .replace(/\s{2,}/g, ' ')                           // Collapse multiple spaces

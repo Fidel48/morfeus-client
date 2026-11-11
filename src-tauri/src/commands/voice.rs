@@ -621,10 +621,31 @@ pub async fn speak_text(text: String, rate: Option<f64>) -> Result<(), String> {
     Ok(())
 }
 
+/// Helper: Strips Unicode emojis, pictographs, dingbats, and variation selectors
+/// so that TTS synthesizers (Kokoro, macOS say, SAPI) speak only the natural words
+/// without vocalizing symbol names like "smiling face" or "white heavy check mark".
+pub fn strip_emojis_and_symbols_for_tts(text: &str) -> String {
+    text.chars().filter(|c| {
+        let u = *c as u32;
+        !(
+            (0x1F300..=0x1F9FF).contains(&u) || // Misc Symbols, Pictographs, Emoticons, Transport, etc.
+            (0x1FA00..=0x1FAFF).contains(&u) || // Supplemental Symbols
+            (0x2600..=0x26FF).contains(&u)   || // Misc Symbols (checks, weather, warnings)
+            (0x2700..=0x27BF).contains(&u)   || // Dingbats (checks, crosses, stars)
+            (0xFE00..=0xFE0F).contains(&u)   || // Variation Selectors
+            u == 0x200D                          // Zero-width joiner
+        )
+    }).collect::<String>()
+}
+
 #[cfg(target_os = "macos")]
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn speak_text(text: String, rate: Option<f64>, voiceId: Option<String>) -> Result<(), String> {
+    let clean = strip_emojis_and_symbols_for_tts(&text);
+    if clean.trim().is_empty() {
+        return Ok(());
+    }
     let rate_val = rate.unwrap_or(1.0);
     let wpm = (175.0 * rate_val) as i32;
     
@@ -638,7 +659,7 @@ pub async fn speak_text(text: String, rate: Option<f64>, voiceId: Option<String>
     }
 
     IS_AI_SPEAKING.store(true, Ordering::SeqCst);
-    let _ = cmd.arg(&text)
+    let _ = cmd.arg(&clean)
         .status()
         .await;
     IS_AI_SPEAKING.store(false, Ordering::SeqCst);
@@ -954,10 +975,14 @@ pub async fn kokoro_speak_native(
     voice: Option<String>,
     speed: Option<f64>,
 ) -> Result<(), String> {
+    let clean_text = strip_emojis_and_symbols_for_tts(&text);
+    if clean_text.trim().is_empty() {
+        return Ok(());
+    }
     let gen = SPEECH_GENERATION.load(Ordering::SeqCst);
     let client = reqwest::Client::new();
     let payload = serde_json::json!({
-        "input": text,
+        "input": clean_text,
         "voice": voice.unwrap_or_else(|| "af_heart".to_string()),
         "speed": speed.unwrap_or(1.0)
     });
@@ -1296,5 +1321,12 @@ mod tests {
             "\n====== AMBIENT MIC MEASUREMENT ======\nMax RMS: {:.6}\nMax Peak: {:.6}\nBuffer chunks: {}\n=====================================",
             max_rms, max_peak, count
         );
+    }
+
+    #[test]
+    fn test_strip_emojis_and_symbols_for_tts() {
+        let input = "Hello! 😊 Question 10: Is that correct? ✅ Yes! ⚠️ Warning: 100% 👍";
+        let cleaned = strip_emojis_and_symbols_for_tts(input);
+        assert_eq!(cleaned, "Hello!  Question 10: Is that correct?  Yes!  Warning: 100% ");
     }
 }
