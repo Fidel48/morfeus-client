@@ -114,6 +114,12 @@ morfeus/
   - **Multi-Pass Seamless Auto-Continuation**: Transparent, silent multi-turn stitching when outputs hit single-turn boundaries, eliminating false `finish_reason: length` warning cutoffs.
   - **TTS Emoji & Symbol Filter**: Dual-layer Unicode pictograph, checkmark, and emoticon suppression preventing speech engines from vocalizing symbols while preserving full visual markdown formatting in chat.
   - **Real-Time Web Search Synthesis**: Direct multi-source concurrent scraping across 5 verified web sources with automatic removal of encyclopedic extract fallbacks.
+- **v0.1.33**: Local File & Document Intelligence, Ollama Tool Unmarshaling & Conversation Compaction:
+  - **Ollama Multi-Turn Tool Arguments Normalization**: Serialized string arguments in `assistant.tool_calls` are automatically transformed into native parsed JSON objects in `src-tauri/src/commands/llm.rs`, eliminating upstream `Value looks like object, but can't find closing '}' symbol` provider errors.
+  - **Local File & Document Tool Aliasing**: Aliased `read_file`, `open_file`, and `read_text_file` to `read_local_file` with parameter key normalization (`path`, `file_path`, `filepath`, `file`), enabling instant parsing of `.pdf` and `.docx` files via native Rust `pdf_extract`.
+  - **Fuzzy Typo-Tolerant Tool Gating**: Enhanced `shouldEnableLocalFileToolsInFastChat` to tolerate word concatenation (`listthe`), typos (`fildes`, `dowload`, `fiels`), natural phrasing (`in my dowload folder`, `whats on my desktop`), and multi-turn context retention across follow-up queries.
+  - **Hardened Desktop System Prompt**: Instructs models in Fast Chat that they run as a desktop application with native local file inspection tools and must immediately call tools rather than claiming lack of access.
+  - **Conversation Compactor**: Token breakdown UI with human-friendly formatting and conversation compaction support to preserve context space for extended sessions.
 
 ---
 
