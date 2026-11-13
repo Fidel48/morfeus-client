@@ -230,39 +230,87 @@ fn transform_for_ollama(payload: &str) -> (serde_json::Value, u64) {
 
     // Transform messages: Ollama's /api/chat expects message.content to be a string.
     // If it's an array of multimodal parts (text + image_url), extract text and images.
-    if let Some(messages) = val.get_mut("messages").and_then(|m| m.as_array_mut()) {
-        for msg in messages {
-            if let Some(content_val) = msg.get("content") {
-                if let Some(parts) = content_val.as_array() {
-                    let mut text_buf = String::new();
-                    let mut images_arr = Vec::new();
+    // Additionally, Ollama native /api/chat requires:
+    // 1. Assistant message tool_calls arguments MUST be a native JSON object, NOT a serialized string.
+    // 2. Tool response messages (role: "tool") MUST have tool_name matching the function name.
+    let mut tool_name_map = std::collections::HashMap::new();
 
-                    for p in parts {
-                        if let Some(typ) = p.get("type").and_then(|t| t.as_str()) {
-                            if typ == "text" {
-                                if let Some(txt) = p.get("text").and_then(|t| t.as_str()) {
-                                    text_buf.push_str(txt);
-                                }
-                            } else if typ == "image_url" {
-                                if let Some(url_str) = p.pointer("/image_url/url").and_then(|u| u.as_str()) {
-                                    let b64 = if let Some(comma_pos) = url_str.find(',') {
-                                        &url_str[comma_pos + 1..]
-                                    } else {
-                                        url_str
-                                    };
-                                    images_arr.push(serde_json::Value::String(b64.to_string()));
-                                }
+    if let Some(messages) = val.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for msg in messages.iter_mut() {
+            // Normalize content (prevent null content from breaking Ollama)
+            if msg.get("content").map_or(true, |c| c.is_null()) {
+                msg["content"] = serde_json::Value::String(String::new());
+            } else if let Some(parts) = msg.get("content").and_then(|c| c.as_array()) {
+                let mut text_buf = String::new();
+                let mut images_arr = Vec::new();
+
+                for p in parts {
+                    if let Some(typ) = p.get("type").and_then(|t| t.as_str()) {
+                        if typ == "text" {
+                            if let Some(txt) = p.get("text").and_then(|t| t.as_str()) {
+                                text_buf.push_str(txt);
+                            }
+                        } else if typ == "image_url" {
+                            if let Some(url_str) = p.pointer("/image_url/url").and_then(|u| u.as_str()) {
+                                let b64 = if let Some(comma_pos) = url_str.find(',') {
+                                    &url_str[comma_pos + 1..]
+                                } else {
+                                    url_str
+                                };
+                                images_arr.push(serde_json::Value::String(b64.to_string()));
                             }
                         }
                     }
+                }
 
-                    msg["content"] = serde_json::Value::String(text_buf);
-                    if !images_arr.is_empty() {
-                        msg["images"] = serde_json::Value::Array(images_arr);
+                msg["content"] = serde_json::Value::String(text_buf);
+                if !images_arr.is_empty() {
+                    msg["images"] = serde_json::Value::Array(images_arr);
+                }
+            }
+
+            // Convert assistant tool_calls arguments from serialized JSON string to native JSON object
+            if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+                for tc in tool_calls {
+                    let tc_id = tc.get("id").and_then(|id| id.as_str()).unwrap_or("").to_string();
+                    let func_name = tc.pointer("/function/name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    if !tc_id.is_empty() && !func_name.is_empty() {
+                        tool_name_map.insert(tc_id, func_name);
+                    }
+
+                    if let Some(func) = tc.get_mut("function") {
+                        let parsed_args = match func.get("arguments") {
+                            Some(serde_json::Value::String(s)) => {
+                                match serde_json::from_str::<serde_json::Value>(s) {
+                                    Ok(v) if v.is_object() => v,
+                                    _ => serde_json::json!({}),
+                                }
+                            }
+                            Some(serde_json::Value::Object(obj)) => serde_json::Value::Object(obj.clone()),
+                            _ => serde_json::json!({}),
+                        };
+                        func["arguments"] = parsed_args;
                     }
                 }
-            } else {
-                msg["content"] = serde_json::Value::String(String::new());
+            }
+
+            // For role: "tool" messages, ensure tool_name / name is populated for Ollama native /api/chat
+            if msg.get("role").and_then(|r| r.as_str()) == Some("tool") {
+                let tool_call_id = msg.get("tool_call_id").and_then(|id| id.as_str()).unwrap_or("");
+                let matched_name = if let Some(n) = msg.get("tool_name").and_then(|n| n.as_str()) {
+                    Some(n.to_string())
+                } else if let Some(n) = msg.get("name").and_then(|n| n.as_str()) {
+                    Some(n.to_string())
+                } else if !tool_call_id.is_empty() {
+                    tool_name_map.get(tool_call_id).cloned()
+                } else {
+                    None
+                };
+
+                if let Some(name) = matched_name {
+                    msg["tool_name"] = serde_json::Value::String(name.clone());
+                    msg["name"] = serde_json::Value::String(name);
+                }
             }
         }
     }
@@ -707,5 +755,56 @@ mod tests {
         assert_eq!(tc["function"]["name"], "search");
         // Arguments must be serialized to string for OpenAI format
         assert_eq!(tc["function"]["arguments"], r#"{"query":"NC law"}"#);
+    }
+
+    #[test]
+    fn test_transform_for_ollama_tool_calls_and_results() {
+        let openai_payload = r#"{
+            "model": "qwen3.5:9b",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "can you list the files i have on my dowload folders"
+                },
+                {
+                    "role": "assistant",
+                    "content": "I'll check your Downloads folder for you.",
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {
+                                "name": "get_special_dirs",
+                                "arguments": "{}"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_123",
+                    "content": "{\"downloads\": \"/Users/admin/Downloads\"}"
+                }
+            ],
+            "options": {
+                "num_ctx": 32768
+            }
+        }"#;
+
+        let (val, num_ctx) = transform_for_ollama(openai_payload);
+        assert_eq!(num_ctx, 32768);
+
+        // Assistant message tool_calls arguments must be parsed into an object, NOT a string
+        let asst_tc = &val["messages"][1]["tool_calls"][0];
+        assert_eq!(asst_tc["id"], "call_123");
+        assert_eq!(asst_tc["function"]["name"], "get_special_dirs");
+        assert!(asst_tc["function"]["arguments"].is_object(), "arguments must be a JSON object, not a string");
+        assert_eq!(asst_tc["function"]["arguments"], serde_json::json!({}));
+
+        // Tool message must have tool_name and name matching the function
+        let tool_msg = &val["messages"][2];
+        assert_eq!(tool_msg["role"], "tool");
+        assert_eq!(tool_msg["tool_name"], "get_special_dirs");
+        assert_eq!(tool_msg["name"], "get_special_dirs");
     }
 }
