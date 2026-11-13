@@ -629,3 +629,25 @@ pub async fn replace_in_file(
         ),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_parse_live_scan_pdf() {
+        let path = "/Users/admin/Downloads/Live Scan Locations.pdf".to_string();
+        if std::path::Path::new(&path).exists() {
+            let res = parse_local_file(path).await;
+            assert!(res.is_ok(), "Expected PDF parse to succeed: {:?}", res.err());
+            let text = res.unwrap();
+            println!("Extracted text length: {}", text.len());
+            for line in text.lines() {
+                if line.to_lowercase().contains("durham") {
+                    println!("DURHAM MATCH: {}", line);
+                }
+            }
+            assert!(!text.is_empty());
+        }
+    }
+}

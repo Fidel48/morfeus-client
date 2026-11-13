@@ -145,6 +145,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
     tc.function?.name === 'read_webpage' || 
     tc.function?.name === 'read_youtube_video' ||
     tc.function?.name === 'read_local_file' ||
+    tc.function?.name === 'read_file' ||
     tc.function?.name === 'end_call'
   );
 
@@ -153,6 +154,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
   if (!settings.debug_mode && isToolCallOnly && !hasAlwaysVisibleTool) {
     return null;
   }
+
+  const isCompactedLedger = !isUser && typeof message.content === 'string' && message.content.startsWith('🗜️ **Conversation Compacted**');
 
   return (
     <>
@@ -171,10 +174,12 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
             'flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center mt-1',
             isUser
               ? 'bg-violet-600 text-white'
+              : isCompactedLedger
+              ? 'bg-violet-950/80 border border-violet-500/40 text-violet-300'
               : 'bg-zinc-800 border border-white/10 text-zinc-400'
           )}
         >
-          {isUser ? <User size={14} /> : <Bot size={14} />}
+          {isUser ? <User size={14} /> : isCompactedLedger ? <Sparkles size={14} className="text-violet-300" /> : <Bot size={14} />}
         </div>
 
         {/* Content */}
@@ -190,6 +195,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
               'px-4 py-3 rounded-2xl text-sm leading-relaxed break-words min-w-0 overflow-hidden',
               isUser
                 ? 'bg-violet-600 text-white rounded-tr-sm max-w-[85%] self-end'
+                : isCompactedLedger
+                ? 'bg-zinc-900/90 border border-violet-500/30 shadow-lg shadow-violet-950/20 text-zinc-100 rounded-tl-sm w-full'
                 : 'bg-zinc-900/60 border border-white/8 text-zinc-100 rounded-tl-sm w-full'
             )}
           >
@@ -281,7 +288,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({ message, index }) 
                     } else if (toolName === 'list_directory' || toolName === 'get_special_dirs') {
                       text = 'Browse Directory';
                       Icon = Folder;
-                    } else if (toolName === 'read_local_file') {
+                    } else if (toolName === 'read_local_file' || toolName === 'read_file') {
                       text = 'Read Local File';
                       Icon = FileText;
                     } else if (toolName?.startsWith('lsp_')) {

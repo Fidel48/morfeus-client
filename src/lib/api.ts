@@ -126,13 +126,13 @@ export const WEB_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'read_local_file',
-      description: "Read the text content of a file on the user's local computer by its absolute path. ONLY use this for existing local files when explicitly requested by the user or when inspecting active local project files. NEVER use this to look up paths from pasted remote logs, Docker containers, or external systems.",
+      description: "Read the full text content of a file on the user's local computer by its absolute path. Fully supports PDF documents (.pdf), Word documents (.docx), source code, and plain text files. Use this whenever the user asks to read, analyze, summarize, or inspect any local document, PDF, or file.",
       parameters: {
         type: 'object',
         properties: {
           path: {
             type: 'string',
-            description: "The absolute path to the local file to read (e.g. /Users/admin/Documents/resume/Fidel Ruiz Resume.pdf).",
+            description: "The absolute path to the local file to read (e.g. /Users/admin/Downloads/Live Scan Locations.pdf).",
           },
         },
         required: ['path'],
