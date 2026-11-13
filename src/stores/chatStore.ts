@@ -50,6 +50,7 @@ interface ChatStore {
   streamingReasoning: string;
   streamingToolCalls: ToolCallDelta[];
   isStreaming: boolean;
+  isCompacting: boolean;
   chatStatus: ChatStatus;
   abortController: AbortController | null;
   rightPanelOpen: boolean;
@@ -75,6 +76,7 @@ interface ChatStore {
   finalizeStreamMessage: (conversationId: string) => Message;
   clearStreamingContent: () => void;
   setIsStreaming: (streaming: boolean) => void;
+  setIsCompacting: (compacting: boolean) => void;
   setChatStatus: (status: ChatStatus) => void;
   setAbortController: (ctrl: AbortController | null) => void;
   stopStreaming: () => void;
@@ -99,6 +101,7 @@ export const useChatStore = create<ChatStore>()(
       streamingReasoning: '',
       streamingToolCalls: [],
       isStreaming: false,
+      isCompacting: false,
       chatStatus: 'idle',
       abortController: null,
       rightPanelOpen: false,
@@ -141,6 +144,7 @@ export const useChatStore = create<ChatStore>()(
           ...(isActive
             ? {
                 isStreaming: false,
+                isCompacting: false,
                 abortController: null,
                 streamingContent: '',
                 streamingReasoning: '',
@@ -164,6 +168,7 @@ export const useChatStore = create<ChatStore>()(
           set({
             activeConversationId: id,
             isStreaming: false,
+            isCompacting: false,
             abortController: null,
             streamingContent: '',
             streamingReasoning: '',
@@ -252,6 +257,8 @@ export const useChatStore = create<ChatStore>()(
 
       setIsStreaming: (isStreaming) => set({ isStreaming }),
 
+      setIsCompacting: (isCompacting) => set({ isCompacting }),
+
       setChatStatus: (chatStatus) => set({ chatStatus }),
 
       setAbortController: (abortController) => set({ abortController }),
@@ -334,6 +341,7 @@ export const useChatStore = create<ChatStore>()(
               ? state.conversations.filter((c) => c.id !== active.id)
               : state.conversations,
             isStreaming: false,
+            isCompacting: false,
             abortController: null,
             streamingContent: '',
             streamingReasoning: '',

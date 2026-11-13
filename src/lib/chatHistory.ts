@@ -61,7 +61,17 @@ export function estimateTokenCount(text: unknown): number {
   return Math.ceil(JSON.stringify(text).length / 4);
 }
 
-function isAttachmentMessage(msg: Msg): boolean {
+export function formatCompactTokens(tokens: number): string {
+  if (!tokens || tokens <= 0) return '0';
+  if (tokens < 1000) return String(tokens);
+  if (tokens % 1024 === 0 && tokens >= 4096 && tokens <= 131072) {
+    return `${Math.round(tokens / 1024)}K`;
+  }
+  const k = tokens / 1000;
+  return k >= 100 ? `${Math.round(k)}K` : `${Number(k.toFixed(1))}K`;
+}
+
+export function isAttachmentMessage(msg: Msg): boolean {
   if (msg.role !== 'user') return false;
   if (msg.api_content != null) return true;
   if (Array.isArray(msg.content)) return true;

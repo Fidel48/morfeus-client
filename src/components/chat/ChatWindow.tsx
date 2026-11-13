@@ -13,18 +13,8 @@ import { speechQueue, interruptAiSpeech } from '@/lib/kokoroTts';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { ContentPart, Message } from '@/types';
 import { cn, bytesToBase64, isVisionModel, resizeImage } from '@/lib/utils';
-import { estimateTokenCount, trimHistoryToContext } from '@/lib/chatHistory';
+import { estimateTokenCount, trimHistoryToContext, formatCompactTokens } from '@/lib/chatHistory';
 import { FAST_CHAT_TOOLS, WEB_TOOLS, resolveEffectiveContextLength } from '@/lib/api';
-
-function formatCompactTokens(tokens: number): string {
-  if (!tokens || tokens <= 0) return '0';
-  if (tokens < 1000) return String(tokens);
-  if (tokens % 1024 === 0 && tokens >= 4096 && tokens <= 131072) {
-    return `${Math.round(tokens / 1024)}K`;
-  }
-  const k = tokens / 1000;
-  return k >= 100 ? `${Math.round(k)}K` : `${Number(k.toFixed(1))}K`;
-}
 
 interface Attachment {
   name: string;
@@ -63,7 +53,7 @@ const StatusBadge: React.FC<StatusBadgeProps> = ({ status }) => {
 };
 
 export const ChatWindow: React.FC = () => {
-  const { messages, isStreaming, streamingContent, streamingReasoning, chatStatus, sendMessage, stopStreaming } = useChat();
+  const { messages, isStreaming, isCompacting, streamingContent, streamingReasoning, chatStatus, sendMessage, compactConversation, stopStreaming } = useChat();
   const { rightPanelOpen, toggleRightPanel, chatMode, setChatMode, pendingApproval, activeConversationId } = useChatStore();
   const isSpeaking = useVoiceStore((s) => s.isSpeaking);
   const {
@@ -284,7 +274,14 @@ export const ChatWindow: React.FC = () => {
     const rawText = textParam !== undefined ? textParam : input;
     const userText = rawText.trim();
     if (!userText && attachments.length === 0) return;
-    if (isStreaming || isParsing) return;
+    if (isStreaming || isParsing || isCompacting) return;
+
+    if (userText.toLowerCase() === '/compact') {
+      setInput('');
+      setAttachments([]);
+      await compactConversation();
+      return;
+    }
 
     if (!activeModelName) {
       setIsModelMenuOpen(true);
@@ -494,7 +491,7 @@ export const ChatWindow: React.FC = () => {
     } else {
       await sendMessage(userText);
     }
-  }, [input, isStreaming, isParsing, sendMessage, attachments]);
+  }, [input, isStreaming, isParsing, isCompacting, sendMessage, compactConversation, attachments, activeModelName]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -894,6 +891,17 @@ export const ChatWindow: React.FC = () => {
                 </MessageErrorBoundary>
               </div>
             )}
+            {isCompacting && (
+              <div className="flex justify-center">
+                <div className="max-w-2xl w-full px-4 py-3 rounded-2xl bg-zinc-900/90 border border-violet-500/30 flex items-center gap-3 text-xs text-zinc-300 shadow-xl backdrop-blur-md animate-pulse">
+                  <Loader2 size={16} className="animate-spin text-violet-400 flex-shrink-0" />
+                  <div className="flex-1">
+                    <div className="font-semibold text-zinc-200">Compacting conversation memory…</div>
+                    <div className="text-[11px] text-zinc-400">Synthesizing directives, decisions, and key knowledge into high-density memory ledger.</div>
+                  </div>
+                </div>
+              </div>
+            )}
           </>
         )}
         <div ref={messagesEndRef} />
@@ -957,6 +965,25 @@ export const ChatWindow: React.FC = () => {
 
           <div className="relative flex flex-col bg-zinc-900/90 border border-white/10 focus-within:border-violet-500/50 rounded-2xl p-2.5 shadow-lg shadow-black/20 backdrop-blur-sm transition-all duration-300 gap-2">
             
+            {/* Slash command suggestion chip */}
+            {input.startsWith('/') && '/compact'.startsWith(input.toLowerCase().trim()) && (
+              <motion.button
+                type="button"
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 4 }}
+                onClick={() => {
+                  setInput('');
+                  compactConversation();
+                }}
+                className="absolute bottom-full mb-2 left-2 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-900/95 border border-violet-500/30 text-xs text-zinc-200 shadow-xl backdrop-blur-md hover:border-violet-500/60 hover:bg-zinc-800 transition-all cursor-pointer group z-20"
+              >
+                <span className="font-mono font-semibold text-violet-400 group-hover:text-violet-300">/compact</span>
+                <span className="text-zinc-400 text-[11px]">— Condense history into memory ledger & free up tokens</span>
+                <span className="text-[10px] bg-white/10 px-1.5 py-0.5 rounded text-zinc-400 font-mono">↵ Enter</span>
+              </motion.button>
+            )}
+
             {/* Textarea */}
             <textarea
               ref={textareaRef}
@@ -973,7 +1000,7 @@ export const ChatWindow: React.FC = () => {
               }
               rows={1}
               className="w-full bg-transparent text-sm text-zinc-100 placeholder-zinc-500 resize-none outline-none py-1 px-1.5 max-h-48 leading-relaxed"
-              disabled={isStreaming}
+              disabled={isStreaming || isCompacting}
             />
 
             {/* Bottom action bar */}
@@ -1243,7 +1270,9 @@ export const ChatWindow: React.FC = () => {
                     onClick={() => setIsContextPopoverOpen((prev) => !prev)}
                     className={cn(
                       'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-mono transition-all select-none cursor-pointer',
-                      contextStats.percent >= 85
+                      isCompacting
+                        ? 'bg-violet-500/10 border-violet-500/30 text-violet-300 animate-pulse'
+                        : contextStats.percent >= 85
                         ? 'bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/20'
                         : contextStats.percent >= 65
                         ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20'
@@ -1251,39 +1280,43 @@ export const ChatWindow: React.FC = () => {
                     )}
                     title={`Context used: ~${contextStats.totalLabel} / ${contextStats.maxLabel} tokens (${contextStats.percent}%)`}
                   >
-                    <svg width="13" height="13" viewBox="0 0 16 16" className="flex-shrink-0 -rotate-90">
-                      <circle
-                        cx="8"
-                        cy="8"
-                        r="5.5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.75"
-                        className="opacity-25"
-                      />
-                      <circle
-                        cx="8"
-                        cy="8"
-                        r="5.5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.75"
-                        strokeDasharray={2 * Math.PI * 5.5}
-                        strokeDashoffset={
-                          2 * Math.PI * 5.5 * (1 - Math.min(100, Math.max(contextStats.percent, 4)) / 100)
-                        }
-                        strokeLinecap="round"
-                        className={cn(
-                          'transition-all duration-300',
-                          contextStats.percent >= 85
-                            ? 'text-red-400'
-                            : contextStats.percent >= 65
-                            ? 'text-amber-400'
-                            : 'text-zinc-300'
-                        )}
-                      />
-                    </svg>
-                    <span>{contextStats.percent}%</span>
+                    {isCompacting ? (
+                      <Loader2 size={12} className="animate-spin text-violet-400" />
+                    ) : (
+                      <svg width="13" height="13" viewBox="0 0 16 16" className="flex-shrink-0 -rotate-90">
+                        <circle
+                          cx="8"
+                          cy="8"
+                          r="5.5"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.75"
+                          className="opacity-25"
+                        />
+                        <circle
+                          cx="8"
+                          cy="8"
+                          r="5.5"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.75"
+                          strokeDasharray={2 * Math.PI * 5.5}
+                          strokeDashoffset={
+                            2 * Math.PI * 5.5 * (1 - Math.min(100, Math.max(contextStats.percent, 4)) / 100)
+                          }
+                          strokeLinecap="round"
+                          className={cn(
+                            'transition-all duration-300',
+                            contextStats.percent >= 85
+                              ? 'text-red-400'
+                              : contextStats.percent >= 65
+                              ? 'text-amber-400'
+                              : 'text-zinc-300'
+                          )}
+                        />
+                      </svg>
+                    )}
+                    <span>{isCompacting ? 'Compacting…' : `${contextStats.percent}%`}</span>
                   </button>
 
                   <AnimatePresence>
@@ -1293,7 +1326,7 @@ export const ChatWindow: React.FC = () => {
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         exit={{ opacity: 0, y: 6, scale: 0.96 }}
                         transition={{ duration: 0.14 }}
-                        className="absolute bottom-full mb-2 left-0 w-64 bg-zinc-900/95 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl p-3.5 z-50 select-none pointer-events-auto"
+                        className="absolute bottom-full mb-2 left-0 w-72 bg-zinc-900/95 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl p-3.5 z-50 select-none pointer-events-auto"
                       >
                         <div className="flex items-center justify-between text-xs">
                           <div>
@@ -1349,6 +1382,60 @@ export const ChatWindow: React.FC = () => {
                             <span className="font-mono text-zinc-300">~{contextStats.msgLabel}</span>
                           </div>
                         </div>
+
+                        {/* Warning when context is high (>= 65%) */}
+                        {contextStats.percent >= 65 && (
+                          <div className="mt-3 pt-2.5 border-t border-white/5 flex items-center gap-2 text-[11px] text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded-xl px-2.5 py-1.5">
+                            <span className="text-amber-400 flex-shrink-0">⚠️</span>
+                            <span>Quality may decline as limit nears</span>
+                          </div>
+                        )}
+
+                        {/* Compact Conversation Action */}
+                        <div className="mt-3 pt-2.5 border-t border-white/10 space-y-1.5">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setIsContextPopoverOpen(false);
+                              await compactConversation();
+                            }}
+                            disabled={isCompacting || isStreaming || messages.length < 2}
+                            className={cn(
+                              'w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-medium transition-all select-none cursor-pointer',
+                              isCompacting
+                                ? 'bg-violet-600/30 text-violet-300 border border-violet-500/40 cursor-wait'
+                                : messages.length < 2
+                                ? 'bg-white/5 text-zinc-500 border border-white/5 cursor-not-allowed opacity-60'
+                                : contextStats.percent >= 65
+                                ? 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white shadow-lg shadow-violet-600/25 active:scale-[0.98]'
+                                : 'bg-white/10 hover:bg-white/15 text-zinc-200 border border-white/10 active:scale-[0.98]'
+                            )}
+                          >
+                            {isCompacting ? (
+                              <>
+                                <Loader2 size={13} className="animate-spin text-violet-300" />
+                                <span>Compacting conversation…</span>
+                              </>
+                            ) : (
+                              <>
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-current opacity-80">
+                                  <path d="M4 14h6" />
+                                  <path d="M4 10h6" />
+                                  <path d="M14 4v6" />
+                                  <path d="M10 4v6" />
+                                  <path d="M14 20v-6" />
+                                  <path d="M10 20v-6" />
+                                  <path d="M20 10h-6" />
+                                  <path d="M20 14h-6" />
+                                </svg>
+                                <span>Compact Conversation</span>
+                              </>
+                            )}
+                          </button>
+                          <div className="text-[10px] text-zinc-400 text-center font-mono">
+                            or type <span className="text-zinc-300 font-semibold">/compact</span> in chat
+                          </div>
+                        </div>
                       </motion.div>
                     )}
                   </AnimatePresence>
@@ -1361,6 +1448,11 @@ export const ChatWindow: React.FC = () => {
                   <div className="p-2 rounded-xl bg-violet-600/20 text-violet-400 border border-violet-500/40 flex items-center gap-1.5 text-xs font-medium px-3">
                     <Loader2 size={14} className="animate-spin" />
                     <span>Reading…</span>
+                  </div>
+                ) : isCompacting ? (
+                  <div className="p-2 rounded-xl bg-violet-600/20 text-violet-300 border border-violet-500/40 flex items-center gap-1.5 text-xs font-medium px-3">
+                    <Loader2 size={14} className="animate-spin text-violet-300" />
+                    <span>Compacting…</span>
                   </div>
                 ) : (isStreaming && !isSpeaking) ? (
                   <motion.button

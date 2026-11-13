@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { estimateTokenCount, sanitizeHistory, stripRunawayRepetition, trimHistoryToContext } from '@/lib/chatHistory';
+import { estimateTokenCount, sanitizeHistory, stripRunawayRepetition, trimHistoryToContext, formatCompactTokens, isAttachmentMessage } from '@/lib/chatHistory';
 
 describe('estimateTokenCount', () => {
   it('estimates multimodal image_url parts using fixed vision patch budget instead of raw base64 length', () => {
@@ -209,5 +209,30 @@ describe('trimHistoryToContext', () => {
     const safePromptCeiling = Math.min(maxContext - maxTokens, Math.floor(maxContext * 0.75));
     expect(totalMsgTokens).toBeLessThanOrEqual(safePromptCeiling);
     expect(trimmed[trimmed.length - 1].content).toBe('Answer 55');
+  });
+});
+
+describe('formatCompactTokens', () => {
+  it('formats token numbers cleanly into compact human-readable labels', () => {
+    expect(formatCompactTokens(0)).toBe('0');
+    expect(formatCompactTokens(-1)).toBe('0');
+    expect(formatCompactTokens(775)).toBe('775');
+    expect(formatCompactTokens(4096)).toBe('4K');
+    expect(formatCompactTokens(8192)).toBe('8K');
+    expect(formatCompactTokens(32768)).toBe('32K');
+    expect(formatCompactTokens(5500)).toBe('5.5K');
+    expect(formatCompactTokens(154500)).toBe('155K');
+    expect(formatCompactTokens(200000)).toBe('200K');
+  });
+});
+
+describe('isAttachmentMessage', () => {
+  it('detects user messages containing file attachments, PDFs, or multimodal parts', () => {
+    expect(isAttachmentMessage({ role: 'user', content: '📎 Attached: notes.txt' })).toBe(true);
+    expect(isAttachmentMessage({ role: 'user', content: '--- File: code.py ---\nprint(1)' })).toBe(true);
+    expect(isAttachmentMessage({ role: 'user', api_content: [{ type: 'image_url' }] })).toBe(true);
+    expect(isAttachmentMessage({ role: 'user', content: [{ type: 'image_url' }] })).toBe(true);
+    expect(isAttachmentMessage({ role: 'user', content: 'Just a normal chat message' })).toBe(false);
+    expect(isAttachmentMessage({ role: 'assistant', content: '📎 Attached: file.txt' })).toBe(false);
   });
 });
