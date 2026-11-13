@@ -6,7 +6,7 @@ import { useCanvasStore } from '@/stores/canvasStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { streamChat, WEB_TOOLS, FAST_CHAT_TOOLS, resolveEffectiveContextLength } from '@/lib/api';
 import { tauriApi } from '@/lib/tauri';
-import { sanitizeHistory, trimHistoryToContext } from '@/lib/chatHistory';
+import { sanitizeHistory, trimHistoryToContext, isAttachmentMessage, estimateTokenCount, formatCompactTokens } from '@/lib/chatHistory';
 import { kokoroSpeak, kokoroStop, speechQueue } from '@/lib/kokoroTts';
 import { generateId, extractTextContent } from '@/lib/utils';
 import { Message, ContentPart, ToolDefinition, AppSettings, ToolCall } from '@/types';
@@ -35,9 +35,50 @@ export function isRemoteOrPastedLog(text: string): boolean {
  */
 export function shouldEnableLocalFileToolsInFastChat(text: string): boolean {
   if (!text || isRemoteOrPastedLog(text)) return false;
-  return /\b(find|search|locate|look for|browse|list|show)\b.*\b(file|files|folder|folders|directory|directories|pdf|document|documents|desktop|downloads)\b/i.test(text)
-    || /\b(read|open|inspect|check)\b.*\b(file|document|pdf|csv|json)\b/i.test(text)
-    || /^[~/]|[a-zA-Z]:[/\\]/i.test(text.trim());
+
+  const normalized = text.toLowerCase().replace(/\s+/g, ' ').trim();
+
+  // 1. Explicit folder or location references
+  // e.g. "dowload folder", "downloads folder", "desktop folder", "in downloads", "in my dowload folder", "on my desktop"
+  if (
+    /(?:downloads?|dowloads?|downlaods?|desktop|documents?)\s+(?:folder|dir|directory)/i.test(normalized) ||
+    /\b(?:in|from|inside|on|into|within)\s+(?:(?:the|my|our|this|that|a|user['’]s)\s+)?(?:[\w-]+\s+)*(?:downloads?|dowloads?|downlaods?|desktop|documents?|folder|folders|directory|directories|pc|computer|mac)\b/i.test(normalized) ||
+    /\b(?:my|our|local|pc|computer|mac)\s+(?:downloads?|dowloads?|downlaods?|desktop|documents?|folder|folders|files?|fildes|directory|directories)\b/i.test(normalized)
+  ) {
+    return true;
+  }
+
+  // 2. Actions on files / folders / documents / PDFs (with typo tolerance for listthe, fildes, dowload, etc.)
+  // e.g. "listthe fildes", "list files", "search file", "open file", "analize pdf", "file ... analyze"
+  const hasActionVerb = /\b(?:find|search|locate|located|locating|look\s*for|browse|list\w*|show|display|check|inspect|read|open|view|see|analize|analyze|summarize|explain|tell\s+me\s+about)\b/i.test(normalized);
+  const hasFileOrFolderNoun = /\b(?:files?|fildes|fils|fiels?|flie[s]?|folders?|directories|directory|dirs?|pdfs?|docs?|documents?|downloads\b|desktop)\b/i.test(normalized) ||
+    /(?:downloads?|dowloads?|downlaods?)\s+(?:folder|dir|directory)/i.test(normalized);
+  if (hasActionVerb && hasFileOrFolderNoun) {
+    return true;
+  }
+
+  // 3. Conversational "what is in / what do I have in / contents of" queries
+  if (
+    /\b(?:what(?:'s|\s+is)?|what\s+do\s+(?:i|we)\s+have)\s+(?:in|on|inside)\s+(?:(?:the|my|our|this|that|a)\s+)?(?:[\w-]+\s+)*(?:downloads?|dowloads?|desktop|documents?|folder|directory|computer|pc)\b/i.test(normalized) ||
+    /\bcontents?\s+of\s+(?:(?:the|my|our|this|that|a)\s+)?(?:[\w-]+\s+)*(?:downloads?|dowloads?|desktop|documents?|folder|directory)\b/i.test(normalized)
+  ) {
+    return true;
+  }
+
+  // 4. Demonstrative file references: "the file", "that pdf", "this document", "a file", "the files"
+  if (/\b(?:the|this|that|these|those|a)\s+(?:files?|fildes|documents?|pdfs?|folders?|directory|directories)\b/i.test(normalized)) {
+    return true;
+  }
+
+  // 5. Explicit filesystem paths or file extensions
+  if (
+    /^[~/]|[a-zA-Z]:[/\\]|(?:\/|\.\/)[a-zA-Z0-9_.-]+/i.test(text.trim()) ||
+    /\b[\w-]+\.(?:pdf|docx?|xlsx?|txt|csv|json|stl|3mf|step|md|rs|ts|js|py|log)\b/i.test(normalized)
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -520,6 +561,7 @@ export function useChat() {
     messages,
     activeConversationId,
     isStreaming,
+    isCompacting,
     streamingContent,
     streamingReasoning,
     chatStatus,
@@ -749,11 +791,10 @@ DIRECTIVES:
 1. NATURAL CONVERSATION & GREETINGS: When the user says "hi", "hey", "hello", or engages in casual chat, reply warmly, naturally, and concisely like a normal AI assistant. NEVER list your tools, active modes, capabilities, or connected MCP servers unless the user explicitly asks for them.
 2. SPEED & CLARITY: Respond immediately and articulately without unnecessary conversational filler or throat-clearing.
 3. CONCISE CODE OUTPUT: When asked for code or debugging help, provide clean, self-contained, working code directly. Let clean code speak for itself and conserve tokens. Do not add unsolicited line-by-line tutorials or filler.
-4. LOCAL HOST VS REMOTE / PASTED CONTEXT (CRITICAL):
-   - You run on the user's desktop computer. You DO NOT have access to the user's remote machines, Raspberry Pi, Docker containers, VMs, SSH hosts, or external servers.
-   - When the user pastes logs, shell output, error messages, terminal sessions (e.g. "pi@pi:~$", "docker logs", "root@server:~$"), or code snippets containing file paths (e.g. "/config/...", "/data/...", "ia.ini", ".torrent"), DO NOT search for or read those files on the user's local computer. They do not exist on the user's local host!
-   - Answer directly by analyzing the provided text and error messages. Provide the requested code, configuration, or shell commands for the user to run on their machine or container.
-   - ONLY call local file tools if the user explicitly asks to find or read a file on their own computer (e.g. "find my resume", "read file at /path").
+4. LOCAL DESKTOP TOOLS VS REMOTE CONTEXT:
+   - You run as a desktop AI application on the user's computer. You HAVE direct access to inspect local folders (Downloads, Documents, Desktop) via get_special_dirs and list_directory, search files via search_files, and read local documents/PDFs via read_local_file (or read_file).
+   - When the user asks you to list, inspect, find, check, or read files, documents, or folders on their computer (e.g. "list files in downloads", "what files are on my desktop", "read that pdf"), CALL THE APPROPRIATE TOOL IMMEDIATELY. NEVER tell the user that you don't have direct access to their computer files or tell them to run Terminal commands.
+   - REMOTE / PASTED CONTEXT: When the user pastes logs, shell output, error messages, terminal sessions (e.g. "pi@pi:~$", "docker logs", "root@server:~$"), or code snippets containing file paths (e.g. "/config/...", "/data/..."), DO NOT search for or read those files on the local machine—they exist only on the remote container or server. Answer directly from the provided text.
 5. MANDATORY REAL-TIME WEB SEARCH & TOOL CALLING: You MUST call the \`web_search\` tool BEFORE answering ANY question about current/live prices (e.g. Bitcoin, crypto, stocks, gold), latest/today's news, weather, sports scores, current events, or real-time facts. NEVER guess or fabricate current prices, facts, or source URLs from training memory—even in Voice Mode or when Thinking is off. Never recite your tools unprompted in casual greetings.
 6. WEB SEARCH, ARTICLES & GROUNDING: When searching the web or asked to read news stories or articles, provide a thorough, informative breakdown covering the key details (who, what, when, where, charges, facts, context). State the exact current date/time ("As of ${dateStr} at ${timeStr}...") and ALWAYS conclude with direct clickable Markdown source links formatted under a "### Sources" section at the very end: [Source Title](url) pointing ONLY to exact URLs returned by the \`web_search\` tool.
 7. DIRECT QUIZ & EXAM PROCTORING: When the user asks to be quizzed, practice for an exam, or take a mock test (e.g. asking for "one question at a time"), act directly as the exam proctor. If a study guide or practice exam document is attached in the conversation, ALWAYS use the exact questions and exact A, B, C, D options from the attached document in sequential order. Immediately present the actual subject-matter question with its 4 specific multiple-choice options (A, B, C, D). NEVER reuse or repeat the same multiple-choice options from a previous question. NEVER ask meta-questions about the user's feelings, confidence level, or session goals. Wait for the user's answer before providing the answer key and moving to the next question.
@@ -914,7 +955,7 @@ ${projectBlock}CRITICAL DIRECTIVES:
 
           // Anchor model-supplied paths/roots to the selected project (Agent Coder only)
           if (projectPath) {
-            if (['list_directory', 'read_local_file', 'read_file_range', 'run_python_file', 'write_to_file', 'replace_in_file', 'delete_file'].includes(name)) {
+            if (['list_directory', 'read_local_file', 'read_file', 'open_file', 'read_text_file', 'read_file_range', 'run_python_file', 'write_to_file', 'replace_in_file', 'delete_file'].includes(name)) {
               args = { ...args, path: resolvePath(args.path) };
             } else if (name === 'search_files' || name === 'grep_search') {
               args = { ...args, root: args.root ? resolvePath(args.root) : projectPath };
@@ -1069,11 +1110,12 @@ ${projectBlock}CRITICAL DIRECTIVES:
             } catch (err) {
               result = `Error reading file range for "${args.path}": ${String(err)}. (Note: If this path is from a remote machine, container, or external system, it cannot be read locally. Answer the user directly).`;
             }
-          } else if (name === 'read_local_file') {
+          } else if (name === 'read_local_file' || name === 'read_file' || name === 'open_file' || name === 'read_text_file') {
+            const filePath = args.path || args.file_path || args.filepath || args.file || '';
             try {
-              result = await tauriApi.parseLocalFile(args.path);
+              result = await tauriApi.parseLocalFile(filePath);
             } catch (err) {
-              result = `Error reading local file "${args.path}": ${String(err)}. (Note: If this file is on a remote machine or container, it does not exist on the local computer. Provide the code or solution directly to the user).`;
+              result = `Error reading file "${filePath}": ${String(err)}. (Note: If this file is on a remote machine or container, it does not exist on the local computer. Provide the code or solution directly to the user).`;
             }
           } else if (name === 'run_python') {
             const codeArg = typeof args.code === 'string' ? args.code : JSON.stringify(args.code);
@@ -1384,7 +1426,14 @@ ${projectBlock}CRITICAL DIRECTIVES:
             if (isFastMode) {
               // Chat: lightweight read tools + connected MCP tools
               // If the user pasted remote logs or did not ask for local file operations, exclude local file tools
-              const enableFileTools = shouldEnableLocalFileToolsInFastChat(userDisplayContent);
+              const hasRecentFileToolUsage = conversationMsgs.slice(-4).some((m) =>
+                m.tool_calls?.some((tc) =>
+                  ['search_files', 'list_directory', 'get_special_dirs', 'read_local_file', 'read_file'].includes(tc.function?.name || '')
+                )
+              );
+              const enableFileTools =
+                shouldEnableLocalFileToolsInFastChat(userDisplayContent) ||
+                (!isRemoteOrPastedLog(userDisplayContent) && hasRecentFileToolUsage);
               const fastTools = enableFileTools
                 ? FAST_CHAT_TOOLS
                 : FAST_CHAT_TOOLS.filter((t) => !['search_files', 'list_directory', 'get_special_dirs', 'read_local_file'].includes(t.function.name));
@@ -2147,8 +2196,8 @@ ${projectBlock}CRITICAL DIRECTIVES:
       if (!text) return;
 
       const now = Date.now();
-      if (sendInFlight || useChatStore.getState().isStreaming) {
-        console.warn('[Chat] Ignored send: a response is already in progress.');
+      if (sendInFlight || useChatStore.getState().isStreaming || useChatStore.getState().isCompacting) {
+        console.warn('[Chat] Ignored send: a response or compaction is already in progress.');
         return;
       }
       if (text === lastSentText && now - lastSentAt < DUPLICATE_SEND_WINDOW_MS) {
@@ -2169,6 +2218,182 @@ ${projectBlock}CRITICAL DIRECTIVES:
     [sendMessageUnsafe]
   );
 
+  const compactConversation = useCallback(
+    async (customConvId?: string): Promise<boolean> => {
+      const store = useChatStore.getState();
+      if (store.isStreaming || store.isCompacting) {
+        console.warn('[Compact] Cannot compact while a stream or compaction is in progress.');
+        return false;
+      }
+
+      const targetConvId = customConvId || store.activeConversationId;
+      if (!targetConvId) return false;
+
+      const allConvMsgs = store.messages.filter((m) => m.conversation_id === targetConvId);
+      if (allConvMsgs.length < 2) {
+        console.warn('[Compact] Conversation has fewer than 2 messages. Nothing to compact.');
+        return false;
+      }
+
+      const currentSettings = useSettingsStore.getState().settings;
+      const mode = store.chatMode || 'fast';
+      const activeModel =
+        mode === 'fast'
+          ? (currentSettings.fast_chat_model_id || currentSettings.model_id)
+          : (currentSettings.agent_coder_model_id || currentSettings.model_id);
+
+      if (!activeModel) {
+        console.error('[Compact] No active model selected to perform compaction.');
+        return false;
+      }
+
+      store.setIsCompacting(true);
+      store.setChatStatus('thinking');
+
+      try {
+        // 1. Separate pinned attachments so file/image context is never lost
+        const pinnedAttachments = allConvMsgs.filter(isAttachmentMessage);
+        const cleanedMsgs = sanitizeHistory(allConvMsgs);
+
+        if (cleanedMsgs.length < 2) {
+          console.warn('[Compact] Cleaned history has fewer than 2 messages.');
+          return false;
+        }
+
+        // 2. Format dialogue into concise transcript
+        const transcript = cleanedMsgs
+          .map((m) => {
+            const roleLabel =
+              m.role === 'user'
+                ? 'User'
+                : m.role === 'assistant'
+                ? 'Assistant'
+                : m.role === 'tool'
+                ? 'Tool Result'
+                : 'System';
+
+            const rawContent = (m as any).content;
+            let text = '';
+            if (typeof rawContent === 'string') {
+              text = rawContent;
+            } else if (Array.isArray(rawContent)) {
+              text = rawContent
+                .map((c: any) =>
+                  c?.type === 'text' ? c.text : c?.type === 'image_url' ? '[Image Attachment]' : ''
+                )
+                .join(' ');
+            } else if (m.api_content) {
+              text =
+                typeof m.api_content === 'string'
+                  ? m.api_content
+                  : JSON.stringify(m.api_content);
+            }
+
+            if (text.includes('### ⚠️ Provider Error') || text === '[empty response]') {
+              return '';
+            }
+
+            if (m.tool_calls && m.tool_calls.length > 0) {
+              const toolNames = m.tool_calls
+                .map((tc) => tc.function?.name)
+                .filter(Boolean)
+                .join(', ');
+              text += `\n[Tools executed: ${toolNames}]`;
+            }
+
+            return `${roleLabel}: ${text.trim()}`;
+          })
+          .filter(Boolean)
+          .join('\n\n');
+
+        const systemPrompt = `You are an expert conversation summarizer and state synthesizer.
+Your task is to distill the conversation history into a structured, high-density Memory Ledger that preserves all critical context, user directives, facts, decisions, and continuity.
+
+Produce a concise yet comprehensive summary in Markdown using this exact structure:
+
+### 📌 Core Directives & User Preferences
+- Explicit user instructions, rules, constraints, formatting preferences, or behavioral directives.
+
+### 🧠 Key Knowledge & Established Facts
+- Concrete answers, verified information, code architectures, formulas, or data points discussed.
+
+### 📝 Progress & History
+- Completed tasks, decisions made, topics covered, test/quiz results or scores (if applicable).
+
+### 🎯 Current State & Active Focus
+- What the user is currently working on, the immediate next step or unresolved question.
+
+Guidelines:
+- Be objective, dense, and precise.
+- Do NOT invent facts or details not present in the dialogue.
+- Keep critical code snippets, file paths, or technical specifications intact if they are reference items.`;
+
+        const compactionMessages = [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: `Here is the conversation history to compact:\n\n${transcript}\n\nSynthesize this into the structured Memory Ledger now.`,
+          },
+        ];
+
+        const controller = new AbortController();
+        const effectiveSettings = {
+          ...currentSettings,
+          model_id: activeModel,
+          think_enabled: false,
+          max_tokens: 4096,
+        };
+
+        let summary = '';
+        for await (const chunk of streamChat(effectiveSettings, compactionMessages, controller.signal, [], true)) {
+          const delta = chunk?.choices?.[0]?.delta?.content;
+          if (delta) summary += delta;
+        }
+
+        const trimmedSummary = summary.trim();
+        if (!trimmedSummary) {
+          throw new Error('Received empty summary from model');
+        }
+
+        // 3. Compute token savings
+        const beforeTokens = allConvMsgs.reduce(
+          (acc, m) => acc + estimateTokenCount(m.api_content || m.content) + 12,
+          0
+        );
+        const afterTokens = estimateTokenCount(trimmedSummary);
+        const tokensSaved = Math.max(0, beforeTokens - afterTokens);
+
+        // 4. Construct compacted milestone message
+        const compactedMessage: Message = {
+          id: generateId(),
+          conversation_id: targetConvId,
+          role: 'assistant',
+          content: `🗜️ **Conversation Compacted**\n*Memory ledger created • Saved ~${formatCompactTokens(tokensSaved)} tokens*\n\n${trimmedSummary}`,
+          created_at: Date.now(),
+        };
+
+        // 5. Update messages: pinned attachments + compacted assistant message
+        const otherMsgs = useChatStore.getState().messages.filter((m) => m.conversation_id !== targetConvId);
+        const newConvMsgs = [...pinnedAttachments, compactedMessage];
+
+        useChatStore.getState().setMessages([...otherMsgs, ...newConvMsgs]);
+        useChatStore.getState().updateConversation(targetConvId, { updated_at: Date.now() });
+
+        console.log(
+          `[Compact] Successfully compacted ${allConvMsgs.length} messages into memory ledger. Saved ~${tokensSaved} tokens.`
+        );
+        return true;
+      } catch (err) {
+        console.error('[Compact] Failed to compact conversation:', err);
+        return false;
+      } finally {
+        useChatStore.getState().setIsCompacting(false);
+        useChatStore.getState().setChatStatus('idle');
+      }
+    },
+    []
+  );
+
   const handleStopStreaming = useCallback(() => {
     speechQueue.stop();
     stopStreaming();
@@ -2177,10 +2402,12 @@ ${projectBlock}CRITICAL DIRECTIVES:
   return {
     messages: messages.filter(m => m.conversation_id === activeConversationId),
     isStreaming,
+    isCompacting,
     streamingContent,
     streamingReasoning,
     chatStatus,
     sendMessage,
+    compactConversation,
     stopStreaming: handleStopStreaming,
   };
 }

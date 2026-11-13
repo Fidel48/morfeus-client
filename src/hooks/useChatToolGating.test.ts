@@ -33,6 +33,15 @@ No connection adapters were found for 'rgsx+torrent://download?source=https%3A%2
     expect(shouldEnableLocalFileToolsInFastChat('search for file report.docx')).toBe(true);
     expect(shouldEnableLocalFileToolsInFastChat('list files in ~/Documents')).toBe(true);
     expect(shouldEnableLocalFileToolsInFastChat('read file /Users/admin/notes.txt')).toBe(true);
+    expect(shouldEnableLocalFileToolsInFastChat('in the dowload folder there is a file called live scan can you analize and tell me what it is ?')).toBe(true);
+    expect(shouldEnableLocalFileToolsInFastChat('does the files mention a location at Durham if so can you give me the address of the office for durham NC')).toBe(true);
+    expect(shouldEnableLocalFileToolsInFastChat('can you listthe fildes i have located in my dowload folder please')).toBe(true);
+    expect(shouldEnableLocalFileToolsInFastChat('can you list the files i have on my dowload folders')).toBe(true);
+    expect(shouldEnableLocalFileToolsInFastChat('what files are in my downloads')).toBe(true);
+    expect(shouldEnableLocalFileToolsInFastChat('what do i have in my downloads folder')).toBe(true);
+    expect(shouldEnableLocalFileToolsInFastChat('whats on my desktop')).toBe(true);
+    expect(shouldEnableLocalFileToolsInFastChat('check my documents folder')).toBe(true);
+    expect(shouldEnableLocalFileToolsInFastChat('show my files')).toBe(true);
   });
 
   it('keeps local file tools disabled for general chat and questions', () => {
